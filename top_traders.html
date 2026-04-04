@@ -3,22 +3,77 @@
         <head>
             <title>Top Polymarket Traders</title>
             <style>
-                table { border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; }
+                body { font-family: Arial, sans-serif; margin: 20px; }
+                table { border-collapse: collapse; width: 100%; }
                 th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
-                th { background-color: #f2f2f2; }
+                th { background-color: #f2f2f2; cursor: pointer; }
                 tr:nth-child(even) { background-color: #f9f9f9; }
                 tr:hover { background-color: #ddd; }
+                th.sort-asc::after { content: " \25B2"; }
+                th.sort-desc::after { content: " \25BC"; }
+                #filterInput { margin-bottom: 20px; padding: 10px; width: 50%; font-size: 16px; }
             </style>
+            <script>
+            document.addEventListener('DOMContentLoaded', function () {
+                const table = document.getElementById('tradersTable');
+                const headers = table.querySelectorAll('th');
+                const filterInput = document.getElementById('filterInput');
+
+                // Sorting
+                headers.forEach((header, index) => {
+                    header.addEventListener('click', () => {
+                        const tbody = table.querySelector('tbody');
+                        const rows = Array.from(tbody.querySelectorAll('tr'));
+                        const isAscending = header.classList.contains('sort-asc');
+                        const multiplier = isAscending ? -1 : 1;
+
+                        rows.sort((rowA, rowB) => {
+                            const cellA = rowA.children[index].textContent.trim();
+                            const cellB = rowB.children[index].textContent.trim();
+
+                            const valA = isNaN(cellA) ? cellA : parseFloat(cellA);
+                            const valB = isNaN(cellB) ? cellB : parseFloat(cellB);
+
+                            if (valA < valB) return -1 * multiplier;
+                            if (valA > valB) return 1 * multiplier;
+                            return 0;
+                        });
+
+                        headers.forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
+                        header.classList.add(isAscending ? 'sort-desc' : 'sort-asc');
+
+                        rows.forEach(row => tbody.appendChild(row));
+                    });
+                });
+
+                // Filtering
+                filterInput.addEventListener('keyup', function() {
+                    const filterValue = filterInput.value.toLowerCase();
+                    const tbody = table.querySelector('tbody');
+                    const rows = tbody.querySelectorAll('tr');
+
+                    rows.forEach(row => {
+                        const textContent = row.textContent.toLowerCase();
+                        if (textContent.includes(filterValue)) {
+                            row.style.display = '';
+                        } else {
+                            row.style.display = 'none';
+                        }
+                    });
+                });
+            });
+            </script>
         </head>
         <body>
             <h2>Top Polymarket Traders</h2>
-            <p>Traders with a high win rate, regular activity, active > 2 months, low frequency of <3h trades, and >= $2000 PNL in the last 2 months.</p>
-            <table border="1" class="dataframe">
+            <p>Traders with a high win rate, regular activity, active > 2 months, low frequency of &lt;3h trades, and >= $2000 PNL in the last 2 months.</p>
+            <p><strong>Note:</strong> Click on any column header to sort the table.</p>
+            <input type="text" id="filterInput" placeholder="Filter traders by searching any text (e.g., 'Politics', wallet address)..." />
+            <table border="1" class="dataframe" id="tradersTable">
   <thead>
     <tr style="text-align: center;">
       <th>userName</th>
       <th>proxyWallet</th>
-      <th>rank</th>
       <th>pnl</th>
       <th>roi_percentage</th>
       <th>total_deals</th>
@@ -26,44 +81,81 @@
       <th>short_hold_percentage</th>
       <th>recent_pnl</th>
       <th>active_duration_days</th>
+      <th>unique_markets_traded</th>
+      <th>avg_trades_per_market</th>
+      <th>most_common_market</th>
     </tr>
   </thead>
   <tbody>
     <tr>
       <td>Macks22</td>
       <td>0x1057e7d3ddafc60a4aeb10a2bc5b543792449ea5</td>
-      <td>140</td>
-      <td>838616.48</td>
-      <td>19.57</td>
-      <td>68</td>
+      <td>838334.58</td>
+      <td>19.56</td>
+      <td>85</td>
       <td>100.00</td>
       <td>7.35</td>
-      <td>285688.89</td>
+      <td>217325.49</td>
       <td>61.85</td>
+      <td>85</td>
+      <td>10.51</td>
+      <td>Will Kanye tweet again by March 31?</td>
     </tr>
     <tr>
       <td>primm</td>
       <td>0xd38b71f3e8ed1af71983e5c309eac3dfa9b35029</td>
-      <td>32</td>
       <td>2625262.16</td>
       <td>8.08</td>
-      <td>107</td>
+      <td>206</td>
       <td>100.00</td>
       <td>0.00</td>
-      <td>169542.34</td>
+      <td>2190.86</td>
       <td>125.80</td>
+      <td>206</td>
+      <td>4.21</td>
+      <td>Spread: Eagles (-4.5)</td>
+    </tr>
+    <tr>
+      <td>pwnatorul</td>
+      <td>0x3eba55f41f4064bc4b070d06a00fec7c2dd5849a</td>
+      <td>168744.38</td>
+      <td>3.05</td>
+      <td>36</td>
+      <td>96.88</td>
+      <td>6.25</td>
+      <td>17769.17</td>
+      <td>151.94</td>
+      <td>36</td>
+      <td>26.86</td>
+      <td>Will Bitcoin reach $90,000 in April?</td>
+    </tr>
+    <tr>
+      <td>Magamyman</td>
+      <td>0x4dfd481c16d9995b809780fd8a9808e8689f6e4a</td>
+      <td>712600.58</td>
+      <td>17.36</td>
+      <td>99</td>
+      <td>95.45</td>
+      <td>0.00</td>
+      <td>481074.96</td>
+      <td>542.64</td>
+      <td>99</td>
+      <td>7.28</td>
+      <td>Israel military response against Iran by Friday?</td>
     </tr>
     <tr>
       <td>beachboy4</td>
       <td>0xc2e7800b5af46e6093872b177b7a5e7f0563be51</td>
-      <td>20</td>
-      <td>3830450.38</td>
+      <td>3830450.29</td>
       <td>1.90</td>
-      <td>21</td>
+      <td>34</td>
       <td>95.24</td>
       <td>4.76</td>
-      <td>6206958.07</td>
+      <td>4073201.95</td>
       <td>67.15</td>
+      <td>34</td>
+      <td>26.38</td>
+      <td>Spread: Raptors (-13.5)</td>
     </tr>
   </tbody>
 </table>

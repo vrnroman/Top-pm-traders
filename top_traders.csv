@@ -1,4 +1,6 @@
-userName,proxyWallet,rank,pnl,roi_percentage,total_deals,win_rate,short_hold_percentage,recent_pnl,active_duration_days
-Macks22,0x1057e7d3ddafc60a4aeb10a2bc5b543792449ea5,140,838616.48,19.57,68,100.0,7.35,285688.89,61.85
-primm,0xd38b71f3e8ed1af71983e5c309eac3dfa9b35029,32,2625262.16,8.08,107,100.0,0.0,169542.34,125.8
-beachboy4,0xc2e7800b5af46e6093872b177b7a5e7f0563be51,20,3830450.38,1.9,21,95.24,4.76,6206958.07,67.15
+userName,proxyWallet,pnl,roi_percentage,total_deals,win_rate,short_hold_percentage,recent_pnl,active_duration_days,unique_markets_traded,avg_trades_per_market,most_common_market
+Macks22,0x1057e7d3ddafc60a4aeb10a2bc5b543792449ea5,838334.58,19.56,85,100.0,7.35,217325.49,61.85,85,10.51,Will Kanye tweet again by March 31?
+primm,0xd38b71f3e8ed1af71983e5c309eac3dfa9b35029,2625262.16,8.08,206,100.0,0.0,2190.86,125.8,206,4.21,Spread: Eagles (-4.5)
+pwnatorul,0x3eba55f41f4064bc4b070d06a00fec7c2dd5849a,168744.38,3.05,36,96.88,6.25,17769.17,151.94,36,26.86,"Will Bitcoin reach $90,000 in April?"
+Magamyman,0x4dfd481c16d9995b809780fd8a9808e8689f6e4a,712600.58,17.36,99,95.45,0.0,481074.96,542.64,99,7.28,Israel military response against Iran by Friday?
+beachboy4,0xc2e7800b5af46e6093872b177b7a5e7f0563be51,3830450.29,1.9,34,95.24,4.76,4073201.95,67.15,34,26.38,Spread: Raptors (-13.5)

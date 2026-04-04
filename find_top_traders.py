@@ -21,39 +21,49 @@ def fetch_leaderboard():
     total_combinations = len(categories) * len(time_periods) * len(order_bys)
     completed_combinations = 0
 
-    for c in categories:
-        for t in time_periods:
-            for o in order_bys:
-                completed_combinations += 1
-                for offset in range(0, max_offset, limit):
-                    url = f"https://data-api.polymarket.com/v1/leaderboard?category={c}&timePeriod={t}&orderBy={o}&limit={limit}&offset={offset}"
-                    try:
-                        response = requests.get(url, timeout=10)
-                        if response.status_code == 200:
-                            data = response.json()
-                            if not data:
-                                break
-
-                            # API loop detection: if offset > 0 but first item matches last batch, API is looping.
-                            if offset >= limit:
-                                first_wallet_new = data[0].get('proxyWallet')
-                                if first_wallet_new == last_first_wallet:
-                                    break
-
-                            last_first_wallet = data[0].get('proxyWallet') if data else None
-
-                            for row in data:
-                                wallet = row.get('proxyWallet')
-                                if wallet and wallet not in unique_traders:
-                                    unique_traders[wallet] = row
-                        else:
-                            break
-                    except Exception:
+    def fetch_combination(combo):
+        c, t, o = combo
+        local_traders = {}
+        last_first_wallet = None
+        for offset in range(0, max_offset, limit):
+            url = f"https://data-api.polymarket.com/v1/leaderboard?category={c}&timePeriod={t}&orderBy={o}&limit={limit}&offset={offset}"
+            try:
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    if not data:
                         break
 
-                    time.sleep(0.01)
+                    if offset >= limit:
+                        first_wallet_new = data[0].get('proxyWallet')
+                        if first_wallet_new == last_first_wallet:
+                            break
 
-                print(f"Progress: [{completed_combinations}/{total_combinations}] Combinations. Unique traders so far: {len(unique_traders)}", end='\r')
+                    last_first_wallet = data[0].get('proxyWallet') if data else None
+
+                    for row in data:
+                        wallet = row.get('proxyWallet')
+                        if wallet:
+                            local_traders[wallet] = row
+                else:
+                    break
+            except Exception:
+                break
+            time.sleep(0.01)
+        return local_traders
+
+    combos = [(c, t, o) for c in categories for t in time_periods for o in order_bys]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(fetch_combination, combo): combo for combo in combos}
+        for future in concurrent.futures.as_completed(futures):
+            completed_combinations += 1
+            try:
+                result = future.result()
+                unique_traders.update(result)
+            except Exception:
+                pass
+            print(f"Progress: [{completed_combinations}/{total_combinations}] Combinations. Unique traders so far: {len(unique_traders)}", end='\r')
 
     print(f"\nSuccessfully fetched {len(unique_traders)} unique top traders from leaderboard permutations.")
     return list(unique_traders.values())
