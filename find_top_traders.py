@@ -54,7 +54,7 @@ def fetch_leaderboard():
 
     combos = [(c, t, o) for c in categories for t in time_periods for o in order_bys]
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
         futures = {executor.submit(fetch_combination, combo): combo for combo in combos}
         for future in concurrent.futures.as_completed(futures):
             completed_combinations += 1
@@ -232,7 +232,7 @@ def process_traders():
     analyzed_traders = []
 
     print(f"Beginning concurrent analysis of {len(promising_traders)} traders...")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
         futures = {executor.submit(process_single_trader, t): t for t in promising_traders}
 
         done_count = 0
