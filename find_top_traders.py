@@ -108,6 +108,9 @@ def analyze_trader_deals(wallet, proxy_wallet, all_activity):
         deal_latest = 0
 
         condition_trades_count = 0
+        has_redeem = False
+        redeem_ts = 0
+        first_trade_ts = float('inf')
 
         for act in activities:
             ts = act['timestamp']
@@ -117,6 +120,7 @@ def analyze_trader_deals(wallet, proxy_wallet, all_activity):
             deal_latest = max(deal_latest, ts)
 
             if act['type'] == 'TRADE':
+                first_trade_ts = min(first_trade_ts, ts)
                 condition_trades_count += 1
                 total_trades_count += 1
                 if act.get('side') == 'BUY':
@@ -124,6 +128,8 @@ def analyze_trader_deals(wallet, proxy_wallet, all_activity):
                 elif act.get('side') == 'SELL':
                     sell_revenue += act.get('usdcSize', 0)
             elif act['type'] == 'REDEEM':
+                has_redeem = True
+                redeem_ts = max(redeem_ts, ts)
                 sell_revenue += act.get('usdcSize', 0)
 
         profit = sell_revenue - buy_cost
@@ -143,6 +149,8 @@ def analyze_trader_deals(wallet, proxy_wallet, all_activity):
                 'hold_time_hours': hold_time_seconds / 3600,
                 'is_profitable': is_profitable,
                 'is_resolved': is_resolved,
+                'has_redeem': has_redeem,
+                'redeem_hold_time_days': (redeem_ts - first_trade_ts) / (24 * 3600) if has_redeem and first_trade_ts < float('inf') else 0,
                 'latest_ts': deal_latest,
                 'trades_count': condition_trades_count
             }
@@ -176,23 +184,36 @@ def process_single_trader(t):
         stats = analyze_trader_deals(None, proxy_wallet, activity)
 
         deals = stats['deals']
-        total_deals = len(deals)
         active_days = stats['active_duration_days']
         recent_pnl = stats['recent_pnl']
         total_trades = stats['total_trades_count']
+        unique_markets = len(deals)
 
         win_rate = 0
         short_hold_percentage = 0
-        if total_deals > 0:
+        percent_redeemed = 0
+        percent_long_hold_redeem = 0
+
+        if unique_markets > 0:
             resolved_deals = [d for d in deals if d['is_resolved']]
             resolved_count = len(resolved_deals)
+
+            redeem_deals = [d for d in deals if d.get('has_redeem')]
+            redeem_count = len(redeem_deals)
+
             if resolved_count > 0:
                 profitable_deals = sum(1 for d in resolved_deals if d['is_profitable'])
                 win_rate = (profitable_deals / resolved_count) * 100
                 short_holds = sum(1 for d in resolved_deals if d['hold_time_hours'] < 3)
                 short_hold_percentage = (short_holds / resolved_count) * 100
 
-        unique_markets = len(deals)
+            if unique_markets > 0:
+                percent_redeemed = (redeem_count / unique_markets) * 100
+
+            if redeem_count > 0:
+                long_redeems = sum(1 for d in redeem_deals if d.get('redeem_hold_time_days', 0) > 30)
+                percent_long_hold_redeem = (long_redeems / redeem_count) * 100
+
         avg_trades_per_market = (total_trades / unique_markets) if unique_markets > 0 else 0
 
         # Calculate most common market
@@ -201,13 +222,15 @@ def process_single_trader(t):
         if market_titles:
             most_common_market = collections.Counter(market_titles).most_common(1)[0][0]
 
-        t['total_deals'] = total_deals
+        t['total_trades'] = total_trades
         t['active_duration_days'] = active_days
         t['recent_pnl'] = recent_pnl
         t['win_rate'] = win_rate
         t['short_hold_percentage'] = short_hold_percentage
         t['unique_markets_traded'] = unique_markets
         t['avg_trades_per_market'] = avg_trades_per_market
+        t['percent_redeemed'] = percent_redeemed
+        t['percent_long_hold_redeem'] = percent_long_hold_redeem
         t['most_common_market'] = most_common_market
         return t
     except Exception as e:
@@ -257,10 +280,10 @@ def process_traders():
     for t in analyzed_traders:
         if t['active_duration_days'] < 60:
             continue
-        if t['total_deals'] < 8:
+        if t['total_trades'] < 8:
             continue
-        deals_per_week = t['total_deals'] / (t['active_duration_days'] / 7)
-        if deals_per_week < 1:
+        trades_per_week = t['total_trades'] / (t['active_duration_days'] / 7)
+        if trades_per_week < 1:
             continue
         if t['short_hold_percentage'] > 15:
             continue
@@ -284,7 +307,7 @@ def main():
     if final_traders:
         df = pd.DataFrame(final_traders)
         # Select important columns
-        cols = ['userName', 'proxyWallet', 'pnl', 'roi_percentage', 'total_deals', 'win_rate', 'short_hold_percentage', 'recent_pnl', 'active_duration_days', 'unique_markets_traded', 'avg_trades_per_market', 'most_common_market']
+        cols = ['userName', 'proxyWallet', 'pnl', 'roi_percentage', 'total_trades', 'win_rate', 'short_hold_percentage', 'recent_pnl', 'active_duration_days', 'unique_markets_traded', 'avg_trades_per_market', 'percent_redeemed', 'percent_long_hold_redeem', 'most_common_market']
 
         df_out = df[cols].copy()
         df_out['pnl'] = df_out['pnl'].round(2)
@@ -294,6 +317,8 @@ def main():
         df_out['recent_pnl'] = df_out['recent_pnl'].round(2)
         df_out['active_duration_days'] = df_out['active_duration_days'].round(2)
         df_out['avg_trades_per_market'] = df_out['avg_trades_per_market'].round(2)
+        df_out['percent_redeemed'] = df_out['percent_redeemed'].round(2)
+        df_out['percent_long_hold_redeem'] = df_out['percent_long_hold_redeem'].round(2)
 
         # Sort by Win Rate and Recent PNL
         df_out = df_out.sort_values(by=['win_rate', 'recent_pnl'], ascending=[False, False])
