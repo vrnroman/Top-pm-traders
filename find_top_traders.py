@@ -4,37 +4,58 @@ import time
 from datetime import datetime, timezone
 import collections
 from tabulate import tabulate
-import json
+import concurrent.futures
+import traceback
 
-def fetch_leaderboard(max_traders=500):
+def fetch_leaderboard():
     limit = 50
+    # API caps at 10000 offset roughly
+    max_traders = 10000
     all_traders = []
 
+    print(f"Fetching up to {max_traders} traders from leaderboard (maximum allowed by Polymarket API)...")
+
+    # We will fetch sequentially to avoid hitting rate limits on the leaderboard endpoint
     for offset in range(0, max_traders, limit):
         url = f"https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=ALL&orderBy=PNL&limit={limit}&offset={offset}"
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json()
-            if not data:
-                break
-            all_traders.extend(data)
-        else:
-            print(f"Error fetching leaderboard: {response.status_code}")
-            break
-        time.sleep(0.1)
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if not data:
+                    break
 
-    return all_traders
+                # Break if the API just loops
+                if len(all_traders) >= limit:
+                    first_wallet_new = data[0].get('proxyWallet')
+                    first_wallet_old = all_traders[-limit].get('proxyWallet')
+                    if first_wallet_new == first_wallet_old:
+                        break
+
+                all_traders.extend(data)
+            else:
+                break
+        except Exception:
+            break
+
+        time.sleep(0.01)
+        if len(all_traders) % 1000 == 0:
+            print(f"Fetched {len(all_traders)} leaderboard entries...", end='\r')
+
+    unique_traders = {t['proxyWallet']: t for t in all_traders if 'proxyWallet' in t}
+    print(f"\nSuccessfully fetched {len(unique_traders)} unique top traders from leaderboard.")
+    return list(unique_traders.values())
 
 def fetch_all_activity(wallet):
     all_activity = []
     url = f"https://data-api.polymarket.com/activity?user={wallet}&limit=10000"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=15)
         if response.status_code == 200:
             data = response.json()
             all_activity.extend(data)
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching activity for {wallet}: {e}")
+    except Exception:
+        pass
     return all_activity
 
 def analyze_trader_deals(wallet, proxy_wallet, all_activity):
@@ -106,36 +127,15 @@ def analyze_trader_deals(wallet, proxy_wallet, all_activity):
         'latest_activity': latest_time
     }
 
-def process_traders():
-    # To get best results, we fetch top 1000
-    print("Fetching top traders leaderboard (up to 1000 traders)...")
-    traders = fetch_leaderboard(max_traders=1000)
-    print(f"Fetched {len(traders)} total traders from leaderboard.")
-
-    promising_traders = []
-    for t in traders:
-        vol = t.get('vol', 0)
-        pnl = t.get('pnl', 0)
-        if vol > 0 and pnl > 2000:
-            roi = (pnl / vol) * 100
-            t['roi_percentage'] = roi
-            promising_traders.append(t)
-
-    print(f"Filtered down to {len(promising_traders)} traders with basic >$2000 PNL criteria.")
-
-    analyzed_traders = []
-    total = len(promising_traders)
-    for i, t in enumerate(promising_traders):
+def process_single_trader(t):
+    try:
         proxy_wallet = t.get('proxyWallet')
         if not proxy_wallet:
-            continue
-
-        if i % 10 == 0:
-            print(f"[{i+1}/{total}] Analyzing trades...", end='\r')
+            return None
 
         activity = fetch_all_activity(proxy_wallet)
         if not activity:
-            continue
+            return None
 
         stats = analyze_trader_deals(None, proxy_wallet, activity)
 
@@ -157,11 +157,50 @@ def process_traders():
         t['recent_pnl'] = recent_pnl
         t['win_rate'] = win_rate
         t['short_hold_percentage'] = short_hold_percentage
-        analyzed_traders.append(t)
+        return t
+    except Exception as e:
+        pass
+    return None
 
-    print("\nFinished API analysis.")
+def process_traders():
+    traders = fetch_leaderboard()
 
-    print("\nApplying detailed heuristics filters...")
+    promising_traders = []
+    for t in traders:
+        vol = t.get('vol', 0)
+        pnl = t.get('pnl', 0)
+        # Process those with >$2000 PNL overall as baseline
+        if vol > 0 and pnl > 2000:
+            roi = (pnl / vol) * 100
+            t['roi_percentage'] = roi
+            promising_traders.append(t)
+
+    print(f"Filtered down to {len(promising_traders)} traders with basic >$2000 overall PNL criteria.")
+
+    analyzed_traders = []
+
+    print(f"Beginning concurrent analysis of {len(promising_traders)} traders...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+        futures = {executor.submit(process_single_trader, t): t for t in promising_traders}
+
+        done_count = 0
+        total = len(futures)
+
+        for future in concurrent.futures.as_completed(futures):
+            done_count += 1
+            if done_count % 100 == 0:
+                print(f"Processed {done_count}/{total} traders...", end='\r')
+
+            try:
+                result = future.result()
+                if result:
+                    analyzed_traders.append(result)
+            except Exception:
+                pass
+
+    print(f"\nFinished API analysis. Total analyzed with data: {len(analyzed_traders)}")
+
+    print("Applying detailed heuristics filters...")
     final_traders = []
     for t in analyzed_traders:
         if t['active_duration_days'] < 60:
@@ -195,10 +234,7 @@ def main():
         # Select important columns
         cols = ['userName', 'proxyWallet', 'rank', 'pnl', 'roi_percentage', 'total_deals', 'win_rate', 'short_hold_percentage', 'recent_pnl', 'active_duration_days']
 
-        # Add proxyWallet explicitly if not displayed
         df_out = df[cols].copy()
-
-        # Round decimals
         df_out['pnl'] = df_out['pnl'].round(2)
         df_out['roi_percentage'] = df_out['roi_percentage'].round(2)
         df_out['win_rate'] = df_out['win_rate'].round(2)
@@ -206,11 +242,12 @@ def main():
         df_out['recent_pnl'] = df_out['recent_pnl'].round(2)
         df_out['active_duration_days'] = df_out['active_duration_days'].round(2)
 
-        # CSV
+        # Sort by Win Rate and Recent PNL
+        df_out = df_out.sort_values(by=['win_rate', 'recent_pnl'], ascending=[False, False])
+
         df_out.to_csv('top_traders.csv', index=False)
         print("Saved to top_traders.csv")
 
-        # Markdown
         markdown_str = tabulate(df_out, headers='keys', tablefmt='pipe', showindex=False)
         with open('top_traders.md', 'w') as f:
             f.write("# Top Polymarket Traders\n\n")
@@ -218,7 +255,6 @@ def main():
             f.write(markdown_str)
         print("Saved to top_traders.md")
 
-        # HTML
         html_str = df_out.to_html(index=False, justify='center')
         html_template = f"""
         <html>
