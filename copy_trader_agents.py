@@ -24,6 +24,19 @@ class ScoutAgent:
         self.time_periods = ['ALL', '1Y', '1M', '1W', '1D']
         self.order_bys = ['PNL', 'VOL']
 
+    def load_from_csv(self, filepath='top_traders.csv'):
+        """Loads candidate traders from an existing CSV file if available."""
+        if os.path.exists(filepath):
+            print(f"ScoutAgent: Loading existing candidates from {filepath}...")
+            try:
+                df = pd.read_csv(filepath)
+                # Convert DataFrame to list of dicts, ensuring proxyWallet exists
+                if 'proxyWallet' in df.columns:
+                    return df.to_dict('records')
+            except Exception as e:
+                print(f"Failed to load {filepath}: {e}")
+        return None
+
     def fetch_leaderboard_combinations(self):
         """Bypasses 10k limit by iterating over combinations."""
         print(f"ScoutAgent: Fetching traders using leaderboard permutations...")
@@ -333,11 +346,20 @@ class Orchestrator:
         print("Running Ecosystem...")
 
         # Step 1: Scout Candidates
-        all_candidates = self.scout.fetch_leaderboard_combinations()
+        # Try loading from existing CSV first to save API calls
+        all_candidates = self.scout.load_from_csv('top_traders.csv')
 
-        # Basic filter to save time: Only positive PNL > $5000
-        filtered_candidates = [t for t in all_candidates if t.get('pnl', 0) > 5000]
-        print(f"Filtered to {len(filtered_candidates)} candidates with >$5000 PNL.")
+        if all_candidates:
+            print(f"Loaded {len(all_candidates)} candidates from existing CSV.")
+            # If loaded from our specific CSV format, we might already have good candidates
+            # Let's filter slightly just in case
+            filtered_candidates = [t for t in all_candidates if t.get('pnl', 0) > 2000]
+        else:
+            print("No CSV found. Fetching from leaderboard API...")
+            all_candidates = self.scout.fetch_leaderboard_combinations()
+            # Basic filter to save time: Only positive PNL > $5000
+            filtered_candidates = [t for t in all_candidates if t.get('pnl', 0) > 5000]
+            print(f"Filtered to {len(filtered_candidates)} candidates with >$5000 PNL.")
 
         # Step 2: Backtest
         processed_candidates = []

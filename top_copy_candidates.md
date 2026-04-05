@@ -2,15 +2,15 @@
 
 These traders have survived a backtest accounting for dynamic slippage and gas fees.
 
-| proxyWallet                                |              pnl |   simulated_recent_pnl |   simulated_roi |   simulated_trades | inferred_category   | llm_assessment                  |
-|:-------------------------------------------|-----------------:|-----------------------:|----------------:|-------------------:|:--------------------|:--------------------------------|
-| 0xf705fa045201391d9632b7f3cde06a5e24453ca7 |      1.86936e+06 |              952565    |          186.51 |                824 | OTHER               | Profile unvailable: No API key. |
-| 0xde17f7144fbd0eddb2679132c10ff5e74b120988 | 726822           |              553620    |          633.19 |                740 | OTHER               | Profile unvailable: No API key. |
-| 0xfeb581080aee6dc26c264a647b30a9cd44d5a393 | 491726           |               57373.5  |          112.57 |                279 | OTHER               | Profile unvailable: No API key. |
-| 0x1d0034134e339a309700ff2d34e99fa2d48b0313 | 799841           |               46381    |          171.02 |                913 | OTHER               | Profile unvailable: No API key. |
-| 0xe9c6312464b52aa3eff13d822b003282075995c9 | 779761           |               21406    |          570.29 |                 93 | OTHER               | Profile unvailable: No API key. |
-| 0x1979ae6b7e6534de9c4539d0c205e582ca637c9d |      1.13574e+06 |               14315.3  |          108.48 |                959 | OTHER               | Profile unvailable: No API key. |
-| 0x63ce342161250d705dc0b16df89036c8e5f9ba9a |      2.38278e+06 |               14107.2  |          100.71 |                951 | OTHER               | Profile unvailable: No API key. |
-| 0x0ea574f3204c5c9c0cdead90392ea0990f4d17e4 | 580359           |               10842.2  |           42.66 |                979 | OTHER               | Profile unvailable: No API key. |
-| 0x55be7aa03ecfbe37aa5460db791205f7ac9ddca3 | 986438           |                5183.93 |         1788    |                 16 | OTHER               | Profile unvailable: No API key. |
-| 0xe00740bce98a594e26861838885ab310ec3b548c | 812270           |                3798.14 |           60.18 |                975 | OTHER               | Profile unvailable: No API key. |
+| proxyWallet                                |      pnl |   simulated_recent_pnl |   simulated_roi |   simulated_trades | inferred_category   | llm_assessment                  |
+|:-------------------------------------------|---------:|-----------------------:|----------------:|-------------------:|:--------------------|:--------------------------------|
+| 0x1057e7d3ddafc60a4aeb10a2bc5b543792449ea5 | 838335   |               243739   |           51.55 |                646 | OTHER               | Profile unvailable: No API key. |
+| 0xfe144d42554dd872c4dedaf1a870247d274b11ee | 276487   |               131994   |           47.14 |                 38 | OTHER               | Profile unvailable: No API key. |
+| 0x34b9c22d6c809fa50ff927d3c07c7a49193151f6 |  91638   |                98862   |           26.85 |                478 | OTHER               | Profile unvailable: No API key. |
+| 0x19e27eeb3641ae664e77dbb80c86021f048ece3c |  82835.6 |                64606.6 |           10.52 |                921 | SPORTS              | Profile unvailable: No API key. |
+| 0x5b06a846ffad0967cd4343971fd26e2ceec8fbf1 |  27713.1 |                29367.7 |           25.01 |                 41 | OTHER               | Profile unvailable: No API key. |
+| 0x1ea2bdd2aff5344a19a501f0fce2f097f21f9ad4 |  35438.4 |                28944.8 |           19.17 |                104 | OTHER               | Profile unvailable: No API key. |
+| 0xf4153a4865b4dc0b690d9a876895e32724fc995a |  36994.4 |                23210.4 |         1845.43 |                 71 | OTHER               | Profile unvailable: No API key. |
+| 0x796665cdc15bea4dfc7d9952cafad909419b6f94 |  22910.9 |                22989.3 |           11.85 |                763 | OTHER               | Profile unvailable: No API key. |
+| 0x07aa5fb9f7db93e1d1ffdc6e0251f28a3aa2deb1 |  27179.4 |                21577.4 |           34.27 |                198 | OTHER               | Profile unvailable: No API key. |
+| 0x52f8b117906a436cd10c917473b22871b8a968d9 |   4331   |                19298   |            6.71 |                 94 | OTHER               | Profile unvailable: No API key. |
