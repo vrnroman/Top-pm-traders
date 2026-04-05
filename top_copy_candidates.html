@@ -1,0 +1,167 @@
+
+        <html>
+        <head>
+            <title>Top Polymarket Candidates</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 20px; }
+                table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+                th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+                th { background-color: #f2f2f2; cursor: pointer; }
+                tr:nth-child(even) { background-color: #f9f9f9; }
+                tr:hover { background-color: #e9e9e9; }
+                th.sort-asc::after { content: " \25B2"; }
+                th.sort-desc::after { content: " \25BC"; }
+                #filterInput { padding: 10px; width: 100%; font-size: 16px; box-sizing: border-box; }
+            </style>
+            <script>
+            document.addEventListener('DOMContentLoaded', function () {
+                const table = document.getElementById('candidatesTable');
+                const headers = table.querySelectorAll('th');
+                const filterInput = document.getElementById('filterInput');
+
+                headers.forEach((header, index) => {
+                    header.addEventListener('click', () => {
+                        const tbody = table.querySelector('tbody');
+                        const rows = Array.from(tbody.querySelectorAll('tr'));
+                        const isAscending = header.classList.contains('sort-asc');
+                        const multiplier = isAscending ? -1 : 1;
+
+                        rows.sort((rowA, rowB) => {
+                            const cellA = rowA.children[index].textContent.trim();
+                            const cellB = rowB.children[index].textContent.trim();
+                            const valA = isNaN(cellA) ? cellA : parseFloat(cellA);
+                            const valB = isNaN(cellB) ? cellB : parseFloat(cellB);
+                            if (valA < valB) return -1 * multiplier;
+                            if (valA > valB) return 1 * multiplier;
+                            return 0;
+                        });
+
+                        headers.forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
+                        header.classList.add(isAscending ? 'sort-desc' : 'sort-asc');
+                        rows.forEach(row => tbody.appendChild(row));
+                    });
+                });
+
+                filterInput.addEventListener('keyup', function() {
+                    const filterValue = filterInput.value.toLowerCase();
+                    const tbody = table.querySelector('tbody');
+                    const rows = tbody.querySelectorAll('tr');
+                    rows.forEach(row => {
+                        const textContent = row.textContent.toLowerCase();
+                        row.style.display = textContent.includes(filterValue) ? '' : 'none';
+                    });
+                });
+            });
+            </script>
+        </head>
+        <body>
+            <h2>Top Polymarket Copy-Trading Candidates</h2>
+            <p>Traders successfully backtested against simulated latency, size-based slippage, and gas fees.</p>
+            <input type="text" id="filterInput" placeholder="Filter by keyword (e.g. wallet, category, knowledge-based)..." />
+            <table border="1" class="dataframe" id="candidatesTable">
+  <thead>
+    <tr style="text-align: center;">
+      <th>proxyWallet</th>
+      <th>pnl</th>
+      <th>simulated_recent_pnl</th>
+      <th>simulated_roi</th>
+      <th>simulated_trades</th>
+      <th>inferred_category</th>
+      <th>llm_assessment</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>0xf705fa045201391d9632b7f3cde06a5e24453ca7</td>
+      <td>1869362.47</td>
+      <td>952564.55</td>
+      <td>186.51</td>
+      <td>824</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0xde17f7144fbd0eddb2679132c10ff5e74b120988</td>
+      <td>726821.56</td>
+      <td>553620.22</td>
+      <td>633.19</td>
+      <td>740</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0xfeb581080aee6dc26c264a647b30a9cd44d5a393</td>
+      <td>491726.21</td>
+      <td>57373.46</td>
+      <td>112.57</td>
+      <td>279</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0x1d0034134e339a309700ff2d34e99fa2d48b0313</td>
+      <td>799840.56</td>
+      <td>46381.04</td>
+      <td>171.02</td>
+      <td>913</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0xe9c6312464b52aa3eff13d822b003282075995c9</td>
+      <td>779761.10</td>
+      <td>21406.03</td>
+      <td>570.29</td>
+      <td>93</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0x1979ae6b7e6534de9c4539d0c205e582ca637c9d</td>
+      <td>1135743.94</td>
+      <td>14315.33</td>
+      <td>108.48</td>
+      <td>959</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0x63ce342161250d705dc0b16df89036c8e5f9ba9a</td>
+      <td>2382780.64</td>
+      <td>14107.25</td>
+      <td>100.71</td>
+      <td>951</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0x0ea574f3204c5c9c0cdead90392ea0990f4d17e4</td>
+      <td>580359.15</td>
+      <td>10842.17</td>
+      <td>42.66</td>
+      <td>979</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0x55be7aa03ecfbe37aa5460db791205f7ac9ddca3</td>
+      <td>986437.79</td>
+      <td>5183.93</td>
+      <td>1788.00</td>
+      <td>16</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0xe00740bce98a594e26861838885ab310ec3b548c</td>
+      <td>812269.97</td>
+      <td>3798.14</td>
+      <td>60.18</td>
+      <td>975</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+  </tbody>
+</table>
+        </body>
+        </html>
