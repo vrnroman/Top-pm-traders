@@ -18,3 +18,38 @@ To find more than 10,000 traders, we must pivot from the leaderboard to scraping
    - Note: The public `/trades` endpoint on `clob.polymarket.com` is protected and requires an authenticated API key (`401 Unauthorized`). This method only works if you have an active CLOB API key.
 
 **Recommendation:** Using the public Goldsky Subgraphs is the only free way to extract >100,000 user addresses, but requires scraping all historical transactions rather than sorting by PNL out-of-the-box.
+
+## Agentic Copy-Trading Ecosystem
+
+We have introduced an automated Python script (`copy_trader_agents.py`) that acts as an orchestrator for several agents to discover, backtest, and evaluate Polymarket traders you might want to copy.
+
+### How to Run the Ecosystem
+
+1. **Install Dependencies:**
+   Ensure you have installed the required packages:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Configure Environment:**
+   The `ProfilerAgent` uses an LLM (Claude) to provide qualitative assessments of the traders. You need to provide an Anthropic API key.
+   Create a file named `.env` in the root directory and add your key:
+   ```
+   ANTHROPIC_API_KEY=your_actual_api_key_here
+   ```
+   *Note: If you do not provide this key, the system will still run and backtest the traders, but the LLM assessment column will be blank.*
+
+3. **Run the Script:**
+   Execute the orchestrator:
+   ```bash
+   python copy_trader_agents.py
+   ```
+
+### How the Ecosystem Works
+
+The orchestrator manages four distinct agents:
+
+1. **ScoutAgent:** Responsible for data discovery. It first attempts to load pre-calculated candidates from an existing `top_traders.csv` (to save time and API calls). If no file is found, it queries the Polymarket Leaderboard API across multiple permutations (Category, Time, Order By) to bypass the 10,000 result pagination limit.
+2. **BacktesterAgent:** Responsible for validating strategies. Because you will be copy-trading with a ~200ms latency, this agent simulates historical trades while applying a dynamic slippage penalty. The slippage varies based on the inferred market category (e.g., highly liquid Politics vs. less liquid Sports) and scales up with the trade size. It also applies simulated Polygon gas fees. It ensures the trader's ROI survives these penalties.
+3. **ProfilerAgent:** Responsible for qualitative analysis. It sends the trader's stats and backtested metrics to the Anthropic API (Claude), asking the LLM to classify the trader's style (e.g., Knowledge-Based, Swing Trader, Gambler) and provide a 2-3 sentence reason on why you should follow them, favoring Economics/Politics over Sports.
+4. **ReportAgent:** Responsible for output generation. It formats the final curated list of survivors into an easily readable Markdown file (`top_copy_candidates.md`) and a self-contained, interactive HTML dashboard (`top_copy_candidates.html`) with sorting and filtering capabilities.

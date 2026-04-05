@@ -1,0 +1,167 @@
+
+        <html>
+        <head>
+            <title>Top Polymarket Candidates</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 20px; }
+                table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+                th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+                th { background-color: #f2f2f2; cursor: pointer; }
+                tr:nth-child(even) { background-color: #f9f9f9; }
+                tr:hover { background-color: #e9e9e9; }
+                th.sort-asc::after { content: " \25B2"; }
+                th.sort-desc::after { content: " \25BC"; }
+                #filterInput { padding: 10px; width: 100%; font-size: 16px; box-sizing: border-box; }
+            </style>
+            <script>
+            document.addEventListener('DOMContentLoaded', function () {
+                const table = document.getElementById('candidatesTable');
+                const headers = table.querySelectorAll('th');
+                const filterInput = document.getElementById('filterInput');
+
+                headers.forEach((header, index) => {
+                    header.addEventListener('click', () => {
+                        const tbody = table.querySelector('tbody');
+                        const rows = Array.from(tbody.querySelectorAll('tr'));
+                        const isAscending = header.classList.contains('sort-asc');
+                        const multiplier = isAscending ? -1 : 1;
+
+                        rows.sort((rowA, rowB) => {
+                            const cellA = rowA.children[index].textContent.trim();
+                            const cellB = rowB.children[index].textContent.trim();
+                            const valA = isNaN(cellA) ? cellA : parseFloat(cellA);
+                            const valB = isNaN(cellB) ? cellB : parseFloat(cellB);
+                            if (valA < valB) return -1 * multiplier;
+                            if (valA > valB) return 1 * multiplier;
+                            return 0;
+                        });
+
+                        headers.forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
+                        header.classList.add(isAscending ? 'sort-desc' : 'sort-asc');
+                        rows.forEach(row => tbody.appendChild(row));
+                    });
+                });
+
+                filterInput.addEventListener('keyup', function() {
+                    const filterValue = filterInput.value.toLowerCase();
+                    const tbody = table.querySelector('tbody');
+                    const rows = tbody.querySelectorAll('tr');
+                    rows.forEach(row => {
+                        const textContent = row.textContent.toLowerCase();
+                        row.style.display = textContent.includes(filterValue) ? '' : 'none';
+                    });
+                });
+            });
+            </script>
+        </head>
+        <body>
+            <h2>Top Polymarket Copy-Trading Candidates</h2>
+            <p>Traders successfully backtested against simulated latency, size-based slippage, and gas fees.</p>
+            <input type="text" id="filterInput" placeholder="Filter by keyword (e.g. wallet, category, knowledge-based)..." />
+            <table border="1" class="dataframe" id="candidatesTable">
+  <thead>
+    <tr style="text-align: center;">
+      <th>proxyWallet</th>
+      <th>pnl</th>
+      <th>simulated_recent_pnl</th>
+      <th>simulated_roi</th>
+      <th>simulated_trades</th>
+      <th>inferred_category</th>
+      <th>llm_assessment</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>0x1057e7d3ddafc60a4aeb10a2bc5b543792449ea5</td>
+      <td>838334.58</td>
+      <td>243738.86</td>
+      <td>51.55</td>
+      <td>646</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0xfe144d42554dd872c4dedaf1a870247d274b11ee</td>
+      <td>276487.23</td>
+      <td>131993.52</td>
+      <td>47.14</td>
+      <td>38</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0x34b9c22d6c809fa50ff927d3c07c7a49193151f6</td>
+      <td>91637.99</td>
+      <td>98861.96</td>
+      <td>26.85</td>
+      <td>478</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0x19e27eeb3641ae664e77dbb80c86021f048ece3c</td>
+      <td>82835.65</td>
+      <td>64606.64</td>
+      <td>10.52</td>
+      <td>921</td>
+      <td>SPORTS</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0x5b06a846ffad0967cd4343971fd26e2ceec8fbf1</td>
+      <td>27713.06</td>
+      <td>29367.73</td>
+      <td>25.01</td>
+      <td>41</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0x1ea2bdd2aff5344a19a501f0fce2f097f21f9ad4</td>
+      <td>35438.41</td>
+      <td>28944.75</td>
+      <td>19.17</td>
+      <td>104</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0xf4153a4865b4dc0b690d9a876895e32724fc995a</td>
+      <td>36994.39</td>
+      <td>23210.44</td>
+      <td>1845.43</td>
+      <td>71</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0x796665cdc15bea4dfc7d9952cafad909419b6f94</td>
+      <td>22910.92</td>
+      <td>22989.34</td>
+      <td>11.85</td>
+      <td>763</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0x07aa5fb9f7db93e1d1ffdc6e0251f28a3aa2deb1</td>
+      <td>27179.38</td>
+      <td>21577.39</td>
+      <td>34.27</td>
+      <td>198</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+    <tr>
+      <td>0x52f8b117906a436cd10c917473b22871b8a968d9</td>
+      <td>4331.00</td>
+      <td>19297.99</td>
+      <td>6.71</td>
+      <td>94</td>
+      <td>OTHER</td>
+      <td>Profile unvailable: No API key.</td>
+    </tr>
+  </tbody>
+</table>
+        </body>
+        </html>
