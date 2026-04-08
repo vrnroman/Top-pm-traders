@@ -24,6 +24,7 @@ export interface PendingOrder {
   enqueuedAt: number;
   orderSubmittedAt: number;
   source: string;            // "data-api" | "onchain"
+  tier?: string;             // "1a" | "1b" | "1c" | null — for tiered exposure tracking
   accountedFilledShares?: number;
   accountedFilledUsd?: number;
   uncertainCycles?: number;
