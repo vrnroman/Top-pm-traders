@@ -1,4 +1,4 @@
-"""Unified bot configuration — Strategy #1 (Copy Traders) + Strategy #2 (Weather)."""
+"""Poly Poly Bot — unified configuration for all trading strategies."""
 
 import os
 from dotenv import load_dotenv

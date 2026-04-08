@@ -25,7 +25,7 @@ RUN cd polymarket && npm ci --production=false 2>/dev/null || true
 COPY polymarket/ polymarket/
 RUN cd polymarket && npx tsc 2>/dev/null || echo "TS build skipped (S1 may be disabled)"
 
-# Copy Strategy #2 (Python weather bot)
+# Copy Strategy #2 (Python bot)
 COPY *.py ./
 COPY cities.py config.py ./
 
