@@ -66,3 +66,17 @@ LOGS_DIR = os.path.join(BOT_DIR, "logs")
 
 # Preview mode: log signals but don't place bets
 PREVIEW_MODE = os.getenv("PREVIEW_MODE", "true").lower() == "true"
+
+# ── Strategy #3: Tennis Odds Arbitrage ──
+
+STRATEGY3_ENABLED = os.getenv("STRATEGY3_ENABLED", "false").lower() == "true"
+TENNIS_ARB_PREVIEW_MODE = os.getenv("TENNIS_ARB_PREVIEW_MODE", "true").lower() == "true"
+TENNIS_ODDS_PROVIDER = os.getenv("TENNIS_ODDS_PROVIDER", "oddspapi")
+ODDSPAPI_API_KEY = os.getenv("ODDSPAPI_API_KEY", "")
+TENNIS_MIN_DIVERGENCE = float(os.getenv("TENNIS_MIN_DIVERGENCE", "0.10"))
+TENNIS_MAX_BET_SIZE = float(os.getenv("TENNIS_MAX_BET_SIZE", "100"))
+TENNIS_KELLY_FRACTION = float(os.getenv("TENNIS_KELLY_FRACTION", "0.25"))
+TENNIS_SCAN_INTERVAL = int(os.getenv("TENNIS_SCAN_INTERVAL", "300"))
+TENNIS_TOURNAMENTS = [t.strip() for t in os.getenv("TENNIS_TOURNAMENTS", "ATP,WTA").split(",")]
+TENNIS_MIN_POLYMARKET_VOLUME = float(os.getenv("TENNIS_MIN_POLYMARKET_VOLUME", "50000"))
+TENNIS_MIN_POLYMARKET_LIQUIDITY = float(os.getenv("TENNIS_MIN_POLYMARKET_LIQUIDITY", "10000"))

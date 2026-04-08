@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Unified Bot Orchestrator — Strategy #1 (Copy Traders) + Strategy #2 (Weather).
+"""Unified Bot Orchestrator — Strategy #1 (Copy Traders) + Strategy #2 (Weather) + Strategy #3 (Tennis Arb).
 
-Manages both strategies with:
+Manages all strategies with:
 - Scheduled runs (Strategy #2 at 3pm SGT daily)
+- Periodic scans (Strategy #3 every N seconds)
 - Telegram commands for on-demand predictions
 - Separate PnL tracking per strategy
 - Optional Strategy #1 (TS copy-trader bot) as subprocess
@@ -29,6 +30,12 @@ from config import (
     MAX_BETS_PER_CITY, PREVIEW_MODE,
     SCHEDULE_HOUR_SGT, SCHEDULE_MINUTE_SGT,
     DATA_DIR, LOGS_DIR, BOT_DIR,
+    STRATEGY3_ENABLED, TENNIS_ARB_PREVIEW_MODE,
+    TENNIS_ODDS_PROVIDER, ODDSPAPI_API_KEY,
+    TENNIS_MIN_DIVERGENCE, TENNIS_MAX_BET_SIZE,
+    TENNIS_KELLY_FRACTION, TENNIS_SCAN_INTERVAL,
+    TENNIS_TOURNAMENTS, TENNIS_MIN_POLYMARKET_VOLUME,
+    TENNIS_MIN_POLYMARKET_LIQUIDITY,
 )
 import telegram_bot
 
@@ -228,6 +235,59 @@ def run_strategy2(target_date: datetime) -> list[dict]:
     return signals
 
 
+# ── Strategy #3: Tennis Odds Arbitrage ──
+
+_tennis_strategy = None
+
+
+def _init_tennis_strategy():
+    """Initialize the Tennis Arb strategy instance."""
+    global _tennis_strategy
+    from src.strategies.tennis_arb import TennisArbStrategy
+
+    _tennis_strategy = TennisArbStrategy(
+        odds_provider=TENNIS_ODDS_PROVIDER,
+        oddspapi_api_key=ODDSPAPI_API_KEY,
+        min_divergence=TENNIS_MIN_DIVERGENCE,
+        max_bet_size=TENNIS_MAX_BET_SIZE,
+        kelly_fraction=TENNIS_KELLY_FRACTION,
+        tournaments=TENNIS_TOURNAMENTS,
+        min_volume=TENNIS_MIN_POLYMARKET_VOLUME,
+        min_liquidity=TENNIS_MIN_POLYMARKET_LIQUIDITY,
+        preview_mode=TENNIS_ARB_PREVIEW_MODE or PREVIEW_MODE,
+        data_dir=DATA_DIR,
+    )
+    return _tennis_strategy
+
+
+def run_strategy3() -> list[dict]:
+    """Run a single Strategy #3 scan."""
+    global _tennis_strategy
+    if _tennis_strategy is None:
+        _init_tennis_strategy()
+    return _tennis_strategy.scan()
+
+
+def _tennis_scanner_loop():
+    """Periodically scan for tennis arb opportunities."""
+    global _tennis_strategy
+    if _tennis_strategy is None:
+        _init_tennis_strategy()
+
+    logger.info(f"Tennis arb scanner started (interval={TENNIS_SCAN_INTERVAL}s)")
+
+    while not _shutdown_event.is_set():
+        try:
+            signals = _tennis_strategy.scan()
+            if signals:
+                telegram_bot.send_tennis_signals(signals)
+        except Exception as e:
+            logger.exception(f"Tennis arb scan failed: {e}")
+            telegram_bot.send_message(f"[TENNIS] Scan failed: <code>{e}</code>")
+
+        _shutdown_event.wait(TENNIS_SCAN_INTERVAL)
+
+
 # ── Scheduler ──
 
 def _scheduler_loop():
@@ -316,10 +376,15 @@ def main():
     logger.info("  Polymarket Trading Bot")
     logger.info(f"  Strategy #1 (Copy Traders): {'ENABLED' if STRATEGY1_ENABLED else 'DISABLED'}")
     logger.info(f"  Strategy #2 (Weather):      {'ENABLED' if STRATEGY2_ENABLED else 'DISABLED'}")
+    logger.info(f"  Strategy #3 (Tennis Arb):   {'ENABLED' if STRATEGY3_ENABLED else 'DISABLED'}")
     logger.info(f"  Preview mode: {PREVIEW_MODE}")
     logger.info(f"  Schedule: {SCHEDULE_HOUR_SGT:02d}:{SCHEDULE_MINUTE_SGT:02d} SGT daily")
     logger.info(f"  Cities: {', '.join(CITIES_TO_BET)}")
     logger.info(f"  Days ahead: {DAYS_IN_ADVANCE}")
+    if STRATEGY3_ENABLED:
+        logger.info(f"  Tennis scan interval: {TENNIS_SCAN_INTERVAL}s")
+        logger.info(f"  Tennis min divergence: {TENNIS_MIN_DIVERGENCE:.0%}")
+        logger.info(f"  Tennis tournaments: {', '.join(TENNIS_TOURNAMENTS)}")
     logger.info("=" * 60)
 
     # Single run mode
@@ -358,11 +423,15 @@ def main():
     else:
         logger.info("Telegram not configured (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)")
 
+    # Register tennis scan callback for telegram
+    telegram_bot.on_tennis_scan_request = run_strategy3
+
     # Startup notification
     telegram_bot.send_message(
         "<b>Bot Started</b>\n"
         f"Strategy #1: {'ON' if STRATEGY1_ENABLED else 'OFF'}\n"
         f"Strategy #2: {'ON' if STRATEGY2_ENABLED else 'OFF'}\n"
+        f"Strategy #3: {'ON' if STRATEGY3_ENABLED else 'OFF'}\n"
         f"Mode: {'PREVIEW' if PREVIEW_MODE else 'LIVE'}\n"
         f"Schedule: {SCHEDULE_HOUR_SGT:02d}:{SCHEDULE_MINUTE_SGT:02d} SGT\n"
         f"Cities: {', '.join(CITIES_TO_BET)}"
@@ -375,6 +444,16 @@ def main():
         )
         scheduler_thread.start()
         logger.info("Scheduler started")
+
+    # Start Strategy #3 scanner
+    if STRATEGY3_ENABLED:
+        tennis_thread = threading.Thread(
+            target=_tennis_scanner_loop, daemon=True, name="tennis-scanner"
+        )
+        tennis_thread.start()
+        logger.info("Tennis arb scanner started")
+    else:
+        logger.info("Strategy #3 disabled, skipping tennis arb scanner")
 
     # Main loop — keep alive
     try:

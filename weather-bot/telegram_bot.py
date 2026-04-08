@@ -3,9 +3,11 @@
 Commands:
   /predict 11 Apr    — Run prediction for a specific date
   /predict           — Run prediction for default date (today + DAYS_IN_ADVANCE)
-  /status            — Show bot status (separate for Strategy #1 and #2)
-  /pnl               — Show P&L: realized + unrealized (separate for S1/S2)
+  /status            — Show bot status (separate for Strategy #1, #2, #3)
+  /pnl               — Show P&L: realized + unrealized (separate for S1/S2/S3)
   /takeprofit        — Close all positions with unrealized PnL > 30%
+  /tennis            — Show current tennis divergences being monitored
+  /tennis_pnl        — Tennis strategy P&L breakdown
   /help              — Show available commands
 """
 
@@ -25,6 +27,9 @@ from config import (
     CITIES_TO_BET, DAYS_IN_ADVANCE, MIN_EDGE, BET_SIZE,
     MAX_BETS_PER_CITY, PREVIEW_MODE, DATA_DIR,
     CLOB_API_URL, POLYMARKET_FEE,
+    STRATEGY3_ENABLED, TENNIS_MIN_DIVERGENCE,
+    TENNIS_MAX_BET_SIZE, TENNIS_SCAN_INTERVAL,
+    TENNIS_TOURNAMENTS, TENNIS_ARB_PREVIEW_MODE,
 )
 
 logger = logging.getLogger("telegram")
@@ -48,6 +53,7 @@ _stop_event = threading.Event()
 # Callbacks set by main.py
 on_predict_request = None   # Callable[[datetime], list[dict]]
 on_sell_positions = None    # Callable[[list[dict]], list[dict]]
+on_tennis_scan_request = None  # Callable[[], list[dict]]
 
 
 def is_configured() -> bool:
@@ -104,6 +110,47 @@ def send_strategy2_signals(signals: list[dict], target_date: str):
 
     lines.append(f"\nTotal signals: {len(signals)} | Total EV: ${total_ev:.2f}")
     send_message("\n".join(lines))
+
+
+def send_tennis_signals(signals: list[dict]):
+    """Send Strategy #3 tennis arb signals to Telegram."""
+    if not signals:
+        return
+
+    preview = signals[0].get("preview", True) if signals else True
+    lines = [
+        f"<b>{'[PREVIEW] ' if preview else ''}Strategy #3 — Tennis Arb</b>",
+        f"Signals: {len(signals)} | Threshold: {TENNIS_MIN_DIVERGENCE:.0%}",
+        "",
+    ]
+
+    for s in signals:
+        lines.append(
+            f"[TENNIS] {_esc(s.get('tournament', ''))}: "
+            f"{_esc(s['player_a'])} vs {_esc(s['player_b'])} — "
+            f"Sharp: {s['sharp_prob']:.0%} / PM: {s['polymarket_price']:.0%} — "
+            f"Edge: <b>{s['divergence']:.0%}</b> — "
+            f"{s['side']} @ ${s['bet_size']:.0f}"
+        )
+
+    send_message("\n".join(lines))
+
+
+def _load_s3_trades() -> list[dict]:
+    """Load Strategy #3 tennis trade history."""
+    history_path = os.path.join(os.path.dirname(__file__), "data", "tennis_trades.jsonl")
+    if not os.path.exists(history_path):
+        return []
+    trades = []
+    with open(history_path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    trades.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    return trades
 
 
 # ─── Live price fetching ──────────────────────────────────────────────
@@ -225,6 +272,10 @@ def _handle_command(text: str):
 
     if text.startswith("/predict"):
         _handle_predict(text)
+    elif text.startswith("/tennis_pnl"):
+        _handle_tennis_pnl()
+    elif text.startswith("/tennis"):
+        _handle_tennis()
     elif text.startswith("/status"):
         _handle_status()
     elif text.startswith("/pnl"):
@@ -295,6 +346,20 @@ def _handle_status():
         lines.append(f"Cities: {', '.join(CITIES_TO_BET)}")
         lines.append(f"Days ahead: {DAYS_IN_ADVANCE}")
         lines.append(f"Min edge: {MIN_EDGE:.0%} | Bet: ${BET_SIZE:.0f}")
+    else:
+        lines.append("Status: ⚪ DISABLED")
+
+    lines.append("")
+    lines.append(f"<b>Strategy #3 — Tennis Arb</b>")
+    if STRATEGY3_ENABLED:
+        lines.append("Status: 🟢 ENABLED")
+        lines.append(f"Tournaments: {', '.join(TENNIS_TOURNAMENTS)}")
+        lines.append(f"Min divergence: {TENNIS_MIN_DIVERGENCE:.0%}")
+        lines.append(f"Scan interval: {TENNIS_SCAN_INTERVAL}s")
+        lines.append(f"Max bet: ${TENNIS_MAX_BET_SIZE:.0f}")
+        tennis_trades = _load_s3_trades()
+        if tennis_trades:
+            lines.append(f"Total signals: {len(tennis_trades)}")
     else:
         lines.append("Status: ⚪ DISABLED")
 
@@ -547,18 +612,105 @@ def _format_position_summary(positions: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _handle_tennis():
+    """Handle /tennis command — trigger a tennis arb scan and show results."""
+    if not STRATEGY3_ENABLED:
+        send_message("Strategy #3 (Tennis Arb) is disabled.")
+        return
+
+    send_message("Scanning tennis divergences...")
+
+    if on_tennis_scan_request:
+        try:
+            signals = on_tennis_scan_request()
+            if signals:
+                send_tennis_signals(signals)
+            else:
+                send_message(
+                    "<b>Strategy #3 — Tennis Arb</b>\n"
+                    f"No divergences above {TENNIS_MIN_DIVERGENCE:.0%} threshold.\n"
+                    f"Tournaments: {', '.join(TENNIS_TOURNAMENTS)}"
+                )
+        except Exception as e:
+            logger.exception("Tennis scan failed")
+            send_message(f"Tennis scan failed: <code>{_esc(str(e))}</code>")
+    else:
+        send_message("Tennis scan handler not configured.")
+
+
+def _handle_tennis_pnl():
+    """Handle /tennis_pnl command — show tennis strategy P&L."""
+    trades = _load_s3_trades()
+
+    if not trades:
+        send_message(
+            "<b>Strategy #3 — Tennis Arb P&amp;L</b>\n"
+            "No tennis trades yet."
+        )
+        return
+
+    # Group by day
+    total_signals = len(trades)
+    total_bet = sum(t.get("bet_size", 0) for t in trades)
+    preview_count = sum(1 for t in trades if t.get("preview"))
+    live_count = total_signals - preview_count
+
+    # Calculate avg edge
+    avg_edge = sum(t.get("divergence", 0) for t in trades) / total_signals if total_signals > 0 else 0
+
+    # Group by tournament
+    by_tournament: dict[str, list] = {}
+    for t in trades:
+        tourney = t.get("tournament", "Unknown")
+        by_tournament.setdefault(tourney, []).append(t)
+
+    lines = [
+        "<b>Strategy #3 — Tennis Arb P&amp;L</b>",
+        f"Total signals: {total_signals} (preview: {preview_count}, live: {live_count})",
+        f"Total bet size: ${total_bet:.2f}",
+        f"Avg edge: {avg_edge:.1%}",
+        "",
+    ]
+
+    for tourney, t_trades in sorted(by_tournament.items()):
+        t_bet = sum(t.get("bet_size", 0) for t in t_trades)
+        t_avg_div = sum(t.get("divergence", 0) for t in t_trades) / len(t_trades)
+        lines.append(
+            f"<b>{_esc(tourney)}</b>: {len(t_trades)} signals, "
+            f"${t_bet:.0f} bet, avg edge {t_avg_div:.1%}"
+        )
+
+    # Show last 5 signals
+    lines.append("")
+    lines.append("<b>Recent signals:</b>")
+    for t in trades[-5:]:
+        lines.append(
+            f"  {_esc(t.get('target_player', '?'))} — "
+            f"Sharp: {t.get('sharp_prob', 0):.0%} / PM: {t.get('polymarket_price', 0):.0%} — "
+            f"Edge: {t.get('divergence', 0):.0%} — ${t.get('bet_size', 0):.0f}"
+        )
+
+    if any(t.get("preview") for t in trades):
+        lines.append(f"\n<i>PREVIEW MODE — trades are simulated</i>")
+
+    send_message("\n".join(lines))
+
+
 def _handle_help():
     """Handle /help command."""
     send_message(
-        "<b>Weather Betting Bot — Commands</b>\n\n"
+        "<b>Polymarket Trading Bot — Commands</b>\n\n"
         "<code>/predict 11 Apr</code> — Run prediction for Apr 11\n"
         "<code>/predict</code> — Run prediction for default date\n"
+        "<code>/tennis</code> — Show current tennis divergences\n"
+        "<code>/tennis_pnl</code> — Tennis strategy P&amp;L breakdown\n"
         "<code>/status</code> — Show bot status\n"
         "<code>/pnl</code> — Realized + unrealized P&amp;L\n"
         "<code>/takeprofit</code> — Close positions with &gt;30% profit\n"
         "<code>/help</code> — Show this message\n\n"
         f"Strategy #1 (Copy): {'ON' if STRATEGY1_ENABLED else 'OFF'}\n"
         f"Strategy #2 (Weather): {'ON' if STRATEGY2_ENABLED else 'OFF'}\n"
+        f"Strategy #3 (Tennis Arb): {'ON' if STRATEGY3_ENABLED else 'OFF'}\n"
         f"Take-profit threshold: {TAKE_PROFIT_PCT:.0%}"
     )
 
