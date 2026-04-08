@@ -1,145 +1,76 @@
 #!/usr/bin/env python3
-"""Unified Bot Orchestrator — Strategy #1 (Copy Traders) + Strategy #2 (Weather) + Strategy #3 (Tennis Arb).
+"""Unified Polymarket Trading Bot — all three strategies in Python.
 
-Manages all strategies with:
-- Scheduled runs (Strategy #2 at 3pm SGT daily)
-- Periodic scans (Strategy #3 every N seconds)
-- Telegram commands for on-demand predictions
-- Separate PnL tracking per strategy
-- Optional Strategy #1 (TS copy-trader bot) as subprocess
+Manages all strategies:
+- Strategy #1 (Copy Trading): runs natively via asyncio
+- Strategy #2 (Weather Betting): scheduled daily at configured SGT time
+- Strategy #3 (Tennis Arb): periodic scans every N seconds
+- Unified Telegram bot for all commands
 
 Usage:
   python main.py              # Run with defaults from .env
   python main.py --once       # Run Strategy #2 once and exit
 """
 
+import asyncio
 import os
 import sys
-import json
 import signal
 import logging
-import argparse
-import subprocess
 import threading
-import time
+import argparse
+import json
 from datetime import datetime, timedelta, timezone
 
-from config import (
-    STRATEGY1_ENABLED, STRATEGY2_ENABLED,
-    STRATEGY_1A_ENABLED, STRATEGY_1B_ENABLED, STRATEGY_1C_ENABLED,
-    CITIES_TO_BET, DAYS_IN_ADVANCE, MIN_EDGE, BET_SIZE,
-    MAX_BETS_PER_CITY, PREVIEW_MODE,
-    SCHEDULE_HOUR_SGT, SCHEDULE_MINUTE_SGT,
-    DATA_DIR, LOGS_DIR, BOT_DIR,
-    STRATEGY3_ENABLED, TENNIS_ARB_PREVIEW_MODE,
-    TENNIS_ODDS_PROVIDER, ODDSPAPI_API_KEY,
-    TENNIS_MIN_DIVERGENCE, TENNIS_MAX_BET_SIZE,
-    TENNIS_KELLY_FRACTION, TENNIS_SCAN_INTERVAL,
-    TENNIS_TOURNAMENTS, TENNIS_MIN_POLYMARKET_VOLUME,
-    TENNIS_MIN_POLYMARKET_LIQUIDITY,
-)
-import telegram_bot
+# Add parent to path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-logger = logging.getLogger("main")
+from src.config import CONFIG
+from src.logger import logger
+
+import src.telegram_bot as telegram_bot
 
 SGT = timezone(timedelta(hours=8))
 
-# ── Strategy #1: Copy Trader subprocess ──
-
-_s1_process: subprocess.Popen | None = None
+_shutdown_event = threading.Event()
 
 
-def start_strategy1():
-    """Start the TS copy-trader bot as a subprocess."""
-    global _s1_process
-
-    polymarket_dir = os.path.join(BOT_DIR, "polymarket")
-    if not os.path.isdir(polymarket_dir):
-        logger.error("polymarket/ directory not found, cannot start Strategy #1")
-        return
-
-    dist_index = os.path.join(polymarket_dir, "dist", "index.js")
-    if not os.path.exists(dist_index):
-        logger.info("Building Strategy #1 (npm run build)...")
-        try:
-            subprocess.run(
-                ["npm", "run", "build"],
-                cwd=polymarket_dir,
-                check=True,
-                capture_output=True,
-                timeout=120,
-            )
-        except Exception as e:
-            logger.error(f"Failed to build Strategy #1: {e}")
-            return
-
-    logger.info("Starting Strategy #1 (copy-trader bot)...")
-    _s1_process = subprocess.Popen(
-        ["node", "dist/index.js"],
-        cwd=polymarket_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-
-    # Log output in background
-    def _stream_s1_logs():
-        for line in iter(_s1_process.stdout.readline, b""):
-            logger.info(f"[S1] {line.decode().rstrip()}")
-        _s1_process.stdout.close()
-
-    t = threading.Thread(target=_stream_s1_logs, daemon=True, name="s1-logs")
-    t.start()
-    logger.info(f"Strategy #1 started (PID: {_s1_process.pid})")
-
-
-def stop_strategy1():
-    """Stop the TS copy-trader bot subprocess."""
-    global _s1_process
-    if _s1_process and _s1_process.poll() is None:
-        logger.info("Stopping Strategy #1...")
-        _s1_process.terminate()
-        try:
-            _s1_process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            _s1_process.kill()
-        logger.info("Strategy #1 stopped")
-    _s1_process = None
-
-
-# ── Strategy #2: Weather Betting ──
+# -- Strategy #2: Weather Betting --
 
 def run_strategy2(target_date: datetime) -> list[dict]:
     """Run a single Strategy #2 prediction cycle."""
-    from weather_data import fetch_all_weather
-    from weather_predictor import WeatherPredictor
-    from polymarket_fetcher import fetch_markets_for_cities_and_dates
-    from config import CACHE_DIR, POLYMARKET_FEE, KDE_WINDOW_DAYS, RECENCY_HALFLIFE
-    from cities import CITIES
+    from src.weather.weather_data import fetch_all_weather
+    from src.weather.weather_predictor import WeatherPredictor
+    from src.weather.polymarket_fetcher import fetch_markets_for_cities_and_dates
+    from src.weather.cities import CITIES
+    import pandas as pd
 
+    cities_list = [c.strip() for c in CONFIG.cities_to_bet.split(",")]
     date_str = target_date.strftime("%Y-%m-%d")
     logger.info(f"Strategy #2: Running prediction for {date_str}")
 
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(CONFIG.cache_dir, exist_ok=True)
 
     # Fetch weather history
-    weather_df = fetch_all_weather(CITIES_TO_BET, CACHE_DIR)
+    weather_df = fetch_all_weather(cities_list, CONFIG.cache_dir)
     if len(weather_df) == 0:
         logger.error("No weather data available")
         return []
 
     # Fetch Polymarket markets
-    markets_df = fetch_markets_for_cities_and_dates(CITIES_TO_BET, [target_date])
+    markets_df = fetch_markets_for_cities_and_dates(cities_list, [target_date])
     if len(markets_df) == 0:
-        logger.warning(f"No Polymarket markets found for {date_str}")
+        logger.warn(f"No Polymarket markets found for {date_str}")
         return []
 
     # Predict
-    import pandas as pd
-    predictor = WeatherPredictor(weather_df, window_days=KDE_WINDOW_DAYS,
-                                  recency_halflife=RECENCY_HALFLIFE)
+    predictor = WeatherPredictor(weather_df, window_days=15, recency_halflife=4.0)
+
+    # Polymarket fee
+    polymarket_fee = float(os.getenv("POLYMARKET_FEE", "0.02"))
 
     signals = []
-    for city_key in CITIES_TO_BET:
+    for city_key in cities_list:
         city_info = CITIES.get(city_key, {})
         if not city_info:
             continue
@@ -175,9 +106,9 @@ def run_strategy2(target_date: datetime) -> list[dict]:
             model_prob = probs.get(label, 0.0)
             edge = model_prob - market_price
 
-            if edge >= MIN_EDGE:
-                ev = (model_prob * (BET_SIZE / market_price - BET_SIZE * (1 + POLYMARKET_FEE))
-                      + (1 - model_prob) * (-BET_SIZE * (1 + POLYMARKET_FEE)))
+            if edge >= CONFIG.min_edge:
+                ev = (model_prob * (CONFIG.bet_size / market_price - CONFIG.bet_size * (1 + polymarket_fee))
+                      + (1 - model_prob) * (-CONFIG.bet_size * (1 + polymarket_fee)))
                 city_signals.append({
                     "city": city_key,
                     "city_name": city_name,
@@ -187,7 +118,7 @@ def run_strategy2(target_date: datetime) -> list[dict]:
                     "market_price": round(market_price, 4),
                     "model_prob": round(model_prob, 4),
                     "edge": round(edge, 4),
-                    "bet_size": BET_SIZE,
+                    "bet_size": CONFIG.bet_size,
                     "expected_pnl": round(ev, 2),
                     "clob_token_yes": m.get("clob_token_yes"),
                     "market_id": m.get("market_id"),
@@ -196,13 +127,13 @@ def run_strategy2(target_date: datetime) -> list[dict]:
 
         # Take top N by edge
         city_signals.sort(key=lambda x: x["edge"], reverse=True)
-        signals.extend(city_signals[:MAX_BETS_PER_CITY])
+        signals.extend(city_signals[:CONFIG.max_bets_per_city])
 
     # Log signals
     if signals:
         logger.info(f"Strategy #2: {len(signals)} signal(s) for {date_str}")
         for s in signals:
-            deg = "°F" if s["unit"] == "fahrenheit" else "°C"
+            deg = "\u00b0F" if s["unit"] == "fahrenheit" else "\u00b0C"
             logger.info(f"  {s['city_name']} {s['bucket_label']}{deg} "
                         f"model={s['model_prob']:.1%} market={s['market_price']:.1%} "
                         f"edge={s['edge']:+.1%}")
@@ -210,33 +141,34 @@ def run_strategy2(target_date: datetime) -> list[dict]:
         logger.info(f"Strategy #2: No signals for {date_str}")
 
     # Save signals
-    results_dir = os.path.join(BOT_DIR, "results")
-    os.makedirs(results_dir, exist_ok=True)
+    os.makedirs(CONFIG.results_dir, exist_ok=True)
     if signals:
-        sig_path = os.path.join(results_dir,
+        import pandas as pd
+        sig_path = os.path.join(CONFIG.results_dir,
                                  f"signals_{date_str.replace('-', '')}.csv")
         pd.DataFrame(signals).to_csv(sig_path, index=False)
 
     # Record to trade history (for PnL tracking)
-    os.makedirs(DATA_DIR, exist_ok=True)
-    history_path = os.path.join(DATA_DIR, "weather_trades.jsonl")
+    polymarket_fee = float(os.getenv("POLYMARKET_FEE", "0.02"))
+    os.makedirs(CONFIG.data_dir, exist_ok=True)
+    history_path = os.path.join(CONFIG.data_dir, "weather_trades.jsonl")
     with open(history_path, "a") as f:
         for s in signals:
             record = {
                 **s,
                 "timestamp": datetime.now(SGT).isoformat(),
-                "preview": PREVIEW_MODE,
+                "preview": CONFIG.preview_mode,
                 "resolved": False,
                 "won": None,
                 "pnl": None,
-                "cost": BET_SIZE * (1 + POLYMARKET_FEE),
+                "cost": CONFIG.bet_size * (1 + polymarket_fee),
             }
             f.write(json.dumps(record) + "\n")
 
     return signals
 
 
-# ── Strategy #3: Tennis Odds Arbitrage ──
+# -- Strategy #3: Tennis Odds Arbitrage --
 
 _tennis_strategy = None
 
@@ -244,19 +176,21 @@ _tennis_strategy = None
 def _init_tennis_strategy():
     """Initialize the Tennis Arb strategy instance."""
     global _tennis_strategy
-    from src.strategies.tennis_arb import TennisArbStrategy
+    from src.tennis.tennis_arb import TennisArbStrategy
+
+    tennis_tournaments = [t.strip() for t in CONFIG.tennis_tournaments.split(",")]
 
     _tennis_strategy = TennisArbStrategy(
-        odds_provider=TENNIS_ODDS_PROVIDER,
-        oddspapi_api_key=ODDSPAPI_API_KEY,
-        min_divergence=TENNIS_MIN_DIVERGENCE,
-        max_bet_size=TENNIS_MAX_BET_SIZE,
-        kelly_fraction=TENNIS_KELLY_FRACTION,
-        tournaments=TENNIS_TOURNAMENTS,
-        min_volume=TENNIS_MIN_POLYMARKET_VOLUME,
-        min_liquidity=TENNIS_MIN_POLYMARKET_LIQUIDITY,
-        preview_mode=TENNIS_ARB_PREVIEW_MODE or PREVIEW_MODE,
-        data_dir=DATA_DIR,
+        odds_provider=CONFIG.tennis_odds_provider,
+        oddspapi_api_key=CONFIG.oddspapi_api_key,
+        min_divergence=CONFIG.tennis_min_divergence,
+        max_bet_size=CONFIG.tennis_max_bet_size,
+        kelly_fraction=CONFIG.tennis_kelly_fraction,
+        tournaments=tennis_tournaments,
+        min_volume=CONFIG.tennis_min_polymarket_volume,
+        min_liquidity=CONFIG.tennis_min_polymarket_liquidity,
+        preview_mode=CONFIG.preview_mode,
+        data_dir=CONFIG.data_dir,
     )
     return _tennis_strategy
 
@@ -275,7 +209,7 @@ def _tennis_scanner_loop():
     if _tennis_strategy is None:
         _init_tennis_strategy()
 
-    logger.info(f"Tennis arb scanner started (interval={TENNIS_SCAN_INTERVAL}s)")
+    logger.info(f"Tennis arb scanner started (interval={CONFIG.tennis_scan_interval}s)")
 
     while not _shutdown_event.is_set():
         try:
@@ -283,13 +217,13 @@ def _tennis_scanner_loop():
             if signals:
                 telegram_bot.send_tennis_signals(signals)
         except Exception as e:
-            logger.exception(f"Tennis arb scan failed: {e}")
+            logger.error(f"Tennis arb scan failed: {e}")
             telegram_bot.send_message(f"[TENNIS] Scan failed: <code>{e}</code>")
 
-        _shutdown_event.wait(TENNIS_SCAN_INTERVAL)
+        _shutdown_event.wait(CONFIG.tennis_scan_interval)
 
 
-# ── Scheduler ──
+# -- Scheduler --
 
 def _scheduler_loop():
     """Run Strategy #2 daily at the configured SGT time."""
@@ -300,7 +234,8 @@ def _scheduler_loop():
         today = now.date()
 
         # Check if it's time to run
-        target_time = now.replace(hour=SCHEDULE_HOUR_SGT, minute=SCHEDULE_MINUTE_SGT,
+        target_time = now.replace(hour=CONFIG.schedule_hour_sgt,
+                                   minute=CONFIG.schedule_minute_sgt,
                                    second=0, microsecond=0)
 
         if (now >= target_time and last_run_date != today):
@@ -308,9 +243,9 @@ def _scheduler_loop():
             logger.info(f"Scheduled run triggered at {now.strftime('%H:%M SGT')}")
 
             target_date = datetime(
-                (today + timedelta(days=DAYS_IN_ADVANCE)).year,
-                (today + timedelta(days=DAYS_IN_ADVANCE)).month,
-                (today + timedelta(days=DAYS_IN_ADVANCE)).day,
+                (today + timedelta(days=CONFIG.days_in_advance)).year,
+                (today + timedelta(days=CONFIG.days_in_advance)).month,
+                (today + timedelta(days=CONFIG.days_in_advance)).day,
             )
 
             try:
@@ -319,22 +254,19 @@ def _scheduler_loop():
                     signals, target_date.strftime("%Y-%m-%d")
                 )
             except Exception as e:
-                logger.exception(f"Scheduled run failed: {e}")
+                logger.error(f"Scheduled run failed: {e}")
                 telegram_bot.send_message(f"Scheduled run failed: <code>{e}</code>")
 
         # Sleep 30s between checks
         _shutdown_event.wait(30)
 
 
-# ── Main ──
-
-_shutdown_event = threading.Event()
-
+# -- Main --
 
 def _setup_logging():
     """Configure logging to console and file."""
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    log_file = os.path.join(LOGS_DIR,
+    os.makedirs(CONFIG.logs_dir, exist_ok=True)
+    log_file = os.path.join(CONFIG.logs_dir,
                              f"bot-{datetime.now().strftime('%Y-%m-%d')}.log")
 
     fmt = logging.Formatter(
@@ -363,7 +295,8 @@ def _signal_handler(sig, frame):
     _shutdown_event.set()
 
 
-def main():
+async def main():
+    """Main entry point — runs all enabled strategies."""
     parser = argparse.ArgumentParser(description="Unified Trading Bot")
     parser.add_argument("--once", action="store_true",
                         help="Run Strategy #2 once and exit")
@@ -373,21 +306,22 @@ def main():
 
     _setup_logging()
 
+    cities_list = [c.strip() for c in CONFIG.cities_to_bet.split(",")]
+    tennis_tournaments = [t.strip() for t in CONFIG.tennis_tournaments.split(",")]
+
     logger.info("=" * 60)
-    logger.info("  Polymarket Trading Bot")
-    logger.info(f"  Strategy 1a (Insiders):     {'ON' if STRATEGY_1A_ENABLED else 'OFF'}")
-    logger.info(f"  Strategy 1b (Whales):       {'ON' if STRATEGY_1B_ENABLED else 'OFF'}")
-    logger.info(f"  Strategy 1c (Auto-detect):  {'ON' if STRATEGY_1C_ENABLED else 'OFF'}")
-    logger.info(f"  Strategy #2 (Weather):      {'ENABLED' if STRATEGY2_ENABLED else 'DISABLED'}")
-    logger.info(f"  Strategy #3 (Tennis Arb):   {'ENABLED' if STRATEGY3_ENABLED else 'DISABLED'}")
-    logger.info(f"  Preview mode: {PREVIEW_MODE}")
-    logger.info(f"  Schedule: {SCHEDULE_HOUR_SGT:02d}:{SCHEDULE_MINUTE_SGT:02d} SGT daily")
-    logger.info(f"  Cities: {', '.join(CITIES_TO_BET)}")
-    logger.info(f"  Days ahead: {DAYS_IN_ADVANCE}")
-    if STRATEGY3_ENABLED:
-        logger.info(f"  Tennis scan interval: {TENNIS_SCAN_INTERVAL}s")
-        logger.info(f"  Tennis min divergence: {TENNIS_MIN_DIVERGENCE:.0%}")
-        logger.info(f"  Tennis tournaments: {', '.join(TENNIS_TOURNAMENTS)}")
+    logger.info("  Polymarket Trading Bot (Unified Python)")
+    logger.info(f"  Strategy #1 (Copy Trading): {'ENABLED' if CONFIG.strategy1_enabled else 'DISABLED'}")
+    logger.info(f"  Strategy #2 (Weather):      {'ENABLED' if CONFIG.strategy2_enabled else 'DISABLED'}")
+    logger.info(f"  Strategy #3 (Tennis Arb):   {'ENABLED' if CONFIG.strategy3_enabled else 'DISABLED'}")
+    logger.info(f"  Preview mode: {CONFIG.preview_mode}")
+    logger.info(f"  Schedule: {CONFIG.schedule_hour_sgt:02d}:{CONFIG.schedule_minute_sgt:02d} SGT daily")
+    logger.info(f"  Cities: {', '.join(cities_list)}")
+    logger.info(f"  Days ahead: {CONFIG.days_in_advance}")
+    if CONFIG.strategy3_enabled:
+        logger.info(f"  Tennis scan interval: {CONFIG.tennis_scan_interval}s")
+        logger.info(f"  Tennis min divergence: {CONFIG.tennis_min_divergence:.0%}")
+        logger.info(f"  Tennis tournaments: {', '.join(tennis_tournaments)}")
     logger.info("=" * 60)
 
     # Single run mode
@@ -396,7 +330,7 @@ def main():
             target_date = datetime.strptime(args.date, "%Y-%m-%d")
         else:
             today = datetime.now(SGT).date()
-            td = today + timedelta(days=DAYS_IN_ADVANCE)
+            td = today + timedelta(days=CONFIG.days_in_advance)
             target_date = datetime(td.year, td.month, td.day)
 
         signals = run_strategy2(target_date)
@@ -409,15 +343,12 @@ def main():
     # Register prediction callback for telegram
     telegram_bot.on_predict_request = run_strategy2
 
+    # Register tennis scan callback for telegram
+    telegram_bot.on_tennis_scan_request = run_strategy3
+
     # Signal handlers
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
-
-    # Start Strategy #1 (if enabled)
-    if STRATEGY1_ENABLED:
-        start_strategy1()
-    else:
-        logger.info("Strategy #1 disabled, skipping copy-trader bot")
 
     # Start Telegram polling
     if telegram_bot.is_configured():
@@ -426,32 +357,27 @@ def main():
     else:
         logger.info("Telegram not configured (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)")
 
-    # Register tennis scan callback for telegram
-    telegram_bot.on_tennis_scan_request = run_strategy3
-
     # Startup notification
     telegram_bot.send_message(
-        "<b>Bot Started</b>\n"
-        f"Strategy 1a: {'ON' if STRATEGY_1A_ENABLED else 'OFF'}\n"
-        f"Strategy 1b: {'ON' if STRATEGY_1B_ENABLED else 'OFF'}\n"
-        f"Strategy 1c: {'ON' if STRATEGY_1C_ENABLED else 'OFF'}\n"
-        f"Strategy #2: {'ON' if STRATEGY2_ENABLED else 'OFF'}\n"
-        f"Strategy #3: {'ON' if STRATEGY3_ENABLED else 'OFF'}\n"
-        f"Mode: {'PREVIEW' if PREVIEW_MODE else 'LIVE'}\n"
-        f"Schedule: {SCHEDULE_HOUR_SGT:02d}:{SCHEDULE_MINUTE_SGT:02d} SGT\n"
-        f"Cities: {', '.join(CITIES_TO_BET)}"
+        "<b>Bot Started (Unified Python)</b>\n"
+        f"Strategy #1 (Copy): {'ON' if CONFIG.strategy1_enabled else 'OFF'}\n"
+        f"Strategy #2 (Weather): {'ON' if CONFIG.strategy2_enabled else 'OFF'}\n"
+        f"Strategy #3 (Tennis): {'ON' if CONFIG.strategy3_enabled else 'OFF'}\n"
+        f"Mode: {'PREVIEW' if CONFIG.preview_mode else 'LIVE'}\n"
+        f"Schedule: {CONFIG.schedule_hour_sgt:02d}:{CONFIG.schedule_minute_sgt:02d} SGT\n"
+        f"Cities: {', '.join(cities_list)}"
     )
 
-    # Start scheduler
-    if STRATEGY2_ENABLED:
+    # Start Strategy #2 scheduler in a thread
+    if CONFIG.strategy2_enabled:
         scheduler_thread = threading.Thread(
             target=_scheduler_loop, daemon=True, name="scheduler"
         )
         scheduler_thread.start()
-        logger.info("Scheduler started")
+        logger.info("Strategy #2 scheduler started")
 
-    # Start Strategy #3 scanner
-    if STRATEGY3_ENABLED:
+    # Start Strategy #3 scanner in a thread
+    if CONFIG.strategy3_enabled:
         tennis_thread = threading.Thread(
             target=_tennis_scanner_loop, daemon=True, name="tennis-scanner"
         )
@@ -460,20 +386,35 @@ def main():
     else:
         logger.info("Strategy #3 disabled, skipping tennis arb scanner")
 
-    # Main loop — keep alive
-    try:
-        while not _shutdown_event.is_set():
-            _shutdown_event.wait(1)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        logger.info("Shutting down...")
-        telegram_bot.send_message("Bot shutting down.")
-        telegram_bot.stop_polling()
-        if STRATEGY1_ENABLED:
-            stop_strategy1()
-        logger.info("Goodbye.")
+    # Start Strategy #1 (Copy Trading) natively via asyncio
+    if CONFIG.strategy1_enabled:
+        logger.info("Starting Strategy #1 (Copy Trading) via asyncio...")
+        from src.copy_trading.runner import run_copy_trading
+        try:
+            # Run copy trading as the main async task; it blocks until shutdown
+            # Meanwhile, Strategy #2 and #3 run in daemon threads
+            await run_copy_trading()
+        except KeyboardInterrupt:
+            pass
+        except Exception as e:
+            logger.error(f"Strategy #1 crashed: {e}")
+            telegram_bot.send_message(f"Strategy #1 crashed: <code>{e}</code>")
+    else:
+        logger.info("Strategy #1 disabled, skipping copy-trader bot")
+        # Main loop — keep alive while strategies #2/#3 run in threads
+        try:
+            while not _shutdown_event.is_set():
+                await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            pass
+
+    # Shutdown
+    logger.info("Shutting down...")
+    _shutdown_event.set()
+    telegram_bot.send_message("Bot shutting down.")
+    telegram_bot.stop_polling()
+    logger.info("Goodbye.")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
