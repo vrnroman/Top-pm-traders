@@ -8,11 +8,11 @@ if [ -f .env ]; then
 fi
 GCP_PROJECT_ID="${GCP_PROJECT_ID:-roman-vm}"
 
-INSTANCE="weather-bot"
+INSTANCE="poly-poly-bot"
 ZONE="asia-northeast1-a"   # Tokyo, Japan
 MACHINE="e2-small"          # 2 vCPU, 2GB RAM (enough for both strategies)
 
-echo "=== Weather Bot Deployment ==="
+echo "=== Poly Poly Bot Deployment ==="
 echo "  Project: $GCP_PROJECT_ID"
 echo "  Instance: $INSTANCE"
 echo "  Zone: $ZONE"
@@ -45,7 +45,7 @@ fi
 
 # ─── Step 2: Archive code ────────────────────────────────────────
 echo "[2/5] Archiving code..."
-ARCHIVE="/tmp/weather-bot-deploy.tar.gz"
+ARCHIVE="/tmp/poly-poly-bot-deploy.tar.gz"
 tar czf "$ARCHIVE" \
     --exclude='polymarket/node_modules' \
     --exclude='polymarket/dist' \
@@ -88,25 +88,25 @@ gcloud compute ssh "$INSTANCE" \
         mkdir -p data cache results logs
 
         # Stop existing container
-        docker stop weather-bot 2>/dev/null || true
-        docker rm weather-bot 2>/dev/null || true
+        docker stop poly-poly-bot 2>/dev/null || true
+        docker rm poly-poly-bot 2>/dev/null || true
 
         # Build
-        docker build -t weather-bot .
+        docker build -t poly-poly-bot .
 
         # Run
         docker run -d \
-            --name weather-bot \
+            --name poly-poly-bot \
             --restart unless-stopped \
             --env-file .env \
             -v ~/app/data:/app/data \
             -v ~/app/cache:/app/cache \
             -v ~/app/results:/app/results \
             -v ~/app/logs:/app/logs \
-            weather-bot
+            poly-poly-bot
 
         echo "Container started:"
-        docker ps --filter name=weather-bot --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+        docker ps --filter name=poly-poly-bot --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
     '
 
 # ─── Step 5: Verify ──────────────────────────────────────────────
@@ -114,12 +114,12 @@ echo "[5/5] Verifying..."
 sleep 3
 gcloud compute ssh "$INSTANCE" \
     --project="$GCP_PROJECT_ID" --zone="$ZONE" \
-    --command='docker logs weather-bot --tail 20'
+    --command='docker logs poly-poly-bot --tail 20'
 
 echo ""
 echo "=== Deployment complete ==="
-echo "  Monitor: gcloud compute ssh $INSTANCE --zone=$ZONE --command='docker logs -f weather-bot'"
-echo "  Stop:    gcloud compute ssh $INSTANCE --zone=$ZONE --command='docker stop weather-bot'"
+echo "  Monitor: gcloud compute ssh $INSTANCE --zone=$ZONE --command='docker logs -f poly-poly-bot'"
+echo "  Stop:    gcloud compute ssh $INSTANCE --zone=$ZONE --command='docker stop poly-poly-bot'"
 echo "  Logs:    gcloud compute ssh $INSTANCE --zone=$ZONE --command='cat ~/app/logs/bot-\$(date +%Y-%m-%d).log'"
 
 # Cleanup
