@@ -2,7 +2,7 @@ import dotenv from "dotenv";
 import path from "path";
 import { parseAddresses, validatePrivateKey, validateAddress } from "./config-validators";
 
-dotenv.config({ path: path.resolve(process.cwd(), ".env") });
+dotenv.config({ path: path.resolve(__dirname, "..", "..", ".env") });
 
 function required(name: string): string {
   const val = process.env[name]?.trim();

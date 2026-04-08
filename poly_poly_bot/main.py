@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 
 from config import (
     STRATEGY1_ENABLED, STRATEGY2_ENABLED,
+    STRATEGY_1A_ENABLED, STRATEGY_1B_ENABLED, STRATEGY_1C_ENABLED,
     CITIES_TO_BET, DAYS_IN_ADVANCE, MIN_EDGE, BET_SIZE,
     MAX_BETS_PER_CITY, PREVIEW_MODE,
     SCHEDULE_HOUR_SGT, SCHEDULE_MINUTE_SGT,
@@ -374,7 +375,9 @@ def main():
 
     logger.info("=" * 60)
     logger.info("  Polymarket Trading Bot")
-    logger.info(f"  Strategy #1 (Copy Traders): {'ENABLED' if STRATEGY1_ENABLED else 'DISABLED'}")
+    logger.info(f"  Strategy 1a (Insiders):     {'ON' if STRATEGY_1A_ENABLED else 'OFF'}")
+    logger.info(f"  Strategy 1b (Whales):       {'ON' if STRATEGY_1B_ENABLED else 'OFF'}")
+    logger.info(f"  Strategy 1c (Auto-detect):  {'ON' if STRATEGY_1C_ENABLED else 'OFF'}")
     logger.info(f"  Strategy #2 (Weather):      {'ENABLED' if STRATEGY2_ENABLED else 'DISABLED'}")
     logger.info(f"  Strategy #3 (Tennis Arb):   {'ENABLED' if STRATEGY3_ENABLED else 'DISABLED'}")
     logger.info(f"  Preview mode: {PREVIEW_MODE}")
@@ -429,7 +432,9 @@ def main():
     # Startup notification
     telegram_bot.send_message(
         "<b>Bot Started</b>\n"
-        f"Strategy #1: {'ON' if STRATEGY1_ENABLED else 'OFF'}\n"
+        f"Strategy 1a: {'ON' if STRATEGY_1A_ENABLED else 'OFF'}\n"
+        f"Strategy 1b: {'ON' if STRATEGY_1B_ENABLED else 'OFF'}\n"
+        f"Strategy 1c: {'ON' if STRATEGY_1C_ENABLED else 'OFF'}\n"
         f"Strategy #2: {'ON' if STRATEGY2_ENABLED else 'OFF'}\n"
         f"Strategy #3: {'ON' if STRATEGY3_ENABLED else 'OFF'}\n"
         f"Mode: {'PREVIEW' if PREVIEW_MODE else 'LIVE'}\n"

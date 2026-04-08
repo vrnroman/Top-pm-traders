@@ -25,9 +25,9 @@ RUN cd polymarket && npm ci --production=false 2>/dev/null || true
 COPY polymarket/ polymarket/
 RUN cd polymarket && npx tsc 2>/dev/null || echo "TS build skipped (S1 may be disabled)"
 
-# Copy Strategy #2 (Python bot)
+# Copy Python bot code (strategies #2 & #3)
 COPY *.py ./
-COPY cities.py config.py ./
+COPY src/ src/
 
 # Create data directories
 RUN mkdir -p data cache results logs

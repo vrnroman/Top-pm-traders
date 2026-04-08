@@ -773,12 +773,33 @@ def _poll_loop():
             time.sleep(5)
 
 
+def _register_bot_menu():
+    """Register all bot commands in the Telegram UI menu."""
+    try:
+        url = f"{TELEGRAM_API.format(token=TELEGRAM_BOT_TOKEN)}/setMyCommands"
+        requests.post(url, json={
+            "commands": [
+                {"command": "predict", "description": "Run weather prediction (e.g. /predict 11 Apr)"},
+                {"command": "tennis", "description": "Show current tennis divergences"},
+                {"command": "tennis_pnl", "description": "Tennis strategy P&L breakdown"},
+                {"command": "status", "description": "Balance, positions, daily limits"},
+                {"command": "pnl", "description": "Realized + unrealized P&L"},
+                {"command": "takeprofit", "description": "Close positions with >30% profit"},
+                {"command": "history", "description": "Last 10 trades"},
+                {"command": "help", "description": "Show all commands"},
+            ],
+        }, timeout=10)
+    except Exception:
+        pass  # non-critical — menu just won't update
+
+
 def start_polling():
     """Start telegram polling in a background thread."""
     global _poll_thread
     if not is_configured():
         logger.info("Telegram not configured, skipping poll")
         return
+    _register_bot_menu()
     _stop_event.clear()
     _poll_thread = threading.Thread(target=_poll_loop, daemon=True, name="telegram-poll")
     _poll_thread.start()

@@ -269,7 +269,7 @@ async function flushPendingUpdates(): Promise<void> {
 export async function startTelegramCommands(clobClient?: ClobClient): Promise<void> {
   if (clobClient) _clobClient = clobClient;
   if (!BOT_TOKEN || !CHAT_ID) return;
-  await registerBotMenu();
+  // Bot menu is registered by the Python orchestrator (all commands in one place)
   await flushPendingUpdates();
   pollTimer = setInterval(pollUpdates, POLL_INTERVAL_MS);
   logger.info("Telegram commands active (/status, /pnl, /history)");

@@ -7,7 +7,11 @@ load_dotenv()
 
 # ── Strategy Toggles ──
 
-STRATEGY1_ENABLED = os.getenv("STRATEGY1_ENABLED", "false").lower() == "true"
+# Strategy #1 auto-enables when any tier (1a/1b/1c) is enabled
+STRATEGY_1A_ENABLED = os.getenv("STRATEGY_1A_ENABLED", "false").lower() == "true"
+STRATEGY_1B_ENABLED = os.getenv("STRATEGY_1B_ENABLED", "false").lower() == "true"
+STRATEGY_1C_ENABLED = os.getenv("STRATEGY_1C_ENABLED", "false").lower() == "true"
+STRATEGY1_ENABLED = STRATEGY_1A_ENABLED or STRATEGY_1B_ENABLED or STRATEGY_1C_ENABLED
 STRATEGY2_ENABLED = os.getenv("STRATEGY2_ENABLED", "true").lower() == "true"
 
 # ── Strategy #2: Weather Betting Parameters ──
