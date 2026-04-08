@@ -85,6 +85,7 @@ describe("inventory (real imports, mocked fs)", () => {
       avgPrice: 0.5,
       marketKey: "cond-1",
       market: "Market A",
+      tokenId: "inv-new-1",
     });
   });
 
@@ -173,6 +174,7 @@ describe("inventory (real imports, mocked fs)", () => {
         avgPrice: 0.6,
         marketKey: "c1",
         market: "API Market",
+        tokenId: "api-tok-1",
       });
     });
 
@@ -212,6 +214,7 @@ describe("inventory (real imports, mocked fs)", () => {
         avgPrice: 0,
         marketKey: "c1",
         market: "Parsed",
+        tokenId: "str-tok",
       });
       expect(fresh.hasPosition("nan-tok")).toBe(false); // NaN size filtered
     });

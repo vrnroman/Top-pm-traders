@@ -29,6 +29,16 @@ import {
   replacePendingOrders,
   updatePendingOrder,
 } from "./trade-queue";
+import { TIERED_MODE, getWalletTier, getTierConfig, StrategyTier } from "./strategy-config";
+import { evaluateTieredTrade, recordTieredPlacement, releaseTieredExposure, TieredCopyDecision } from "./tiered-risk-manager";
+import { analyzeTradeForPatterns } from "./pattern-detector";
+
+/** Release tiered exposure when an order is resolved (filled/cancelled). */
+function releaseTierExposure(order: PendingOrder): void {
+  if (order.tier) {
+    releaseTieredExposure(order.tier as StrategyTier, order.copySize);
+  }
+}
 
 // --- Execution worker: evaluate risk + place orders (hot path) ---
 
@@ -48,24 +58,64 @@ export async function placeTradeOrders(
     // Dedupe check — trade may have been enqueued twice between detection and execution
     if (isSeenTrade(trade.id) || isMaxRetries(trade.id)) continue;
 
+    // Pattern detection (Strategy 1c) — runs for ALL trades regardless of tier
+    analyzeTradeForPatterns(trade);
+
     const addr = shortAddress(trade.traderAddress);
     const marketKey = trade.conditionId || trade.tokenId;
     if (!trade.conditionId) {
       logger.debug(`Trade ${trade.id} missing conditionId — per-market cap uses tokenId fallback`);
     }
 
-    const decision = evaluateTrade(
-      trade.size,
-      trade.price,
-      trade.timestamp,
-      marketKey,
-      usdcBalance,
-      trade.side
-    );
+    // Route to tiered or legacy risk evaluation
+    let decision: { shouldCopy: boolean; copySize: number; reason?: string };
+    let tradeTier: StrategyTier | null = null;
+    let tieredDecision: TieredCopyDecision | null = null;
+
+    if (TIERED_MODE) {
+      tradeTier = getWalletTier(trade.traderAddress);
+    }
+
+    if (tradeTier) {
+      const tierConfig = getTierConfig(tradeTier);
+      tieredDecision = evaluateTieredTrade(tierConfig, trade.size, trade.price, trade.timestamp);
+      decision = tieredDecision;
+
+      // Handle alert-only mode (1c pattern-detected wallets auto-followed with small size)
+      if (tieredDecision.alertOnly) {
+        markTradeAsSeen(trade.id);
+        logger.info(`[${tradeTier}] ALERT: ${addr} ${trade.side} $${trade.size} on "${trade.market}" — ${tieredDecision.reason}`);
+        appendTradeHistory({
+          timestamp: new Date().toISOString(),
+          traderAddress: trade.traderAddress,
+          market: trade.market,
+          side: trade.side,
+          traderSize: trade.size,
+          copySize: tieredDecision.copySize,
+          price: trade.price,
+          status: "skipped",
+          reason: `[${tradeTier}] ${tieredDecision.reason}`,
+          sourceDetectedAt,
+          enqueuedAt,
+        });
+        continue;
+      }
+    } else {
+      // Legacy evaluation path
+      decision = evaluateTrade(
+        trade.size,
+        trade.price,
+        trade.timestamp,
+        marketKey,
+        usdcBalance,
+        trade.side
+      );
+    }
 
     if (!decision.shouldCopy) {
       markTradeAsSeen(trade.id);
-      logger.skip(`${addr} ${trade.side} $${trade.size} on "${trade.market}" — ${decision.reason}`);
+      const tierLabel = tradeTier ? `[${tradeTier}] ` : "";
+      logger.skip(`${tierLabel}${addr} ${trade.side} $${trade.size} on "${trade.market}" — ${decision.reason}`);
       appendTradeHistory({
         timestamp: new Date().toISOString(),
         traderAddress: trade.traderAddress,
@@ -165,7 +215,10 @@ export async function placeTradeOrders(
     if (CONFIG.previewMode) {
       markTradeAsSeen(trade.id);
       incrementCopyCount(trade.traderAddress, trade.market, trade.side);
-      
+      if (tradeTier) {
+        recordTieredPlacement(tradeTier, decision.copySize);
+      }
+
       const shares = decision.copySize / trade.price;
       if (trade.side === "BUY") {
         recordBuy(trade.tokenId, shares, trade.price, marketKey, trade.market);
@@ -173,8 +226,9 @@ export async function placeTradeOrders(
         recordSell(trade.tokenId, shares);
       }
 
+      const tierLabel = tradeTier ? `[${tradeTier}] ` : "";
       logger.trade(
-        `[PREVIEW] Would copy ${addr}: ${trade.side} $${decision.copySize} on "${trade.market}" @ ${trade.price}`
+        `[PREVIEW] ${tierLabel}Would copy ${addr}: ${trade.side} $${decision.copySize} on "${trade.market}" @ ${trade.price}`
       );
       telegram.tradePlaced(trade.market, trade.side, decision.copySize, trade.price);
       appendTradeHistory({
@@ -254,6 +308,9 @@ export async function placeTradeOrders(
       // Critical operation order: recordPlacement → persist pending → markTradeAsSeen
       // 1. Optimistic risk accounting
       recordPlacement(marketKey, decision.copySize, trade.side);
+      if (tradeTier) {
+        recordTieredPlacement(tradeTier, decision.copySize);
+      }
       // 2. Persist pending order to disk (crash recovery) — carry timing for verification records
       enqueuePendingOrder({
         trade,
@@ -267,6 +324,7 @@ export async function placeTradeOrders(
         enqueuedAt,
         orderSubmittedAt,
         source,
+        tier: tradeTier ?? undefined,
       });
       // 3. Mark as seen (dedup) & increment trader copy count limits
       markTradeAsSeen(trade.id);
@@ -559,6 +617,7 @@ export async function processVerifications(
       shouldRemove = true;
     }
     if (shouldRemove) {
+      releaseTierExposure(order);
       // Remove from shared array + rewrite disk (safe against concurrent enqueuePendingOrder)
       removePendingOrder(order.orderId);
     }

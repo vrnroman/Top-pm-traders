@@ -17,6 +17,8 @@ import { getAvgReactionLatency } from "./trade-store";
 import { drainTrades, peekPendingOrders } from "./trade-queue";
 import { EXECUTION_LOOP_MS, FILL_CHECK_DELAY_MS } from "./constants";
 import { createSources } from "./trade-source";
+import { TIERED_MODE, TIER_1A, TIER_1B, TIER_1C } from "./strategy-config";
+import { getTieredRiskStatus } from "./tiered-risk-manager";
 
 const LOCKFILE = path.resolve(process.cwd(), "data", "bot.lock");
 
@@ -147,7 +149,8 @@ async function periodicLoop(): Promise<void> {
       if (Date.now() - lastHeartbeatTime >= HEARTBEAT_INTERVAL_MS) {
         const avgLatency = getAvgReactionLatency();
         const latencyStr = avgLatency > 0 ? ` | avg reaction: ${avgLatency}ms` : "";
-        logger.info(`Heartbeat: ${getRiskStatus()} | ${getInventorySummary()}${latencyStr}`);
+        const tieredStr = TIERED_MODE ? ` | ${getTieredRiskStatus()}` : "";
+        logger.info(`Heartbeat: ${getRiskStatus()} | ${getInventorySummary()}${latencyStr}${tieredStr}`);
         lastHeartbeatTime = Date.now();
       }
     } catch (err: unknown) {
@@ -172,6 +175,13 @@ async function main(): Promise<void> {
   logger.info(`Poll interval: ${CONFIG.fetchInterval / 1000}s`);
   logger.info(`Limits: min $${CONFIG.minOrderSizeUsd}, max $${CONFIG.maxOrderSizeUsd}`);
   logger.info(`Risk: ${getRiskStatus()}`);
+
+  if (TIERED_MODE) {
+    logger.info("=== Tiered Strategy Mode ===");
+    if (TIER_1A.enabled) logger.info(`  1a (Geopolitical Insiders): ${TIER_1A.wallets.length} wallets, ${TIER_1A.copyPercentage}% copy, max $${TIER_1A.maxBet}/bet, $${TIER_1A.maxTotalExposure} exposure`);
+    if (TIER_1B.enabled) logger.info(`  1b (Whale/Leaderboard):     ${TIER_1B.wallets.length} wallets, ${TIER_1B.copyPercentage}% copy, max $${TIER_1B.maxBet}/bet, $${TIER_1B.maxTotalExposure} exposure`);
+    if (TIER_1C.enabled) logger.info(`  1c (Pattern Detection):     ${TIER_1C.alertOnly ? "ALERT ONLY" : "AUTO-FOLLOW"}, max $${TIER_1C.maxBet}/bet`);
+  }
 
   if (!CONFIG.previewMode) {
     const balance = await getUsdcBalance();

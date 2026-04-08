@@ -1,4 +1,36 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+
+// Mock config to avoid requiring env vars
+vi.mock("../config", () => ({
+  CONFIG: {
+    copyStrategy: "PERCENTAGE",
+    copySize: 10,
+    maxOrderSizeUsd: 100,
+    minOrderSizeUsd: 1,
+    maxPositionPerMarketUsd: 500,
+    maxDailyVolumeUsd: 1000,
+    maxTradeAgeHours: 1,
+    previewMode: true,
+    userAddresses: [],
+    proxyWallet: "0x0000000000000000000000000000000000000000",
+    signatureType: 0,
+    telegramBotToken: "",
+    telegramChatId: "",
+    fetchInterval: 1000,
+    fetchConcurrency: 5,
+    maxPriceDriftBps: 300,
+    maxSpreadBps: 500,
+    maxCopiesPerMarketSide: 2,
+    redeemIntervalHours: 0.5,
+    tradeMonitorMode: "data-api",
+    clobApiUrl: "",
+    dataApiUrl: "",
+    rpcUrl: "",
+    chainId: 137,
+  },
+  getPrivateKey: () => "0".repeat(64),
+}));
+
 import { _evaluateTradeWithState, RiskState, RiskConfig } from "../risk-manager";
 
 // Property-based / fuzz tests: verify invariants hold for ANY combination of inputs.

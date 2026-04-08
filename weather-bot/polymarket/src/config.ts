@@ -14,10 +14,28 @@ function optional(name: string, fallback: string): string {
   return process.env[name]?.trim() || fallback;
 }
 
-const userAddresses = parseAddresses(required("USER_ADDRESSES"));
-for (const addr of userAddresses) {
-  validateAddress(addr, "USER_ADDRESSES entry");
+// USER_ADDRESSES is required unless tiered strategy wallets are configured.
+// Import is deferred to avoid circular dependency — tiered config reads env vars directly.
+function loadUserAddresses(): string[] {
+  const raw = process.env.USER_ADDRESSES?.trim();
+  if (raw) {
+    const addrs = parseAddresses(raw);
+    for (const addr of addrs) validateAddress(addr, "USER_ADDRESSES entry");
+    return addrs;
+  }
+  // Check if tiered wallets provide addresses instead
+  const tier1a = process.env.STRATEGY_1A_WALLETS?.trim();
+  const tier1b = process.env.STRATEGY_1B_WALLETS?.trim();
+  if (tier1a || tier1b) {
+    // Merge tiered wallets into userAddresses for backward compatibility with detection
+    const all = new Set<string>();
+    if (tier1a) for (const a of parseAddresses(tier1a)) { validateAddress(a, "STRATEGY_1A_WALLETS"); all.add(a); }
+    if (tier1b) for (const a of parseAddresses(tier1b)) { validateAddress(a, "STRATEGY_1B_WALLETS"); all.add(a); }
+    return [...all];
+  }
+  throw new Error("Missing required env var: USER_ADDRESSES (or STRATEGY_1A_WALLETS / STRATEGY_1B_WALLETS)");
 }
+const userAddresses = loadUserAddresses();
 
 // Validate private key at startup, but don't store in CONFIG.
 // Only create-clob-client.ts should access it via getPrivateKey().
