@@ -1,0 +1,7 @@
+dist/
+node_modules/
+coverage/
+data/
+logs/
+plans/
+*.json

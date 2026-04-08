@@ -1,0 +1,14 @@
+polymarket/node_modules
+polymarket/dist
+polymarket/logs
+polymarket/data
+.git
+.env
+__pycache__
+*.pyc
+cache/
+results/
+logs/
+data/
+.DS_Store
+.vscode/

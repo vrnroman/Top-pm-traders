@@ -1,0 +1,65 @@
+# Dependencies
+/node_modules
+
+# Build output
+dist/
+deploy.tar.gz
+
+# Environment
+.env*
+!.env.example
+
+# Bot runtime data
+data/
+logs/
+
+# OS
+.DS_Store
+*.pem
+
+# Debug logs
+npm-debug.log*
+
+# TypeScript
+*.tsbuildinfo
+
+# Testing
+/coverage
+
+# Package managers
+yarn.lock
+pnpm-lock.yaml
+
+# Plans (generated, not source)
+plans/**/*
+!plans/templates/*
+
+# IDE / tooling
+.vercel
+repomix-output.xml
+screenshots/*
+docs/screenshots/*
+
+# AI tooling
+.claude/
+.agents/
+.opencode/
+CLAUDE.md
+AGENTS.md
+.repomixignore
+
+# Gemini
+.gemini/settings.json
+
+# External
+external/
+worktrees/
+
+# Misc
+release-manifest.json
+prompt.md
+ck.md
+logs.txt
+test-ck
+__pycache__
+.serena/cache

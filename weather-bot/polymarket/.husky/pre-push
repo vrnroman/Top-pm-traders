@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# 1. Block direct pushes to master
+while read local_ref local_sha remote_ref remote_sha; do
+  if [[ "$remote_ref" == "refs/heads/master" ]]; then
+    echo "❌ Direct push to master blocked. Create a PR from develop instead."
+    exit 1
+  fi
+done
+
+# 2. Lint
+npm run lint || { echo "❌ Lint failed."; exit 1; }
+
+# 3. Typecheck
+npm run typecheck || { echo "❌ Type errors found."; exit 1; }
+
+# 4. Tests
+npm test || { echo "❌ Tests failed."; exit 1; }
+
+# 5. Secrets scan — block .env files and hardcoded secrets
+for file in $(git diff --cached --name-only 2>/dev/null || git diff origin/$(git rev-parse --abbrev-ref HEAD)..HEAD --name-only 2>/dev/null); do
+  if [[ "$file" == *.env && "$file" != ".env.example" ]]; then
+    echo "❌ Blocked: $file looks like a secrets file."
+    exit 1
+  fi
+  if [[ -f "$file" ]] && grep -qEi '(PRIVATE_KEY|SECRET|PASSWORD|API_KEY)=[A-Za-z0-9]' "$file" 2>/dev/null; then
+    echo "❌ Blocked: $file may contain secrets."
+    exit 1
+  fi
+done
+
+# 6. Dependency vulnerability scan (block on critical/high)
+npm audit --audit-level=high 2>/dev/null || { echo "❌ npm audit found high/critical vulnerabilities."; exit 1; }
