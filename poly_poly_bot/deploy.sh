@@ -10,9 +10,9 @@ GCP_PROJECT_ID="${GCP_PROJECT_ID:-roman-vm}"
 
 INSTANCE="poly-poly-bot"
 ZONE="asia-northeast1-a"   # Tokyo, Japan
-MACHINE="e2-small"          # 2 vCPU, 2GB RAM (enough for both strategies)
+MACHINE="e2-small"          # 2 vCPU, 2GB RAM
 
-echo "=== Poly Poly Bot Deployment ==="
+echo "=== Poly Poly Bot Deployment (Python-only) ==="
 echo "  Project: $GCP_PROJECT_ID"
 echo "  Instance: $INSTANCE"
 echo "  Zone: $ZONE"
@@ -47,10 +47,6 @@ fi
 echo "[2/5] Archiving code..."
 ARCHIVE="/tmp/poly-poly-bot-deploy.tar.gz"
 tar czf "$ARCHIVE" \
-    --exclude='polymarket/node_modules' \
-    --exclude='polymarket/dist' \
-    --exclude='polymarket/logs/*' \
-    --exclude='polymarket/data/*' \
     --exclude='.git' \
     --exclude='cache' \
     --exclude='results' \
@@ -59,6 +55,10 @@ tar czf "$ARCHIVE" \
     --exclude='__pycache__' \
     --exclude='.env' \
     --exclude='.DS_Store' \
+    --exclude='.pytest_cache' \
+    --exclude='.ruff_cache' \
+    --exclude='*.egg-info' \
+    --exclude='node_modules' \
     -C "$(dirname "$0")" .
 
 echo "  Archive: $(du -h "$ARCHIVE" | cut -f1)"
