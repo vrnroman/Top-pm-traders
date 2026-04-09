@@ -8,7 +8,6 @@ Commands:
   /history           — Show last 10 copy trades (Strategy #1)
   /takeprofit        — Close all positions with unrealized PnL > 30%
   /tennis            — Show current tennis divergences (Strategy #3)
-  /tennis_pnl        — Tennis strategy P&L breakdown (Strategy #3)
   /help              — Show available commands
 """
 
@@ -285,8 +284,6 @@ def _handle_command(text: str):
 
     if text.startswith("/predict"):
         _handle_predict(text)
-    elif text.startswith("/tennis_pnl"):
-        _handle_tennis_pnl()
     elif text.startswith("/tennis"):
         _handle_tennis()
     elif text.startswith("/history"):
@@ -399,127 +396,121 @@ def _handle_status():
 
 
 def _handle_pnl():
-    """Handle /pnl command — realized + unrealized P&L, separate per strategy."""
-    lines = ["<b>P&amp;L Report</b>", ""]
+    """Handle /pnl command — unified P&L report across all strategies."""
+    lines = ["\U0001f4ca <b>P&amp;L Report</b>", ""]
 
-    # -- Strategy #1 --
+    # Track totals for the summary
+    grand_realized = 0.0
+    grand_unrealized = 0.0
+    grand_open_bets = 0
+
+    # -- Strategy #1 (Copy Traders) --
     lines.append("<b>Strategy #1 — Copy Traders</b>")
     if CONFIG.strategy1_enabled:
         s1_trades = _load_s1_trades()
-        if s1_trades:
-            total_cost = sum((t.get("cost") or 0) for t in s1_trades)
-            total_pnl = sum((t.get("pnl") or 0) for t in s1_trades)
-            n_trades = len(s1_trades)
-            lines.append(f"Trades: {n_trades}")
-            lines.append(f"Total cost: ${total_cost:.2f}")
-            lines.append(f"Realized PnL: ${total_pnl:.2f}")
-        else:
-            lines.append("No trades yet.")
+        s1_realized = sum((t.get("pnl") or 0) for t in s1_trades) if s1_trades else 0.0
+        grand_realized += s1_realized
+        lines.append(f"  Realized:    ${s1_realized:+.2f}")
+        lines.append(f"  Unrealized:  $0.00")
+        lines.append(f"  Open bets:   0")
     else:
-        lines.append("DISABLED")
+        lines.append("  [disabled]")
 
     lines.append("")
 
-    # -- Strategy #2 --
+    # -- Strategy #2 (Weather Betting) --
     lines.append("<b>Strategy #2 — Weather Betting</b>")
     trades = _load_s2_trades()
 
-    if not trades:
-        lines.append("No bets yet.")
-    else:
-        send_message("\n".join(lines) + "\nFetching live prices...")
+    if CONFIG.strategy2_enabled:
+        if trades:
+            send_message("\n".join(lines) + "\nFetching live prices...")
 
-        # Enrich with live prices
-        trades = _enrich_with_live_prices(trades)
+            # Enrich with live prices
+            trades = _enrich_with_live_prices(trades)
 
-        # Split into resolved and open
-        resolved = [t for t in trades if t.get("resolved")]
-        open_positions = [t for t in trades if not t.get("resolved")]
+            resolved = [t for t in trades if t.get("resolved")]
+            open_positions = [t for t in trades if not t.get("resolved")]
 
-        lines2 = [f"<b>Strategy #2 — Weather Betting</b>", ""]
+            s2_realized = sum((t.get("pnl") or 0) for t in resolved)
+            s2_unrealized = sum((t.get("unrealized_pnl") or 0) for t in open_positions
+                                if t.get("unrealized_pnl") is not None)
+            s2_open = len(open_positions)
 
-        # Realized P&L (resolved bets)
-        realized_pnl = sum((t.get("pnl") or 0) for t in resolved)
-        realized_cost = sum((t.get("cost") or 0) for t in resolved)
-        n_wins = sum(1 for t in resolved if t.get("won"))
-        lines2.append(f"<b>Realized</b> ({len(resolved)} resolved, {n_wins} wins)")
-        if resolved:
-            lines2.append(f"  PnL: ${realized_pnl:.2f}")
-            if realized_cost > 0:
-                lines2.append(f"  ROI: {100 * realized_pnl / realized_cost:.1f}%")
-        else:
-            lines2.append("  None yet")
+            grand_realized += s2_realized
+            grand_unrealized += s2_unrealized
+            grand_open_bets += s2_open
 
-        lines2.append("")
+            # Rebuild lines after interim message
+            lines = ["\U0001f4ca <b>P&amp;L Report</b>", ""]
 
-        # Unrealized P&L (open positions)
-        lines2.append(f"<b>Unrealized</b> ({len(open_positions)} open)")
-        total_unrealized = 0
-        total_open_cost = 0
-        tp_candidates = 0
-
-        for t in sorted(open_positions, key=lambda x: x.get("target_date", "")):
-            deg = "\u00b0F" if t.get("unit") == "fahrenheit" else "\u00b0C"
-            bucket = _esc(t.get("bucket_label", "?"))
-            city = _esc(t.get("city_name", t.get("city", "?")))
-            entry = t.get("entry_price", 0)
-            current = t.get("current_price")
-            cost = t.get("cost") or 0
-            unr_pnl = t.get("unrealized_pnl")
-            unr_pct = t.get("unrealized_pct")
-            target = t.get("target_date", "?")
-
-            total_open_cost += cost
-
-            if current is not None and unr_pnl is not None:
-                total_unrealized += unr_pnl
-                pct_str = f"{unr_pct:+.0%}" if unr_pct is not None else "?"
-                pnl_emoji = "\U0001f4c8" if unr_pnl >= 0 else "\U0001f4c9"
-                tp_flag = " \U0001f3af" if unr_pct is not None and unr_pct >= TAKE_PROFIT_PCT else ""
-                if unr_pct is not None and unr_pct >= TAKE_PROFIT_PCT:
-                    tp_candidates += 1
-                lines2.append(
-                    f"{pnl_emoji} {city} {bucket}{deg} ({target})\n"
-                    f"   Entry: {entry:.1%} \u2192 Now: {current:.1%}  "
-                    f"PnL: ${unr_pnl:+.2f} ({pct_str}){tp_flag}"
-                )
+            # Re-add Strategy #1
+            lines.append("<b>Strategy #1 \u2014 Copy Traders</b>")
+            if CONFIG.strategy1_enabled:
+                s1_trades_re = _load_s1_trades()
+                s1_re = sum((t.get("pnl") or 0) for t in s1_trades_re) if s1_trades_re else 0.0
+                lines.append(f"  Realized:    ${s1_re:+.2f}")
+                lines.append("  Unrealized:  $0.00")
+                lines.append("  Open bets:   0")
             else:
-                lines2.append(
-                    f"\u2753 {city} {bucket}{deg} ({target})\n"
-                    f"   Entry: {entry:.1%} \u2192 Now: N/A"
-                )
+                lines.append("  [disabled]")
+            lines.append("")
 
-        lines2.append("")
-        lines2.append(f"<b>Total unrealized: ${total_unrealized:+.2f}</b>")
-        if total_open_cost > 0:
-            lines2.append(f"Open cost: ${total_open_cost:.2f} | "
-                           f"Unr. ROI: {100 * total_unrealized / total_open_cost:+.1f}%")
+            lines.append("<b>Strategy #2 \u2014 Weather Betting</b>")
+            lines.append(f"  Realized:    ${s2_realized:+.2f}")
+            lines.append(f"  Unrealized:  ${s2_unrealized:+.2f}")
+            lines.append(f"  Open bets:   {s2_open}")
 
-        lines2.append("")
-        lines2.append(f"<b>Combined: ${realized_pnl + total_unrealized:+.2f}</b>")
-
-        if tp_candidates > 0:
-            lines2.append(f"\n\U0001f3af {tp_candidates} position(s) above {TAKE_PROFIT_PCT:.0%} profit \u2014 "
-                           f"use /takeprofit to close")
-
-        if CONFIG.preview_mode:
-            lines2.append(f"\n<i>PREVIEW MODE \u2014 positions are simulated</i>")
-
-        send_message("\n".join(lines2))
-        return
-
-    # -- Strategy #3 --
-    lines.append("")
-    lines.append("<b>Strategy #3 — Tennis Arb</b>")
-    tennis_trades = _load_s3_trades()
-    if tennis_trades:
-        total_bet = sum(t.get("bet_size", 0) for t in tennis_trades)
-        preview_count = sum(1 for t in tennis_trades if t.get("preview"))
-        live_count = len(tennis_trades) - preview_count
-        lines.append(f"Signals: {len(tennis_trades)} (preview: {preview_count}, live: {live_count})")
-        lines.append(f"Total bet size: ${total_bet:.2f}")
+            tp_candidates = sum(1 for t in open_positions
+                                if t.get("unrealized_pct") is not None
+                                and t.get("unrealized_pct") >= TAKE_PROFIT_PCT)
+            if tp_candidates > 0:
+                lines.append(f"  \U0001f3af {tp_candidates} position(s) above {TAKE_PROFIT_PCT:.0%} \u2014 /takeprofit")
+        else:
+            lines.append("  Realized:    $0.00")
+            lines.append("  Unrealized:  $0.00")
+            lines.append("  Open bets:   0")
     else:
-        lines.append("No trades yet.")
+        lines.append("  [disabled]")
+
+    lines.append("")
+
+    # -- Strategy #3 (Tennis Arb) --
+    lines.append("<b>Strategy #3 \u2014 Tennis Arb</b>")
+    if CONFIG.strategy3_enabled:
+        tennis_trades = _load_s3_trades()
+        if tennis_trades:
+            total_bet = sum(t.get("bet_size", 0) for t in tennis_trades)
+            preview_count = sum(1 for t in tennis_trades if t.get("preview"))
+            live_count = len(tennis_trades) - preview_count
+            avg_edge = sum(t.get("divergence", 0) for t in tennis_trades) / len(tennis_trades)
+
+            lines.append(f"  Realized:    $0.00")
+            lines.append(f"  Unrealized:  $0.00")
+            lines.append(f"  Open bets:   {len(tennis_trades)} ({live_count} live, {preview_count} preview)")
+            lines.append(f"  Total bet:   ${total_bet:.2f}")
+            lines.append(f"  Avg edge:    {avg_edge:.1%}")
+
+            grand_open_bets += len(tennis_trades)
+        else:
+            lines.append("  Realized:    $0.00")
+            lines.append("  Unrealized:  $0.00")
+            lines.append("  Open bets:   0")
+    else:
+        lines.append("  [disabled]")
+
+    # -- Grand Total --
+    lines.append("")
+    lines.append("\u2500" * 14)
+    lines.append("<b>TOTAL:</b>")
+    lines.append(f"  Realized:    ${grand_realized:+.2f}")
+    lines.append(f"  Unrealized:  ${grand_unrealized:+.2f}")
+    lines.append(f"  Open bets:   {grand_open_bets}")
+    net_pnl = grand_realized + grand_unrealized
+    lines.append(f"  Net P&amp;L:     ${net_pnl:+.2f}")
+
+    if CONFIG.preview_mode:
+        lines.append(f"\n<i>PREVIEW MODE \u2014 positions are simulated</i>")
 
     send_message("\n".join(lines))
 
@@ -701,79 +692,20 @@ def _handle_tennis():
         send_message("Tennis scan handler not configured.")
 
 
-def _handle_tennis_pnl():
-    """Handle /tennis_pnl command — show tennis strategy P&L."""
-    trades = _load_s3_trades()
-
-    if not trades:
-        send_message(
-            "<b>Strategy #3 — Tennis Arb P&amp;L</b>\n"
-            "No tennis trades yet."
-        )
-        return
-
-    # Group by day
-    total_signals = len(trades)
-    total_bet = sum(t.get("bet_size", 0) for t in trades)
-    preview_count = sum(1 for t in trades if t.get("preview"))
-    live_count = total_signals - preview_count
-
-    # Calculate avg edge
-    avg_edge = sum(t.get("divergence", 0) for t in trades) / total_signals if total_signals > 0 else 0
-
-    # Group by tournament
-    by_tournament: dict[str, list] = {}
-    for t in trades:
-        tourney = t.get("tournament", "Unknown")
-        by_tournament.setdefault(tourney, []).append(t)
-
-    lines = [
-        "<b>Strategy #3 — Tennis Arb P&amp;L</b>",
-        f"Total signals: {total_signals} (preview: {preview_count}, live: {live_count})",
-        f"Total bet size: ${total_bet:.2f}",
-        f"Avg edge: {avg_edge:.1%}",
-        "",
-    ]
-
-    for tourney, t_trades in sorted(by_tournament.items()):
-        t_bet = sum(t.get("bet_size", 0) for t in t_trades)
-        t_avg_div = sum(t.get("divergence", 0) for t in t_trades) / len(t_trades)
-        lines.append(
-            f"<b>{_esc(tourney)}</b>: {len(t_trades)} signals, "
-            f"${t_bet:.0f} bet, avg edge {t_avg_div:.1%}"
-        )
-
-    # Show last 5 signals
-    lines.append("")
-    lines.append("<b>Recent signals:</b>")
-    for t in trades[-5:]:
-        lines.append(
-            f"  {_esc(t.get('target_player', '?'))} \u2014 "
-            f"Sharp: {t.get('sharp_prob', 0):.0%} / PM: {t.get('polymarket_price', 0):.0%} \u2014 "
-            f"Edge: {t.get('divergence', 0):.0%} \u2014 ${t.get('bet_size', 0):.0f}"
-        )
-
-    if any(t.get("preview") for t in trades):
-        lines.append(f"\n<i>PREVIEW MODE \u2014 trades are simulated</i>")
-
-    send_message("\n".join(lines))
-
-
 def _handle_help():
     """Handle /help command."""
     send_message(
         "<b>Polymarket Trading Bot \u2014 Commands</b>\n\n"
         "<b>Strategy #1 \u2014 Copy Trading</b>\n"
         "<code>/status</code> \u2014 Bot status, balance, positions\n"
-        "<code>/pnl</code> \u2014 Realized + unrealized P&amp;L\n"
+        "<code>/pnl</code> \u2014 Unified P&amp;L across all strategies\n"
         "<code>/history</code> \u2014 Last 10 copy trades\n\n"
         "<b>Strategy #2 \u2014 Weather Betting</b>\n"
         "<code>/predict 11 Apr</code> \u2014 Run prediction for Apr 11\n"
         "<code>/predict</code> \u2014 Run prediction for default date\n"
         "<code>/takeprofit</code> \u2014 Close positions with &gt;30% profit\n\n"
         "<b>Strategy #3 \u2014 Tennis Arb</b>\n"
-        "<code>/tennis</code> \u2014 Show current tennis divergences\n"
-        "<code>/tennis_pnl</code> \u2014 Tennis strategy P&amp;L breakdown\n\n"
+        "<code>/tennis</code> \u2014 Show current tennis divergences\n\n"
         "<code>/help</code> \u2014 Show this message\n\n"
         f"Strategy #1: {'ON' if CONFIG.strategy1_enabled else 'OFF'}\n"
         f"Strategy #2: {'ON' if CONFIG.strategy2_enabled else 'OFF'}\n"
@@ -848,9 +780,8 @@ def _register_bot_menu():
             "commands": [
                 {"command": "predict", "description": "Run weather prediction (e.g. /predict 11 Apr)"},
                 {"command": "tennis", "description": "Show current tennis divergences"},
-                {"command": "tennis_pnl", "description": "Tennis strategy P&L breakdown"},
                 {"command": "status", "description": "Balance, positions, daily limits"},
-                {"command": "pnl", "description": "Realized + unrealized P&L"},
+                {"command": "pnl", "description": "Unified P&L across all strategies"},
                 {"command": "history", "description": "Last 10 copy trades"},
                 {"command": "takeprofit", "description": "Close positions with >30% profit"},
                 {"command": "help", "description": "Show all commands"},
