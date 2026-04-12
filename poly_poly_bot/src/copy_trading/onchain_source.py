@@ -279,12 +279,18 @@ class OnchainSource:
                         try:
                             from src.copy_trading.trade_store import is_seen_trade, is_max_retries
                             from src.copy_trading.trade_queue import enqueue_trade
+                            from src.models import QueuedTrade
                             if not is_seen_trade(trade.id) and not is_max_retries(trade.id):
                                 from datetime import datetime
                                 ts_ms = datetime.fromisoformat(
                                     trade.timestamp.replace("Z", "+00:00")
                                 ).timestamp() * 1000
-                                enqueue_trade(trade, ts_ms, "onchain")
+                                enqueue_trade(QueuedTrade(
+                                    trade=trade,
+                                    enqueued_at=ts_ms,
+                                    source_detected_at=ts_ms,
+                                    source="onchain",
+                                ))
                         except Exception as exc:
                             logger.error(f"Error enqueueing onchain trade: {error_message(exc)}")
 

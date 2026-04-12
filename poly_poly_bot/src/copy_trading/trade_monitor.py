@@ -152,7 +152,10 @@ async def fetch_trader_activity(address: str) -> list[DetectedTrade]:
     Handles 429 rate-limits and network errors gracefully.
     """
     url = f"{CONFIG.data_api_url}/activity"
-    params: dict[str, str] = {"address": address}
+    # Polymarket's Data API uses `user=` as the wallet filter on /activity.
+    # The endpoint used to accept `address=`; it now returns HTTP 400
+    # ("required query param 'user' not provided") for anything else.
+    params: dict[str, str] = {"user": address}
 
     cursor = _get_cursor(address)
     if cursor is not None:

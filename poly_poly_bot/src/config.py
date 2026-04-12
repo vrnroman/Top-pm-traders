@@ -158,6 +158,7 @@ class Config:
     clob_api_url: str = _optional("CLOB_API_URL", "https://clob.polymarket.com")
     data_api_url: str = _optional("DATA_API_URL", "https://data-api.polymarket.com")
     rpc_url: str = _optional("RPC_URL", "https://polygon-rpc.com")
+    etherscan_api_key: str = _optional("ETHERSCAN_API_KEY", "")
     chain_id: int = 137
 
     # --- Directories ---

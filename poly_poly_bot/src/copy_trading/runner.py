@@ -60,12 +60,35 @@ def _release_lock() -> None:
 
 
 async def _supervised(name: str, fn) -> str:
-    """Run a coroutine and return a message if it exits or crashes."""
-    try:
-        await fn()
-        return f"{name}: exited normally (unexpected)"
-    except Exception as err:
-        return f"{name}: crashed — {error_message(err)}"
+    """Run a worker coroutine, restarting it on crash with exponential backoff.
+
+    Critical: without a restart loop, a crashed worker returns a string and the
+    sibling `asyncio.gather(..., return_exceptions=False)` waits forever on the
+    other workers — leaving the bot "running" but with that worker silently
+    dead. The restart loop here keeps essential workers (pattern-scanner,
+    detection, periodic) alive unless the whole bot is shutting down.
+    """
+    backoff = 5.0
+    while not _shutting_down:
+        try:
+            await fn()
+            # An infinite-loop worker returning means either _shutting_down
+            # was flipped or the worker exited unexpectedly. In the latter
+            # case we retry with backoff so transient errors don't go silent.
+            if _shutting_down:
+                return f"{name}: shutting down"
+            logger.warn(f"[supervisor] {name} exited unexpectedly — restarting in {backoff:.0f}s")
+        except Exception as err:
+            logger.error(f"[supervisor] {name} crashed — {error_message(err)} — restarting in {backoff:.0f}s")
+            try:
+                await telegram.bot_error(f"{name} crashed: {error_message(err)}")
+            except Exception:
+                pass
+        if _shutting_down:
+            break
+        await async_sleep(backoff)
+        backoff = min(backoff * 2, 60.0)  # cap at 1 min so transient outages recover quickly
+    return f"{name}: shutting down"
 
 
 async def _detection_loop() -> None:
@@ -93,6 +116,63 @@ async def _verification_loop(clob_client) -> None:
         if pending:
             await process_verifications(pending, clob_client)
         await async_sleep(FILL_CHECK_DELAY_S)
+
+
+async def _monitor_drain_loop() -> None:
+    """Preview / monitor-only trade drain.
+
+    When there is no CLOB client (no PRIVATE_KEY configured), the main
+    execution loop doesn't start — but `_detection_loop` keeps enqueueing
+    trades for every tracked 1a/1b wallet. Without this drain, the pending-
+    trades queue grows unboundedly and OOMs the VM.
+
+    This worker:
+      1. drains the queue every EXECUTION_LOOP_S
+      2. feeds every drained trade through `analyze_trade_for_patterns` when
+         Strategy 1c is enabled, so 1c still gets coverage from the 1a/1b
+         wallet intake even in monitor mode
+      3. drops the trades afterward
+    """
+    from src.copy_trading.trade_store import is_seen_trade, mark_trade_as_seen
+    run_patterns = TIER_1C.enabled
+    while not _shutting_down:
+        drained = drain_trades()
+        if drained:
+            logger.debug(f"[monitor-drain] draining {len(drained)} trades")
+            if run_patterns:
+                from src.copy_trading.pattern_detector import analyze_trade_for_patterns
+                for qt in drained:
+                    if is_seen_trade(qt.trade.id):
+                        continue
+                    try:
+                        await analyze_trade_for_patterns(qt.trade)
+                    except Exception as err:
+                        logger.debug(f"[monitor-drain] pattern err: {error_message(err)}")
+                    mark_trade_as_seen(qt.trade.id)
+        await async_sleep(EXECUTION_LOOP_S)
+
+
+async def _pattern_scanner_loop() -> None:
+    """Strategy 1c: geo market discovery + market-scoped activity polling.
+
+    Independent of the 1a/1b tracked-wallet intake — this path feeds the pattern
+    detector with trades from any wallet participating in a geopolitical market.
+    """
+    from src.copy_trading.geo_market_scanner import (
+        refresh_geo_markets,
+        run_geo_market_scanner,
+    )
+    from src.copy_trading.market_activity_poller import run_market_activity_poller
+
+    try:
+        await refresh_geo_markets()
+    except Exception as err:
+        logger.warn(f"Initial geo scan failed: {error_message(err)}")
+
+    await asyncio.gather(
+        run_geo_market_scanner(),
+        run_market_activity_poller(),
+    )
 
 
 async def _periodic_loop() -> None:
@@ -129,7 +209,7 @@ async def _periodic_loop() -> None:
 
             if now - last_reconcile >= reconcile_interval_s:
                 try:
-                    await sync_inventory_from_api()
+                    await sync_inventory_from_api(CONFIG.proxy_wallet)
                     last_reconcile = now
                 except Exception as err:
                     logger.warn(f"Periodic reconciliation failed: {error_message(err)}")
@@ -178,26 +258,38 @@ async def run_copy_trading() -> None:
         logger.info("Checking token approvals...")
         check_and_set_approvals(get_private_key())
 
-    await sync_inventory_from_api()
+    await sync_inventory_from_api(CONFIG.proxy_wallet)
     logger.info(f"Inventory: {get_inventory_summary()}")
 
     clob_client = create_clob_client()
-    await recover_pending_orders(clob_client)
+    if clob_client:
+        await recover_pending_orders(clob_client)
 
     logger.info("Bot started. Monitoring trades...")
 
     try:
-        balance = await get_usdc_balance()
+        balance = await get_usdc_balance() if clob_client else 0
         await telegram.bot_started(len(CONFIG.user_addresses), max(balance, 0))
     except Exception:
         pass
 
+    # In preview mode without CLOB client, only run detection + periodic (monitoring only)
+    workers = [_supervised("detection", _detection_loop), _supervised("periodic", _periodic_loop)]
+    if TIER_1C.enabled:
+        workers.append(_supervised("pattern-scanner", _pattern_scanner_loop))
+    if clob_client:
+        workers.append(_supervised("execution", lambda: _execution_loop(clob_client)))
+        workers.append(_supervised("verification", lambda: _verification_loop(clob_client)))
+    else:
+        # No CLOB client → no executor. We still need to drain the detection
+        # queue, otherwise it grows unboundedly. The drain worker also feeds
+        # 1c pattern detection so 1a/1b wallet trades are still scanned.
+        logger.info("No CLOB client — running in monitor-only mode (detection + alerts + pattern drain)")
+        workers.append(_supervised("monitor-drain", _monitor_drain_loop))
+
     try:
         dead_worker = await asyncio.gather(
-            _supervised("detection", _detection_loop),
-            _supervised("execution", lambda: _execution_loop(clob_client)),
-            _supervised("verification", lambda: _verification_loop(clob_client)),
-            _supervised("periodic", _periodic_loop),
+            *workers,
             return_exceptions=False,
         )
     except Exception as err:

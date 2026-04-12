@@ -6,6 +6,7 @@ from src.copy_trading.trade_store import is_seen_trade, is_max_retries
 from src.copy_trading.trade_queue import enqueue_trade
 from src.config import CONFIG
 from src.logger import logger
+from src.models import QueuedTrade
 from src.utils import error_message
 
 
@@ -39,7 +40,12 @@ class DataApiSource:
                         ).timestamp()
                         * 1000
                     )
-                    enqueue_trade(trade, ts_ms, "data-api")
+                    enqueue_trade(QueuedTrade(
+                        trade=trade,
+                        enqueued_at=ts_ms,
+                        source_detected_at=ts_ms,
+                        source="data-api",
+                    ))
                 consecutive_failures = 0
                 circuit_breaker_alerted = False
             except Exception as err:
