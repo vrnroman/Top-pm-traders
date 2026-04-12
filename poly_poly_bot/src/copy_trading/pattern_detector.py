@@ -149,15 +149,23 @@ def _add_recent_bet(
     size: float,
     funder: str = "",
     price: float = 0.0,
+    trade_ts: Optional[float] = None,
 ) -> None:
-    """Add a bet to the recent bets list, pruning if over limit."""
+    """Add a bet to the recent bets list, pruning if over limit.
+
+    `trade_ts` is the actual epoch seconds of the trade; callers should pass it
+    so the cluster window's prune step drops truly stale entries even if a
+    stale trade somehow reaches this path. Falls back to wall-clock `now` when
+    callers can't supply it (legacy tests).
+    """
     now = time.time()
+    ts = float(trade_ts) if trade_ts is not None else now
     _recent_bets.append(RecentBet(
         wallet=wallet.lower(),
         market=market,
         side=side,
         size=size,
-        timestamp=now,
+        timestamp=ts,
         funder=(funder or "").lower(),
         price=float(price or 0.0),
     ))
@@ -365,7 +373,11 @@ def _check_cluster(trade: DetectedTrade) -> Optional[PatternAlert]:
     if total_volume < TIER_1C.min_cluster_volume_usd:
         return None
 
-    alert_key = f"cluster:{trade.market}:{trade.side}:{len(wallets_involved)}"
+    # Dedup key intentionally does NOT include wallet count or volume —
+    # otherwise every new wallet joining the same cluster bumps the key
+    # and fires a fresh alert (producing the "12 / 13 / 14 / 15 wallets"
+    # alert-spam chain we saw in prod).
+    alert_key = f"cluster:{trade.market}:{trade.side}"
     if _is_duplicate_alert(alert_key):
         return None
 
@@ -428,7 +440,9 @@ def _check_same_funder_cluster(
     total_volume = sum(b.size for b in matches) + trade.size
     wallets_involved = [b.wallet for b in matches] + [current_wallet]
 
-    alert_key = f"funder:{cf}:{trade.market}:{len(wallets_involved)}"
+    # Same dedup-key discipline as _check_cluster: market+funder only,
+    # not wallet count, so joiners don't re-trigger the alert.
+    alert_key = f"funder:{cf}:{trade.market}"
     if _is_duplicate_alert(alert_key):
         return None
 
@@ -745,7 +759,10 @@ async def _send_pattern_alert(alert: PatternAlert) -> None:
 # Main analysis entry point
 # ---------------------------------------------------------------------------
 
-async def analyze_trade_for_patterns(trade: DetectedTrade) -> list[PatternAlert]:
+async def analyze_trade_for_patterns(
+    trade: DetectedTrade,
+    trade_ts: Optional[float] = None,
+) -> list[PatternAlert]:
     """Analyze a trade for Strategy 1c patterns.
 
     Updates wallet activity, adds to recent bets, runs all three pattern
@@ -753,6 +770,9 @@ async def analyze_trade_for_patterns(trade: DetectedTrade) -> list[PatternAlert]
 
     Args:
         trade: The detected trade to analyze.
+        trade_ts: Actual epoch seconds of the trade, used so the cluster
+            window prunes stale entries correctly. Defaults to wall-clock
+            time when not supplied (legacy callers / tests).
 
     Returns:
         List of PatternAlert objects (may be empty).
@@ -815,6 +835,7 @@ async def analyze_trade_for_patterns(trade: DetectedTrade) -> list[PatternAlert]
         trade.size,
         funder=current_funder,
         price=trade.price,
+        trade_ts=trade_ts,
     )
 
     # Pattern 1: New account + large geo bet

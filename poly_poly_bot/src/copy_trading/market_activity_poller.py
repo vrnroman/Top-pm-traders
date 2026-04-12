@@ -31,6 +31,12 @@ from src.utils import error_message
 
 _TRADES_URL_PATH = "/trades"
 
+# Maximum age of a trade we're willing to analyze as "realtime". Anything older
+# is skipped at the intake layer — this prevents the bot from firing pattern
+# alerts on a backlog of stale trades when a market is first discovered (cold
+# start or new market added by the scanner refresh).
+_MAX_TRADE_AGE_S = 3600
+
 # Per-market cursor: condition_id -> latest seen epoch seconds.
 _cursor: dict[str, int] = {}
 
@@ -139,8 +145,11 @@ async def _poll_market(client: httpx.AsyncClient, market: GeoMarket) -> int:
     from src.copy_trading.pattern_detector import analyze_trade_for_patterns
 
     cursor_before = _cursor.get(market.condition_id, 0)
+    first_poll = cursor_before == 0
     newest_ts = cursor_before
     analyzed = 0
+    now = int(time.time())
+    fresh_cutoff = now - _MAX_TRADE_AGE_S
 
     for item in items:
         try:
@@ -149,9 +158,30 @@ async def _poll_market(client: httpx.AsyncClient, market: GeoMarket) -> int:
             ts_raw = 0
         if ts_raw > 1e12:
             ts_raw //= 1000
+        if ts_raw <= 0:
+            continue
+
+        # Advance the cursor off every row we see, not just the ones we
+        # analyze — otherwise a market with only stale trades would be
+        # re-walked from scratch on every poll.
+        if ts_raw > newest_ts:
+            newest_ts = ts_raw
 
         # Skip anything we've already processed (cursor overlap of 10s for safety).
         if cursor_before and ts_raw <= cursor_before - 10:
+            continue
+
+        # Hard freshness gate: never analyze a trade older than the cluster
+        # window. This makes "realtime" mean what it says — no stale trades
+        # from before the bot started can trigger pattern alerts.
+        if ts_raw < fresh_cutoff:
+            continue
+
+        # First-poll baseline: on the very first poll of a market, we just
+        # establish the cursor without analyzing anything. Subsequent polls
+        # will only see trades that arrive *after* the baseline, which is
+        # the actual definition of "new activity on this market".
+        if first_poll:
             continue
 
         trade = _item_to_detected_trade(item)
@@ -160,11 +190,8 @@ async def _poll_market(client: httpx.AsyncClient, market: GeoMarket) -> int:
         if _mark_seen(trade.id):
             continue
 
-        if ts_raw > newest_ts:
-            newest_ts = ts_raw
-
         try:
-            await analyze_trade_for_patterns(trade)
+            await analyze_trade_for_patterns(trade, trade_ts=ts_raw)
             analyzed += 1
         except Exception as exc:
             logger.debug(f"[market-poll] analyze error: {error_message(exc)}")
