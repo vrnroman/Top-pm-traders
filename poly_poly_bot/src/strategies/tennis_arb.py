@@ -54,6 +54,8 @@ class TennisArbStrategy:
         min_liquidity: float = 10_000.0,
         preview_mode: bool = True,
         data_dir: str = "",
+        min_edge_step: float = 0.05,
+        max_event_date_delta_days: float = 3.0,
     ):
         self.min_divergence = min_divergence
         self.max_bet_size = max_bet_size
@@ -63,6 +65,12 @@ class TennisArbStrategy:
         self.min_liquidity = min_liquidity
         self.preview_mode = preview_mode
         self.data_dir = data_dir
+        # Re-bet gate: only emit a new signal if edge grew by this much vs last
+        # recorded bet on the same market (prevents spamming the same bet every
+        # scan when edge stays roughly constant).
+        self.min_edge_step = min_edge_step
+        # Same-event guard: event endDate must be within ±N days of match_time
+        self.max_event_date_delta_days = max_event_date_delta_days
 
         # Initialize odds provider
         self._provider: OddsProvider
@@ -99,13 +107,40 @@ class TennisArbStrategy:
         comparisons = self._match_and_compare(sharp_odds, poly_markets)
         logger.info(f"Matched {len(comparisons)} market-odds pairs")
 
-        # Step 4: Filter by divergence threshold
+        # Step 4: Filter by divergence threshold + re-bet gate
+        bet_state = self._load_bet_state()
         signals = []
-        for comp in comparisons:
+        skipped_dedupe = 0
+        for comp, pm in comparisons:
             if comp.divergence < self.min_divergence:
                 continue
 
+            # Re-bet gate: if we already emitted a signal for this market,
+            # only emit again when edge has grown by at least min_edge_step.
+            state_key = f"{comp.polymarket_condition_id}:{comp.polymarket_token_id}"
+            prev = bet_state.get(state_key)
+            if prev is not None:
+                prev_edge = float(prev.get("last_divergence", 0.0))
+                if comp.divergence < prev_edge + self.min_edge_step:
+                    skipped_dedupe += 1
+                    logger.debug(
+                        f"Tennis arb: skip re-bet {pm.get('question','')} — "
+                        f"edge {comp.divergence:.1%} vs prev {prev_edge:.1%} "
+                        f"(step {self.min_edge_step:.0%})"
+                    )
+                    continue
+
             bet_size = self._calculate_bet_size(comp.sharp_prob, comp.polymarket_price)
+
+            event_slug = pm.get("event_slug", "")
+            polymarket_url = (
+                f"https://polymarket.com/event/{event_slug}" if event_slug else ""
+            )
+            outcome_label = (
+                pm.get("group_item_title")
+                or comp.polymarket_player
+                or ""
+            )
 
             signal = {
                 "strategy": "tennis_arb",
@@ -114,6 +149,7 @@ class TennisArbStrategy:
                 "player_a": comp.match_odds.player_a,
                 "player_b": comp.match_odds.player_b,
                 "target_player": comp.polymarket_player,
+                "outcome_label": outcome_label,
                 "sharp_source": comp.match_odds.source,
                 "sharp_prob": round(comp.sharp_prob, 4),
                 "sharp_odds_a": comp.match_odds.odds_a,
@@ -126,6 +162,10 @@ class TennisArbStrategy:
                 "market_id": comp.polymarket_market_id,
                 "condition_id": comp.polymarket_condition_id,
                 "token_id": comp.polymarket_token_id,
+                "event_title": pm.get("event_title", ""),
+                "event_slug": event_slug,
+                "polymarket_url": polymarket_url,
+                "polymarket_question": pm.get("question", ""),
                 "polymarket_volume": comp.polymarket_volume,
                 "polymarket_liquidity": comp.polymarket_liquidity,
                 "match_time": (
@@ -137,6 +177,26 @@ class TennisArbStrategy:
                 "preview": self.preview_mode,
             }
             signals.append(signal)
+
+            # Record in state for future gate checks
+            bet_state[state_key] = {
+                "last_divergence": round(comp.divergence, 4),
+                "last_price": round(comp.polymarket_price, 4),
+                "last_bet_size": round(bet_size, 2),
+                "last_ts": signal["timestamp"],
+                "times_emitted": int(prev.get("times_emitted", 0)) + 1 if prev else 1,
+                "question": pm.get("question", ""),
+                "event_title": pm.get("event_title", ""),
+            }
+
+        if skipped_dedupe:
+            logger.info(
+                f"Tennis arb: skipped {skipped_dedupe} re-bet(s) — edge did "
+                f"not grow by {self.min_edge_step:.0%}"
+            )
+
+        if signals:
+            self._save_bet_state(bet_state)
 
         # Sort by divergence descending
         signals.sort(key=lambda s: s["divergence"], reverse=True)
@@ -172,6 +232,11 @@ class TennisArbStrategy:
                         "limit": 100,
                         "offset": offset,
                         "active": "true",
+                        # Without closed=false, Gamma returns all-time tennis
+                        # events (thousands of closed historical markets) and
+                        # the currently-live ones (e.g. Monte Carlo final) get
+                        # buried past offset=2000.
+                        "closed": "false",
                     },
                     timeout=30,
                 )
@@ -184,8 +249,21 @@ class TennisArbStrategy:
                 for event in events:
                     markets = event.get("markets", [])
                     event_title = event.get("title", "")
+                    event_slug = event.get("slug", "")
+                    event_end_date = event.get("endDate", "") or event.get("end_date", "")
 
                     for market in markets:
+                        # Gamma's event-level endDate is the tournament's UMA
+                        # resolution deadline (often days after the match). The
+                        # per-market `gameStartTime` is the actual scheduled
+                        # match moment and should be preferred for the
+                        # same-event-date guard. Fall back to endDate, then
+                        # event endDate, only if gameStartTime is missing.
+                        pm_match_time = (
+                            market.get("gameStartTime")
+                            or market.get("endDate")
+                            or event_end_date
+                        )
                         # Parse market metadata
                         volume_str = market.get("volume", "0")
                         try:
@@ -230,8 +308,12 @@ class TennisArbStrategy:
 
                         all_markets.append({
                             "event_title": event_title,
+                            "event_slug": event_slug,
+                            "event_end_date": event_end_date,
+                            "pm_match_time": pm_match_time,
                             "question": question,
                             "player": player,
+                            "group_item_title": market.get("groupItemTitle", ""),
                             "yes_price": yes_price,
                             "volume": volume,
                             "liquidity": liquidity,
@@ -255,9 +337,18 @@ class TennisArbStrategy:
 
     def _match_and_compare(
         self, sharp_odds: list[MatchOdds], poly_markets: list[dict]
-    ) -> list[OddsComparison]:
-        """Match sharp odds to Polymarket markets by player name similarity."""
-        comparisons: list[OddsComparison] = []
+    ) -> list[tuple[OddsComparison, dict]]:
+        """Match sharp odds to Polymarket markets by player name similarity.
+
+        Also enforces a same-event guard: the PM market must reference BOTH
+        players from the sharp fixture (rules out outright/tournament-winner
+        markets that only name one player), and its event end date must be
+        near the sharp match time (rules out same-player future tournaments).
+
+        Returns a list of (OddsComparison, pm_dict) so the caller keeps
+        access to event metadata for Telegram / state tracking.
+        """
+        comparisons: list[tuple[OddsComparison, dict]] = []
 
         for odds in sharp_odds:
             for pm in poly_markets:
@@ -274,9 +365,21 @@ class TennisArbStrategy:
                 if side is None:
                     continue
 
+                # Same-event guard: reject outright / future-tournament markets
+                ok, reason = _validate_same_event(
+                    pm, odds.player_a, odds.player_b,
+                    odds.match_time, self.max_event_date_delta_days,
+                )
+                if not ok:
+                    logger.debug(
+                        f"Tennis arb: reject {odds.player_a} vs {odds.player_b} "
+                        f"→ '{pm.get('question','')}' ({reason})"
+                    )
+                    continue
+
                 divergence = sharp_prob - pm["yes_price"]
 
-                comparisons.append(OddsComparison(
+                comp = OddsComparison(
                     match_odds=odds,
                     polymarket_condition_id=pm["condition_id"],
                     polymarket_token_id=pm["token_id_yes"],
@@ -288,7 +391,8 @@ class TennisArbStrategy:
                     divergence=divergence,
                     polymarket_volume=pm["volume"],
                     polymarket_liquidity=pm["liquidity"],
-                ))
+                )
+                comparisons.append((comp, pm))
 
         return comparisons
 
@@ -314,6 +418,32 @@ class TennisArbStrategy:
         size = kelly * self.kelly_fraction * self.max_bet_size
         return min(size, self.max_bet_size)
 
+    def _bet_state_path(self) -> str:
+        return os.path.join(self.data_dir or "", "tennis_bet_state.json")
+
+    def _load_bet_state(self) -> dict:
+        """Load persisted per-market last-edge state (for re-bet gate)."""
+        path = self._bet_state_path()
+        if not path or not os.path.exists(path):
+            return {}
+        try:
+            with open(path) as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(f"Could not read tennis bet state: {e}")
+            return {}
+
+    def _save_bet_state(self, state: dict) -> None:
+        if not self.data_dir:
+            return
+        os.makedirs(self.data_dir, exist_ok=True)
+        try:
+            with open(self._bet_state_path(), "w") as f:
+                json.dump(state, f, indent=2)
+        except OSError as e:
+            logger.error(f"Failed to save tennis bet state: {e}")
+
     def _save_signals(self, signals: list[dict]) -> None:
         """Append signals to trade history JSONL file."""
         if not self.data_dir or not signals:
@@ -330,7 +460,66 @@ class TennisArbStrategy:
             logger.error(f"Failed to save tennis signals: {e}")
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────
+# -- Helpers --
+
+
+def _surname(name: str) -> str:
+    parts = _normalize_name(name).split()
+    return parts[-1] if parts else ""
+
+
+def _validate_same_event(
+    pm: dict,
+    player_a: str,
+    player_b: str,
+    match_time: datetime | None,
+    max_delta_days: float,
+) -> tuple[bool, str]:
+    """Reject PM markets that don't clearly describe the same head-to-head
+    match as the sharp fixture.
+
+    Checks:
+      1. Both player surnames must appear somewhere in the market's question
+         or its event title (rules out "Will X win the French Open?" which
+         only mentions one player).
+      2. If match_time is known, the event endDate must be within
+         `max_delta_days` of match_time (rules out future tournaments
+         featuring the same player).
+    """
+    a_last = _surname(player_a)
+    b_last = _surname(player_b)
+    if not a_last or not b_last:
+        return False, "missing_surname"
+
+    haystack = " ".join([
+        pm.get("question", "") or "",
+        pm.get("event_title", "") or "",
+        pm.get("group_item_title", "") or "",
+    ]).lower()
+    haystack = re.sub(r"[^a-z\s]", " ", haystack)
+
+    if a_last not in haystack or b_last not in haystack:
+        return False, f"h2h_missing:need={a_last}+{b_last}"
+
+    # Prefer the per-market `gameStartTime` (the actual match moment) over
+    # the event-level `endDate` (which is a UMA resolution deadline usually
+    # days later). Falling through event_end_date preserves behavior for any
+    # market where gameStartTime isn't populated.
+    ref_raw = (pm.get("pm_match_time") or pm.get("event_end_date") or "").strip()
+    if match_time is not None and ref_raw:
+        try:
+            # Gamma sometimes returns "2026-04-12 13:05:00+00" with a space,
+            # sometimes strict ISO "2026-04-12T13:05:00Z" — normalize both.
+            iso = ref_raw.replace(" ", "T").replace("Z", "+00:00")
+            ref = datetime.fromisoformat(iso)
+            mt = match_time if match_time.tzinfo else match_time.replace(tzinfo=timezone.utc)
+            delta_days = abs((ref - mt).total_seconds()) / 86400.0
+            if delta_days > max_delta_days:
+                return False, f"date_delta={delta_days:.1f}d"
+        except (ValueError, TypeError):
+            pass
+
+    return True, "ok"
 
 
 def _extract_player_from_question(question: str) -> str:
