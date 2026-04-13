@@ -80,8 +80,8 @@ class Strategy1cConfig(TierConfig):
     geo_tags: list[str] = field(default_factory=lambda: list(_DEFAULT_GEO_TAGS))
     market_scan_interval_s: float = 3600.0
     activity_poll_interval_s: float = 60.0
-    min_cluster_volume_usd: float = 5000.0
-    min_cluster_wallet_size_usd: float = 500.0
+    min_cluster_volume_usd: float = 25000.0
+    min_cluster_wallet_size_usd: float = 2000.0
     # Same-funder cluster: require N wallets that share a non-CEX USDC funder.
     min_funder_cluster_wallets: int = 2  # 2 others + current trade = 3 total
     # Only fetch funder for wallets with ≤ this many Polymarket fills. Above
@@ -96,10 +96,13 @@ class Strategy1cConfig(TierConfig):
     min_late_bet_usd: float = 10000.0
     late_edge_threshold: float = 0.05
     # Thin-market dominance: flag bets that consume a large fraction of the
-    # Gamma-reported book depth or weekly volume on a geo market.
-    min_thin_market_bet_usd: float = 2000.0
-    thin_market_dominance_ratio: float = 0.20  # bet ≥ 20% of liquidity
-    thin_market_weekly_ratio: float = 0.50     # bet ≥ 50% of weekly volume
+    # Gamma-reported book depth or weekly volume on a *genuinely thin* geo
+    # market. A market is "thin" only if weekly volume ≤ max_weekly_volume_for_thin_usd;
+    # above that, book-depth ratios are meaningless because the book replenishes.
+    min_thin_market_bet_usd: float = 5000.0
+    thin_market_dominance_ratio: float = 0.40  # bet ≥ 40% of resting liquidity
+    thin_market_weekly_ratio: float = 0.60     # bet ≥ 60% of weekly volume
+    max_weekly_volume_for_thin_usd: float = 50000.0
 
 
 def _load_tier_1a() -> TierConfig:
@@ -167,16 +170,17 @@ def _load_tier_1c() -> Strategy1cConfig:
         geo_tags=_load_geo_tags(),
         market_scan_interval_s=_opt_float("STRATEGY_1C_MARKET_SCAN_INTERVAL_S", 3600),
         activity_poll_interval_s=_opt_float("STRATEGY_1C_ACTIVITY_POLL_INTERVAL_S", 60),
-        min_cluster_volume_usd=_opt_float("STRATEGY_1C_MIN_CLUSTER_VOLUME_USD", 5000),
-        min_cluster_wallet_size_usd=_opt_float("STRATEGY_1C_MIN_CLUSTER_WALLET_SIZE_USD", 500),
+        min_cluster_volume_usd=_opt_float("STRATEGY_1C_MIN_CLUSTER_VOLUME_USD", 25000),
+        min_cluster_wallet_size_usd=_opt_float("STRATEGY_1C_MIN_CLUSTER_WALLET_SIZE_USD", 2000),
         min_funder_cluster_wallets=_opt_int("STRATEGY_1C_MIN_FUNDER_CLUSTER_WALLETS", 2),
         funder_max_polymarket_trades=_opt_int("STRATEGY_1C_FUNDER_MAX_PM_TRADES", 20),
         close_proximity_hours=_opt_float("STRATEGY_1C_CLOSE_PROXIMITY_HOURS", 24),
         min_late_bet_usd=_opt_float("STRATEGY_1C_MIN_LATE_BET_USD", 10000),
         late_edge_threshold=_opt_float("STRATEGY_1C_LATE_EDGE_THRESHOLD", 0.05),
-        min_thin_market_bet_usd=_opt_float("STRATEGY_1C_MIN_THIN_MARKET_BET_USD", 2000),
-        thin_market_dominance_ratio=_opt_float("STRATEGY_1C_THIN_MARKET_DOMINANCE_RATIO", 0.20),
-        thin_market_weekly_ratio=_opt_float("STRATEGY_1C_THIN_MARKET_WEEKLY_RATIO", 0.50),
+        min_thin_market_bet_usd=_opt_float("STRATEGY_1C_MIN_THIN_MARKET_BET_USD", 5000),
+        thin_market_dominance_ratio=_opt_float("STRATEGY_1C_THIN_MARKET_DOMINANCE_RATIO", 0.40),
+        thin_market_weekly_ratio=_opt_float("STRATEGY_1C_THIN_MARKET_WEEKLY_RATIO", 0.60),
+        max_weekly_volume_for_thin_usd=_opt_float("STRATEGY_1C_MAX_WEEKLY_VOLUME_FOR_THIN_USD", 50000),
     )
 
 

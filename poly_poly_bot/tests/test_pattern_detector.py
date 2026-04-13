@@ -546,8 +546,8 @@ class TestThinMarketDominance:
             liquidity_usd=10_000.0,
         )
         try:
-            trade = self._make_trade(cid, size=5_000.0)  # 50% of liquidity
-            alert = _check_thin_market_dominance(trade)
+            trade = self._make_trade(cid, size=6_000.0)  # 60% of liquidity
+            alert = _check_thin_market_dominance(trade, wallet_is_novel=True)
             assert alert is not None
             assert "liquidity" in alert.details.lower()
         finally:
@@ -561,30 +561,48 @@ class TestThinMarketDominance:
             slug="low-vol",
             title="Will Russia use nuclear weapons?",
             tags=["geopolitics"],
-            volume_1w_usd=4_000.0,
+            volume_1w_usd=8_000.0,
         )
         try:
-            trade = self._make_trade(cid, size=3_000.0)  # 75% of weekly vol
-            alert = _check_thin_market_dominance(trade)
+            trade = self._make_trade(cid, size=6_000.0)  # 75% of weekly vol
+            alert = _check_thin_market_dominance(trade, wallet_is_novel=True)
             assert alert is not None
             assert "weekly" in alert.details.lower()
         finally:
             gm._by_cid.pop(cid, None)
 
-    def test_does_not_fire_below_threshold(self):
+    def test_does_not_fire_on_liquid_market(self):
+        """Weekly volume above max_weekly_volume_for_thin_usd disqualifies the market."""
         from src.copy_trading import geo_market_scanner as gm
         cid = "0x" + "33" * 32
         gm._by_cid[cid] = gm.GeoMarket(
             condition_id=cid,
-            slug="deep",
+            slug="liquid",
             title="Will Russia use nuclear weapons?",
             tags=["geopolitics"],
-            liquidity_usd=100_000.0,
-            volume_1w_usd=200_000.0,
+            liquidity_usd=50_000.0,  # 30% book ratio if it fired
+            volume_1w_usd=250_000.0,  # disqualifying weekly volume
         )
         try:
-            trade = self._make_trade(cid, size=3_000.0)  # 3% of liquidity
-            alert = _check_thin_market_dominance(trade)
+            trade = self._make_trade(cid, size=15_000.0)
+            alert = _check_thin_market_dominance(trade, wallet_is_novel=True)
+            assert alert is None
+        finally:
+            gm._by_cid.pop(cid, None)
+
+    def test_novelty_gate_blocks_known_whale(self):
+        from src.copy_trading import geo_market_scanner as gm
+        cid = "0x" + "66" * 32
+        gm._by_cid[cid] = gm.GeoMarket(
+            condition_id=cid,
+            slug="thin",
+            title="Will Russia use nuclear weapons?",
+            tags=["geopolitics"],
+            liquidity_usd=10_000.0,
+        )
+        try:
+            trade = self._make_trade(cid, size=6_000.0)
+            alert = _check_thin_market_dominance(trade, wallet_is_novel=False)
             assert alert is None
         finally:
             gm._by_cid.pop(cid, None)
@@ -601,14 +619,14 @@ class TestThinMarketDominance:
         )
         try:
             trade = self._make_trade(cid, size=500.0)  # below min_thin_market_bet_usd
-            alert = _check_thin_market_dominance(trade)
+            alert = _check_thin_market_dominance(trade, wallet_is_novel=True)
             assert alert is None
         finally:
             gm._by_cid.pop(cid, None)
 
     def test_unknown_market_no_alert(self):
         trade = self._make_trade("0x" + "aa" * 32, size=10_000.0)
-        alert = _check_thin_market_dominance(trade)
+        alert = _check_thin_market_dominance(trade, wallet_is_novel=True)
         assert alert is None
 
     def test_missing_metrics_no_alert(self):
@@ -623,7 +641,7 @@ class TestThinMarketDominance:
         )
         try:
             trade = self._make_trade(cid, size=10_000.0)
-            alert = _check_thin_market_dominance(trade)
+            alert = _check_thin_market_dominance(trade, wallet_is_novel=True)
             assert alert is None
         finally:
             gm._by_cid.pop(cid, None)

@@ -116,7 +116,8 @@ def _update_wallet_activity(address: str, size: float) -> WalletActivity:
 # ---------------------------------------------------------------------------
 
 MAX_RECENT_BETS = 10_000
-CLUSTER_WINDOW_S = 3600  # 1 hour
+CLUSTER_WINDOW_S = 3600  # 1 hour — recent-bets retention (used by funder cluster + VWAP)
+CLUSTER_DETECTION_WINDOW_S = 900  # 15 min — tight window for loose cluster pattern
 
 @dataclass
 class RecentBet:
@@ -181,7 +182,7 @@ def _add_recent_bet(
 def _find_cluster(market: str, side: str, exclude_wallet: str) -> list[RecentBet]:
     """Find recent bets on the same market and side within the cluster window."""
     now = time.time()
-    cutoff = now - CLUSTER_WINDOW_S
+    cutoff = now - CLUSTER_DETECTION_WINDOW_S
     matches: list[RecentBet] = []
     seen_wallets: set[str] = set()
     exclude_lower = exclude_wallet.lower()
@@ -243,6 +244,31 @@ class PatternAlert:
 # ---------------------------------------------------------------------------
 
 _UNSET = object()
+
+
+def _is_novel_wallet(
+    age_days: Optional[float],
+    prior_trade_ts: Optional[int],
+    polymarket_count_truncated: bool,
+) -> bool:
+    """Wallet-quality gate used by the weak patterns (cluster, thin-market).
+
+    A wallet is "novel" if it shows at least one of: first-ever Polymarket
+    trade, dormant for ≥ dormant_days, or on-chain age < new_account_age_days.
+    Fail-closed: if a lookup was truncated or didn't return data, the wallet
+    is not considered novel and the weak pattern is suppressed. This is how
+    we keep organic whale activity from firing cluster / thin-market alerts.
+    """
+    if polymarket_count_truncated:
+        return False
+    if prior_trade_ts is None:
+        return True  # first-ever trade on Polymarket
+    now = time.time()
+    if (now - float(prior_trade_ts)) / 86400 >= TIER_1C.dormant_days:
+        return True
+    if age_days is not None and age_days < TIER_1C.new_account_age_days:
+        return True
+    return False
 
 
 def _check_new_account_geo(
@@ -349,16 +375,19 @@ def _check_first_ever_bet_geo(
     )
 
 
-def _check_cluster(trade: DetectedTrade) -> Optional[PatternAlert]:
-    """Pattern 2: Coordinated cluster — 3+ wallets, same direction, same market, within 1h.
+def _check_cluster(
+    trade: DetectedTrade,
+    wallet_is_novel: bool = False,
+) -> Optional[PatternAlert]:
+    """Pattern 2: Coordinated cluster — 3+ wallets, same direction, same market, ≤15 min apart.
 
-    Triggers when 3+ distinct wallets (including the current one) bet the same
-    direction on the same market within the cluster window AND the cluster has
-    enough volume to rule out organic retail chatter. Most active Polymarket
-    markets always have dozens of micro-trades per hour — without the volume
-    gate this pattern alerts constantly.
+    Gated on `wallet_is_novel`: the current trade's wallet must have a novelty
+    signal (first-ever, dormant, or on-chain-new). Without this gate, any hot
+    geo market trivially produces 3 wallets betting the same side within the
+    window, drowning the channel in organic-whale noise.
     """
-    # Size gate on the current trade, so a $5 bet never triggers a cluster alert.
+    if not wallet_is_novel:
+        return None
     if trade.size < TIER_1C.min_cluster_wallet_size_usd:
         return None
 
@@ -381,15 +410,16 @@ def _check_cluster(trade: DetectedTrade) -> Optional[PatternAlert]:
     if _is_duplicate_alert(alert_key):
         return None
 
+    window_min = CLUSTER_DETECTION_WINDOW_S // 60
     return PatternAlert(
         pattern="cluster",
         market=trade.market,
         side=trade.side,
-        size=total_volume,
+        size=trade.size,
         wallet=trade.trader_address,
         details=(
             f"{len(wallets_involved)} wallets betting {trade.side} on same market "
-            f"within 1h (total ${total_volume:,.0f})"
+            f"within {window_min}m — current ${trade.size:,.0f}, cluster total ${total_volume:,.0f}"
         ),
         severity="high",
     )
@@ -450,11 +480,12 @@ def _check_same_funder_cluster(
         pattern="same_funder_cluster",
         market=trade.market,
         side=trade.side,
-        size=total_volume,
+        size=trade.size,
         wallet=trade.trader_address,
         details=(
             f"{len(wallets_involved)} wallets funded by {cf[:10]}… "
-            f"betting on geo markets within 1h (total ${total_volume:,.0f})"
+            f"betting on geo markets within 1h — current ${trade.size:,.0f}, "
+            f"cluster total ${total_volume:,.0f}"
         ),
         severity="high",
     )
@@ -562,20 +593,25 @@ def _check_late_geo_bet(trade: DetectedTrade) -> Optional[PatternAlert]:
     )
 
 
-def _check_thin_market_dominance(trade: DetectedTrade) -> Optional[PatternAlert]:
-    """Pattern 5: Bet size dominates a thin market's liquidity.
+def _check_thin_market_dominance(
+    trade: DetectedTrade,
+    wallet_is_novel: bool = False,
+) -> Optional[PatternAlert]:
+    """Pattern 5: Bet size dominates a *genuinely thin* market's liquidity.
 
-    Gamma reports `liquidity` (book depth in USD) and `volume1wkClob`. Most
-    geo markets are genuinely thin — $15-50k liquidity is typical. A $5k bet
-    on a $15k-liquidity market consumes ~33% of the book and moves price
-    materially, which rarely makes sense unless the taker has specific
-    information. We fire on:
+    Gated on two things to avoid firing on every medium-sized whale trade:
+      1. Wallet must be novel (first-ever / dormant / on-chain-new). A known
+         whale moving $15k on a geo market is noise, not an insider signal.
+      2. Market must actually be thin — weekly volume ≤ max_weekly_volume_for_thin_usd.
+         Gamma's `liquidity` is rest-book depth and constantly replenishes;
+         using it alone labels any liquid market "thin". The weekly-volume
+         gate is the honest thinness check.
 
-      - Trade size ≥ min_thin_market_bet_usd
-      - Geo market
-      - trade_size / liquidity ≥ thin_market_dominance_ratio, OR
-        trade_size / volume_1w ≥ thin_market_weekly_ratio
+    Then we fire only the ratio that actually crossed a threshold (not both),
+    so the alert message doesn't leak comforting numbers next to alarming ones.
     """
+    if not wallet_is_novel:
+        return None
     if trade.size < TIER_1C.min_thin_market_bet_usd:
         return None
     if not is_geopolitical_market(trade.market, getattr(trade, "condition_id", "")):
@@ -589,6 +625,12 @@ def _check_thin_market_dominance(trade: DetectedTrade) -> Optional[PatternAlert]
     if gm is None:
         return None
 
+    # Thinness gate: a market that traded > max_weekly_volume_for_thin_usd in
+    # the last week is not thin, regardless of current book snapshot. Unknown
+    # volume (0) is treated as "possibly thin" and allowed through.
+    if gm.volume_1w_usd > TIER_1C.max_weekly_volume_for_thin_usd:
+        return None
+
     liquidity_ratio = 0.0
     if gm.liquidity_usd > 0:
         liquidity_ratio = trade.size / gm.liquidity_usd
@@ -596,15 +638,12 @@ def _check_thin_market_dominance(trade: DetectedTrade) -> Optional[PatternAlert]
     if gm.volume_1w_usd > 0:
         volume_ratio = trade.size / gm.volume_1w_usd
 
-    fires = (
-        liquidity_ratio >= TIER_1C.thin_market_dominance_ratio
-        or volume_ratio >= TIER_1C.thin_market_weekly_ratio
-    )
-    if not fires:
-        return None
-    # Must have at least one real metric — a market with unknown liquidity
-    # AND unknown weekly volume gives us no signal.
     if liquidity_ratio == 0.0 and volume_ratio == 0.0:
+        return None
+
+    liquidity_fires = liquidity_ratio >= TIER_1C.thin_market_dominance_ratio
+    volume_fires = volume_ratio >= TIER_1C.thin_market_weekly_ratio
+    if not (liquidity_fires or volume_fires):
         return None
 
     alert_key = f"thin:{trade.trader_address}:{trade.market}:{trade.side}"
@@ -612,9 +651,9 @@ def _check_thin_market_dominance(trade: DetectedTrade) -> Optional[PatternAlert]
         return None
 
     dom_bits = []
-    if liquidity_ratio > 0:
+    if liquidity_fires:
         dom_bits.append(f"{liquidity_ratio*100:.0f}% of ${gm.liquidity_usd:,.0f} liquidity")
-    if volume_ratio > 0:
+    if volume_fires:
         dom_bits.append(f"{volume_ratio*100:.0f}% of ${gm.volume_1w_usd:,.0f} weekly volume")
     return PatternAlert(
         pattern="thin_market_dominance",
@@ -853,8 +892,16 @@ async def analyze_trade_for_patterns(
     if alert is not None:
         alerts.append(alert)
 
-    # Pattern 2: Cluster detection (loose — same side + same market + size gate)
-    alert = _check_cluster(trade)
+    # Novelty gate used by the weak patterns (cluster, thin_market_dominance).
+    # Computed once from the already-fetched wallet_history/wallet_age data.
+    wallet_is_novel = _is_novel_wallet(
+        age_days=age_days,
+        prior_trade_ts=prior_ts,
+        polymarket_count_truncated=pm_truncated,
+    )
+
+    # Pattern 2: Cluster detection (same side + same market + novelty gate)
+    alert = _check_cluster(trade, wallet_is_novel=wallet_is_novel)
     if alert is not None:
         alerts.append(alert)
 
@@ -874,7 +921,7 @@ async def analyze_trade_for_patterns(
         alerts.append(alert)
 
     # Pattern 5: Bet dominates a thin market's liquidity / weekly volume
-    alert = _check_thin_market_dominance(trade)
+    alert = _check_thin_market_dominance(trade, wallet_is_novel=wallet_is_novel)
     if alert is not None:
         alerts.append(alert)
 
