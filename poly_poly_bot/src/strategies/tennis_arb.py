@@ -30,6 +30,7 @@ from src.odds.base import OddsProvider
 from src.odds.models import MatchOdds, OddsComparison
 from src.odds.oddspapi import OddsPapiProvider
 from src.odds.scraper import OddsScraperProvider
+from src.odds.smarkets import SmarketsProvider
 
 logger = logging.getLogger("strategy.tennis_arb")
 
@@ -78,6 +79,11 @@ class TennisArbStrategy:
             self._provider = OddsPapiProvider(api_key=oddspapi_api_key)
         elif odds_provider == "scraper":
             self._provider = OddsScraperProvider()
+        elif odds_provider == "smarkets":
+            # Real-time tennis prices via Smarkets' public REST API. No
+            # account / API key / payment required — see src/odds/smarkets.py
+            # for the rationale and architecture notes.
+            self._provider = SmarketsProvider()
         else:
             logger.warning(f"Unknown odds provider '{odds_provider}', using OddsPapi")
             self._provider = OddsPapiProvider(api_key=oddspapi_api_key)

@@ -4,6 +4,7 @@ from src.odds.base import OddsProvider
 from src.odds.models import MatchOdds, OddsComparison
 from src.odds.oddspapi import OddsPapiProvider
 from src.odds.scraper import OddsScraperProvider
+from src.odds.smarkets import SmarketsProvider
 
 __all__ = [
     "OddsProvider",
@@ -11,4 +12,5 @@ __all__ = [
     "OddsComparison",
     "OddsPapiProvider",
     "OddsScraperProvider",
+    "SmarketsProvider",
 ]
