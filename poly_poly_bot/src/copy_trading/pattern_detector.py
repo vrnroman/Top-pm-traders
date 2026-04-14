@@ -237,6 +237,7 @@ class PatternAlert:
     wallet: str
     details: str
     severity: str = "medium"  # "low", "medium", "high"
+    condition_id: str = ""    # used by the notifier to look up event_slug for the URL
 
 
 # ---------------------------------------------------------------------------
@@ -436,13 +437,19 @@ def _check_same_funder_cluster(
     signal than "three wallets happened to bet the same side" — it implies the
     wallets are operated by (or funded by) the same entity.
 
-    Skipped entirely when the current trade has no known funder (empty string),
-    because the base case is "wallets we explicitly looked up". The cache warms
-    over time and coverage improves with the bot's uptime.
+    Uses two *dedicated* thresholds, independent from the loose `_check_cluster`
+    gates, so tuning the noise floor here doesn't loosen that one:
+
+      - `min_funder_cluster_wallet_size_usd` (default $4k): per-wallet size floor
+      - `min_funder_cluster_wallets` (default 4): minimum *other* wallets needed,
+        so a cluster needs 5 total distinct wallets (current + 4 peers) to fire.
+
+    Skipped entirely when the current trade has no known funder (empty string).
     """
     if not current_funder:
         return None
-    if trade.size < TIER_1C.min_cluster_wallet_size_usd:
+    size_floor = TIER_1C.min_funder_cluster_wallet_size_usd
+    if trade.size < size_floor:
         return None
 
     now = time.time()
@@ -457,7 +464,7 @@ def _check_same_funder_cluster(
             continue
         if bet.funder != cf:
             continue
-        if bet.size < TIER_1C.min_cluster_wallet_size_usd:
+        if bet.size < size_floor:
             continue
         if bet.wallet in seen_wallets:
             continue
@@ -782,14 +789,37 @@ async def _send_pattern_alert(alert: PatternAlert) -> None:
             "thin_market_dominance": "Thin Market Dominance",
         }.get(alert.pattern, alert.pattern)
 
-        text = (
-            f'{severity_icon} <b>Pattern: {_escape_html(pattern_label)}</b>\n'
-            f'Market: "{_escape_html(alert.market)}"\n'
-            f'Side: {alert.side} | Size: ${alert.size:,.0f}\n'
-            f'Wallet: {alert.wallet[:10]}...\n'
-            f'{_escape_html(alert.details)}'
-        )
-        await _send_message(text)
+        # Resolve the PM event URL from the condition_id via the geo market
+        # cache. Falls back to an empty string if the market isn't in the
+        # cache (e.g. a non-geo alert or a cache miss).
+        event_url = ""
+        if alert.condition_id:
+            try:
+                from src.copy_trading.geo_market_scanner import get_geo_market
+                gm = get_geo_market(alert.condition_id)
+                if gm is not None:
+                    slug = gm.event_slug or gm.slug
+                    if slug:
+                        event_url = f"https://polymarket.com/event/{slug}"
+            except Exception:
+                pass
+
+        wallet = alert.wallet or ""
+        profile_url = f"https://polymarket.com/profile/{wallet}" if wallet else ""
+
+        lines = [
+            f'{severity_icon} <b>Pattern: {_escape_html(pattern_label)}</b>',
+            f'Market: "{_escape_html(alert.market)}"',
+        ]
+        if event_url:
+            lines.append(f'🔗 {event_url}')
+        lines.append(f'Side: {alert.side} | Size: ${alert.size:,.0f}')
+        lines.append(f'Wallet: <code>{_escape_html(wallet)}</code>')
+        if profile_url:
+            lines.append(f'👤 {profile_url}')
+        lines.append(_escape_html(alert.details))
+
+        await _send_message("\n".join(lines))
     except Exception as exc:
         logger.warn(f"[pattern] Failed to send alert: {exc}")
 
@@ -925,8 +955,12 @@ async def analyze_trade_for_patterns(
     if alert is not None:
         alerts.append(alert)
 
-    # Send Telegram alerts
+    # Send Telegram alerts. Stamp condition_id on every alert so the notifier
+    # can look up the event slug and build polymarket.com/event/{slug} links.
+    trade_cid = getattr(trade, "condition_id", "") or ""
     for a in alerts:
+        if not a.condition_id:
+            a.condition_id = trade_cid
         logger.info(f"[pattern] Detected: {a.pattern} — {a.details}")
         await _send_pattern_alert(a)
 

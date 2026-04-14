@@ -261,16 +261,35 @@ class TestDormantReactivationFromHistory:
 
 
 class TestSameFunderCluster:
-    def test_fires_on_three_wallets_sharing_funder(self):
+    """The same-funder cluster pattern now requires:
+      - `min_funder_cluster_wallets` (default 4) other wallets with the same funder
+        → minimum 5 total distinct wallets including the current trade
+      - `min_funder_cluster_wallet_size_usd` (default $4,000) per wallet
+    Tests use sizes comfortably above $4k to pass the size gate by default.
+    """
+
+    def test_fires_on_five_wallets_sharing_funder(self):
         funder = "0x" + "f" * 40
         market = "Will Russia use nuclear weapons?"
         _add_recent_bet("0x" + "1" * 40, market, "BUY", 5000.0, funder=funder)
         _add_recent_bet("0x" + "2" * 40, market, "BUY", 6000.0, funder=funder)
+        _add_recent_bet("0x" + "3" * 40, market, "BUY", 5500.0, funder=funder)
+        _add_recent_bet("0x" + "4" * 40, market, "BUY", 4500.0, funder=funder)
 
-        current = _make_trade(market=market, size=7000.0, trader="0x" + "3" * 40)
+        current = _make_trade(market=market, size=7000.0, trader="0x" + "5" * 40)
         alert = _check_same_funder_cluster(current, current_funder=funder)
         assert alert is not None
         assert alert.pattern == "same_funder_cluster"
+
+    def test_three_wallets_is_NOT_enough(self):
+        """Pre-fix this would have fired; now the min is 4 others + current = 5."""
+        funder = "0x" + "f" * 40
+        market = "Will Russia use nuclear weapons?"
+        _add_recent_bet("0x" + "1" * 40, market, "BUY", 5000.0, funder=funder)
+        _add_recent_bet("0x" + "2" * 40, market, "BUY", 6000.0, funder=funder)
+        current = _make_trade(market=market, size=7000.0, trader="0x" + "3" * 40)
+        alert = _check_same_funder_cluster(current, current_funder=funder)
+        assert alert is None
 
     def test_skips_when_current_funder_unknown(self):
         market = "Will Russia use nuclear weapons?"
@@ -292,7 +311,9 @@ class TestSameFunderCluster:
         market = "Will Russia use nuclear weapons?"
         _add_recent_bet("0x" + "1" * 40, market, "BUY", 10.0, funder=funder)
         _add_recent_bet("0x" + "2" * 40, market, "BUY", 20.0, funder=funder)
-        current = _make_trade(market=market, size=5000.0, trader="0x" + "3" * 40)
+        _add_recent_bet("0x" + "3" * 40, market, "BUY", 30.0, funder=funder)
+        _add_recent_bet("0x" + "4" * 40, market, "BUY", 40.0, funder=funder)
+        current = _make_trade(market=market, size=5000.0, trader="0x" + "5" * 40)
         alert = _check_same_funder_cluster(current, current_funder=funder)
         assert alert is None
 
@@ -301,7 +322,51 @@ class TestSameFunderCluster:
         market = "Will Russia use nuclear weapons?"
         _add_recent_bet("0x" + "1" * 40, market, "BUY", 5000.0, funder=funder)
         _add_recent_bet("0x" + "2" * 40, market, "BUY", 6000.0, funder=funder)
-        current = _make_trade(market=market, size=10.0, trader="0x" + "3" * 40)
+        _add_recent_bet("0x" + "3" * 40, market, "BUY", 5500.0, funder=funder)
+        _add_recent_bet("0x" + "4" * 40, market, "BUY", 4500.0, funder=funder)
+        # current trade below the dedicated $4k funder-cluster floor → drop
+        current = _make_trade(market=market, size=10.0, trader="0x" + "5" * 40)
+        alert = _check_same_funder_cluster(current, current_funder=funder)
+        assert alert is None
+
+    def test_dedicated_size_floor_rejects_just_below_4k(self):
+        """The new per-wallet size floor for funder clusters is $4000,
+        independent of the loose cluster pattern's $2000. A $3,999 bet
+        should fail even though the loose cluster would accept it."""
+        funder = "0x" + "f" * 40
+        market = "Will Russia use nuclear weapons?"
+        _add_recent_bet("0x" + "1" * 40, market, "BUY", 5000.0, funder=funder)
+        _add_recent_bet("0x" + "2" * 40, market, "BUY", 5000.0, funder=funder)
+        _add_recent_bet("0x" + "3" * 40, market, "BUY", 5000.0, funder=funder)
+        _add_recent_bet("0x" + "4" * 40, market, "BUY", 5000.0, funder=funder)
+        # Current is above $2k (loose cluster gate) but below $4k
+        current = _make_trade(market=market, size=3_999.0, trader="0x" + "5" * 40)
+        alert = _check_same_funder_cluster(current, current_funder=funder)
+        assert alert is None
+
+    def test_dedicated_size_floor_accepts_exactly_4k(self):
+        """Boundary: trade size equal to the floor passes."""
+        funder = "0x" + "f" * 40
+        market = "Will Russia use nuclear weapons?"
+        _add_recent_bet("0x" + "1" * 40, market, "BUY", 5000.0, funder=funder)
+        _add_recent_bet("0x" + "2" * 40, market, "BUY", 5000.0, funder=funder)
+        _add_recent_bet("0x" + "3" * 40, market, "BUY", 5000.0, funder=funder)
+        _add_recent_bet("0x" + "4" * 40, market, "BUY", 5000.0, funder=funder)
+        current = _make_trade(market=market, size=4_000.0, trader="0x" + "5" * 40)
+        alert = _check_same_funder_cluster(current, current_funder=funder)
+        assert alert is not None
+
+    def test_peer_wallet_below_floor_ignored(self):
+        """A wallet that would otherwise join a cluster is dropped from the
+        count if its own bet is below the $4k floor — so 3 qualifying peers
+        + 1 sub-floor peer + current still counts as only 3 peers → no alert."""
+        funder = "0x" + "f" * 40
+        market = "Will Russia use nuclear weapons?"
+        _add_recent_bet("0x" + "1" * 40, market, "BUY", 5000.0, funder=funder)
+        _add_recent_bet("0x" + "2" * 40, market, "BUY", 5000.0, funder=funder)
+        _add_recent_bet("0x" + "3" * 40, market, "BUY", 5000.0, funder=funder)
+        _add_recent_bet("0x" + "4" * 40, market, "BUY", 3_000.0, funder=funder)  # below floor
+        current = _make_trade(market=market, size=5_000.0, trader="0x" + "5" * 40)
         alert = _check_same_funder_cluster(current, current_funder=funder)
         assert alert is None
 

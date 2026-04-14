@@ -82,8 +82,17 @@ class Strategy1cConfig(TierConfig):
     activity_poll_interval_s: float = 60.0
     min_cluster_volume_usd: float = 25000.0
     min_cluster_wallet_size_usd: float = 2000.0
-    # Same-funder cluster: require N wallets that share a non-CEX USDC funder.
-    min_funder_cluster_wallets: int = 2  # 2 others + current trade = 3 total
+    # Same-funder cluster: require N *other* wallets (in addition to the current
+    # trade) that share a non-CEX USDC funder. The default 4 means a cluster
+    # needs 5 total distinct wallets before it fires — empirically the threshold
+    # where small retail-trading-group false positives (3-4 wallets sharing one
+    # personal funder) get filtered out and only real orchestration remains.
+    min_funder_cluster_wallets: int = 4  # 4 others + current trade = 5 total
+    # Dedicated per-wallet size floor for the same-funder cluster pattern,
+    # isolated from the loose `cluster` pattern's `min_cluster_wallet_size_usd`.
+    # Doubling this (vs the shared $2k floor) cuts out "small trading group
+    # testing a strategy" noise without touching the loose cluster thresholds.
+    min_funder_cluster_wallet_size_usd: float = 4000.0
     # Only fetch funder for wallets with ≤ this many Polymarket fills. Above
     # that, the funder signal is too dilute and the Etherscan call isn't worth it.
     funder_max_polymarket_trades: int = 20
@@ -172,7 +181,8 @@ def _load_tier_1c() -> Strategy1cConfig:
         activity_poll_interval_s=_opt_float("STRATEGY_1C_ACTIVITY_POLL_INTERVAL_S", 60),
         min_cluster_volume_usd=_opt_float("STRATEGY_1C_MIN_CLUSTER_VOLUME_USD", 25000),
         min_cluster_wallet_size_usd=_opt_float("STRATEGY_1C_MIN_CLUSTER_WALLET_SIZE_USD", 2000),
-        min_funder_cluster_wallets=_opt_int("STRATEGY_1C_MIN_FUNDER_CLUSTER_WALLETS", 2),
+        min_funder_cluster_wallets=_opt_int("STRATEGY_1C_MIN_FUNDER_CLUSTER_WALLETS", 4),
+        min_funder_cluster_wallet_size_usd=_opt_float("STRATEGY_1C_MIN_FUNDER_CLUSTER_WALLET_SIZE_USD", 4000),
         funder_max_polymarket_trades=_opt_int("STRATEGY_1C_FUNDER_MAX_PM_TRADES", 20),
         close_proximity_hours=_opt_float("STRATEGY_1C_CLOSE_PROXIMITY_HOURS", 24),
         min_late_bet_usd=_opt_float("STRATEGY_1C_MIN_LATE_BET_USD", 10000),

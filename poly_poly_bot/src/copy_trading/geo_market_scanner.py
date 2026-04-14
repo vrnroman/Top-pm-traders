@@ -35,6 +35,7 @@ class GeoMarket:
     condition_id: str
     slug: str
     title: str
+    event_slug: str = ""         # parent event slug, used to build polymarket.com/event/{slug}
     tags: list[str] = field(default_factory=list)
     clob_token_ids: list[str] = field(default_factory=list)
     end_ts: int = 0              # epoch seconds of market resolution, or 0 if unknown
@@ -125,6 +126,7 @@ def _event_to_geo_markets(ev: dict) -> list[GeoMarket]:
     the ones that are still tradable.
     """
     ev_tags = _extract_event_tag_slugs(ev)
+    ev_slug = str(ev.get("slug") or "")
     out: list[GeoMarket] = []
     for m in ev.get("markets", []) or []:
         if m.get("closed"):
@@ -146,6 +148,7 @@ def _event_to_geo_markets(ev: dict) -> list[GeoMarket]:
                 condition_id=cid,
                 slug=slug,
                 title=str(m.get("question") or m.get("title") or ""),
+                event_slug=ev_slug,
                 tags=list(ev_tags),
                 clob_token_ids=_extract_token_ids(m),
                 end_ts=end_ts,
