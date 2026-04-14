@@ -53,6 +53,29 @@ class TierConfig:
     alert_only: bool = False
 
 
+@dataclass
+class WatchlistAlertConfig:
+    """Noise-control knobs for the monitor-only watchlist alerter.
+
+    The alerter fires one Telegram notification per tracked 1a/1b wallet
+    trade, but only when all three gates pass. The defaults are tuned to
+    make a 100-fill scale-in appear as one alert at the first material fill.
+    """
+    # Suppress BUYs that are already priced as near-certain. No insider edge
+    # in paying ≥95¢ for a $1 share — the market already agrees.
+    near_cert_buy_price: float = 0.95
+    # Drop individual fills worth less than this in USDC. A trader's big
+    # conviction is usually delivered as one or two material fills plus many
+    # micro-fills — those micro-fills carry no extra information.
+    min_cash_usd: float = 500.0
+    # Once a wallet fires on a (market, side), suppress further alerts on the
+    # same (wallet, market, side) for this many seconds. This is what turns
+    # "100 fills on the same market" into a single notification.
+    dedup_cooldown_s: float = 3600.0
+    # Cap the in-memory dedup cache so the process doesn't grow unbounded.
+    max_dedup_entries: int = 10000
+
+
 _DEFAULT_GEO_TAGS = [
     # "politics" is deliberately excluded: Gamma attaches it to pop-culture
     # markets ("Russia-Ukraine Ceasefire before GTA VI?") and it dominates the
@@ -205,6 +228,18 @@ TIER_1A = _load_tier_1a()
 TIER_1B = _load_tier_1b()
 TIER_1C = _load_tier_1c()
 TIERED_MODE = len(TIER_1A.wallets) > 0 or len(TIER_1B.wallets) > 0 or TIER_1C.enabled
+
+
+def _load_watchlist_alert_config() -> WatchlistAlertConfig:
+    return WatchlistAlertConfig(
+        near_cert_buy_price=_opt_float("WATCHLIST_ALERT_NEAR_CERT_BUY_PRICE", 0.95),
+        min_cash_usd=_opt_float("WATCHLIST_ALERT_MIN_CASH_USD", 500.0),
+        dedup_cooldown_s=_opt_float("WATCHLIST_ALERT_DEDUP_COOLDOWN_S", 3600.0),
+        max_dedup_entries=_opt_int("WATCHLIST_ALERT_MAX_DEDUP_ENTRIES", 10000),
+    )
+
+
+WATCHLIST_ALERT = _load_watchlist_alert_config()
 
 
 def get_all_tiered_wallets() -> list[str]:

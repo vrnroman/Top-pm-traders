@@ -128,27 +128,36 @@ async def _monitor_drain_loop() -> None:
 
     This worker:
       1. drains the queue every EXECUTION_LOOP_S
-      2. feeds every drained trade through `analyze_trade_for_patterns` when
-         Strategy 1c is enabled, so 1c still gets coverage from the 1a/1b
-         wallet intake even in monitor mode
+      2. for every drained trade: if Strategy 1c is enabled, runs the
+         pattern detector; if the wallet belongs to Tier 1a or 1b, runs the
+         watchlist alerter so Telegram still sees tracked-wallet activity
+         (otherwise those trades would be silent in monitor mode)
       3. drops the trades afterward
     """
     from src.copy_trading.trade_store import is_seen_trade, mark_trade_as_seen
+    from src.copy_trading.strategy_config import get_wallet_tier
     run_patterns = TIER_1C.enabled
     while not _shutting_down:
         drained = drain_trades()
         if drained:
             logger.debug(f"[monitor-drain] draining {len(drained)} trades")
-            if run_patterns:
-                from src.copy_trading.pattern_detector import analyze_trade_for_patterns
-                for qt in drained:
-                    if is_seen_trade(qt.trade.id):
-                        continue
+            for qt in drained:
+                if is_seen_trade(qt.trade.id):
+                    continue
+                if run_patterns:
                     try:
+                        from src.copy_trading.pattern_detector import analyze_trade_for_patterns
                         await analyze_trade_for_patterns(qt.trade)
                     except Exception as err:
                         logger.debug(f"[monitor-drain] pattern err: {error_message(err)}")
-                    mark_trade_as_seen(qt.trade.id)
+                tier = get_wallet_tier(qt.trade.trader_address)
+                if tier in ("1a", "1b"):
+                    try:
+                        from src.copy_trading.watchlist_alerter import maybe_alert_watchlist_trade
+                        await maybe_alert_watchlist_trade(qt.trade, tier)
+                    except Exception as err:
+                        logger.debug(f"[monitor-drain] watchlist err: {error_message(err)}")
+                mark_trade_as_seen(qt.trade.id)
         await async_sleep(EXECUTION_LOOP_S)
 
 
