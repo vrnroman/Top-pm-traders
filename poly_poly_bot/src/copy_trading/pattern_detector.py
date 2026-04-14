@@ -238,6 +238,8 @@ class PatternAlert:
     details: str
     severity: str = "medium"  # "low", "medium", "high"
     condition_id: str = ""    # used by the notifier to look up event_slug for the URL
+    outcome: str = ""         # "Yes" / "No" — which token the trader BUY'd or SOLD
+    price: float = 0.0        # fill price of the triggering trade
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +352,8 @@ def _check_new_account_geo(
             f"placed ${trade.size:,.0f} {trade.side} on geo market"
         ),
         severity="high",
+        outcome=trade.outcome,
+        price=trade.price,
     )
 
 
@@ -393,6 +397,8 @@ def _check_first_ever_bet_geo(
             f"First-ever Polymarket trade: ${trade.size:,.0f} {trade.side} on geo market"
         ),
         severity="high",
+        outcome=trade.outcome,
+        price=trade.price,
     )
 
 
@@ -443,6 +449,8 @@ def _check_cluster(
             f"within {window_min}m — current ${trade.size:,.0f}, cluster total ${total_volume:,.0f}"
         ),
         severity="high",
+        outcome=trade.outcome,
+        price=trade.price,
     )
 
 
@@ -515,6 +523,8 @@ def _check_same_funder_cluster(
             f"cluster total ${total_volume:,.0f}"
         ),
         severity="high",
+        outcome=trade.outcome,
+        price=trade.price,
     )
 
 
@@ -617,6 +627,8 @@ def _check_late_geo_bet(trade: DetectedTrade) -> Optional[PatternAlert]:
         wallet=trade.trader_address,
         details=details,
         severity="high",
+        outcome=trade.outcome,
+        price=trade.price,
     )
 
 
@@ -692,6 +704,8 @@ def _check_thin_market_dominance(
             f"${trade.size:,.0f} {trade.side} = " + " / ".join(dom_bits)
         ),
         severity="high",
+        outcome=trade.outcome,
+        price=trade.price,
     )
 
 
@@ -786,6 +800,8 @@ def _dormant_alert(
             f"placed ${trade.size:,.0f} {trade.side} on geo market"
         ),
         severity="high",
+        outcome=trade.outcome,
+        price=trade.price,
     )
 
 
@@ -833,7 +849,14 @@ async def _send_pattern_alert(alert: PatternAlert) -> None:
         ]
         if event_url:
             lines.append(f'🔗 {event_url}')
-        lines.append(f'Side: {alert.side} | Size: ${alert.size:,.0f}')
+        outcome = (alert.outcome or "").strip()
+        side_line = f'Side: {alert.side}'
+        if outcome:
+            side_line += f' {outcome}'
+        if alert.price > 0:
+            side_line += f' @ {alert.price:.3f}'
+        side_line += f'  |  Size: ${alert.size:,.0f}'
+        lines.append(side_line)
         lines.append(f'Wallet: <code>{_escape_html(wallet)}</code>')
         if profile_url:
             lines.append(f'👤 {profile_url}')
