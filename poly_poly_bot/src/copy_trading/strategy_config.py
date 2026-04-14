@@ -112,6 +112,12 @@ class Strategy1cConfig(TierConfig):
     thin_market_dominance_ratio: float = 0.40  # bet ≥ 40% of resting liquidity
     thin_market_weekly_ratio: float = 0.60     # bet ≥ 60% of weekly volume
     max_weekly_volume_for_thin_usd: float = 50000.0
+    # Near-certain outcome gate. If a BUY fills at price ≥ this threshold, the
+    # outcome is already priced as a near-certainty and the trade carries no
+    # insider edge — any rational actor would agree with the market. We
+    # suppress all Strategy-1c pattern alerts in that case so the signal
+    # channel isn't polluted by "late BUY into the obvious winner" noise.
+    near_cert_buy_price: float = 0.95
 
 
 def _load_tier_1a() -> TierConfig:
@@ -191,6 +197,7 @@ def _load_tier_1c() -> Strategy1cConfig:
         thin_market_dominance_ratio=_opt_float("STRATEGY_1C_THIN_MARKET_DOMINANCE_RATIO", 0.40),
         thin_market_weekly_ratio=_opt_float("STRATEGY_1C_THIN_MARKET_WEEKLY_RATIO", 0.60),
         max_weekly_volume_for_thin_usd=_opt_float("STRATEGY_1C_MAX_WEEKLY_VOLUME_FOR_THIN_USD", 50000),
+        near_cert_buy_price=_opt_float("STRATEGY_1C_NEAR_CERT_BUY_PRICE", 0.95),
     )
 
 

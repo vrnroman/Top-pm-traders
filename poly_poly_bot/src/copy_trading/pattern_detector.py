@@ -247,6 +247,26 @@ class PatternAlert:
 _UNSET = object()
 
 
+def _is_near_cert_buy(trade: DetectedTrade) -> bool:
+    """True if `trade` is a BUY into an outcome already priced as near-certain.
+
+    Used to suppress Strategy-1c alerts for trades with no insider edge.
+    A BUY that fills at ≥ `near_cert_buy_price` means the trader is paying
+    near-$1 for a share that pays $1 — the market already agrees with them,
+    so "being right" carries zero information. Any rational actor would do
+    the same, insider or not.
+
+    SELLs are intentionally NOT filtered: selling into a near-lock (taking
+    profit on an insider-priced winner) and selling out of a near-zero
+    (admitting a lost position) are distinct signals we may want later.
+    """
+    return (
+        trade.side == "BUY"
+        and trade.price > 0
+        and trade.price >= TIER_1C.near_cert_buy_price
+    )
+
+
 def _is_novel_wallet(
     age_days: Optional[float],
     prior_trade_ts: Optional[int],
@@ -847,6 +867,15 @@ async def analyze_trade_for_patterns(
         List of PatternAlert objects (may be empty).
     """
     alerts: list[PatternAlert] = []
+
+    # Near-certainty gate: a BUY that fills at ≥ near_cert_buy_price is the
+    # trader agreeing with a market already priced as a near-lock. There is
+    # no insider edge in "buying the obvious winner" — any rational actor
+    # would do the same — so we skip every pattern check for these trades.
+    # Recent-bet bookkeeping is also skipped: a 97¢ BUY shouldn't count
+    # toward cluster detection either, since it's not evidence of anything.
+    if _is_near_cert_buy(trade):
+        return alerts
 
     # Bot-observed wallet bookkeeping (still used for cluster state and as a
     # fallback for tests that don't wire the live lookups).

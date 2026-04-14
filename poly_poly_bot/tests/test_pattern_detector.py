@@ -14,6 +14,7 @@ from src.copy_trading.pattern_detector import (
     _check_same_funder_cluster,
     _check_late_geo_bet,
     _check_thin_market_dominance,
+    _is_near_cert_buy,
     _reference_price_for_market,
     _find_cluster,
     _add_recent_bet,
@@ -21,6 +22,7 @@ from src.copy_trading.pattern_detector import (
     _update_wallet_activity,
     _reset_pattern_detector,
     _extract_tx_hash,
+    analyze_trade_for_patterns,
     RecentBet,
     WalletActivity,
 )
@@ -771,3 +773,82 @@ class TestClusterDetection:
 
         cluster = _find_cluster(market, "BUY", "0x" + "3" * 40)
         assert len(cluster) < 2
+
+
+class TestNearCertBuyGate:
+    """BUYs at ≥ near_cert_buy_price carry no insider edge — suppress them."""
+
+    def test_buy_at_or_above_threshold_is_near_cert(self):
+        trade = _make_trade(side="BUY", price=TIER_1C.near_cert_buy_price)
+        assert _is_near_cert_buy(trade) is True
+
+    def test_buy_above_threshold_is_near_cert(self):
+        trade = _make_trade(side="BUY", price=0.97)
+        assert _is_near_cert_buy(trade) is True
+
+    def test_buy_just_below_threshold_is_not_near_cert(self):
+        trade = _make_trade(side="BUY", price=TIER_1C.near_cert_buy_price - 0.01)
+        assert _is_near_cert_buy(trade) is False
+
+    def test_sell_is_never_filtered(self):
+        # Selling into a near-lock is profit-taking and kept as a separate
+        # signal. Only BUYs are gated here.
+        trade = _make_trade(side="SELL", price=0.97)
+        assert _is_near_cert_buy(trade) is False
+
+    def test_zero_price_trade_is_not_near_cert(self):
+        # Missing price must not accidentally trigger the gate.
+        trade = _make_trade(side="BUY", price=0.0)
+        assert _is_near_cert_buy(trade) is False
+
+    @pytest.mark.asyncio
+    async def test_analyze_suppresses_all_patterns_on_near_cert_buy(self):
+        # This trade would otherwise fire _check_new_account_geo /
+        # _check_first_ever_bet_geo with flying colors: brand-new wallet,
+        # large geo bet, no prior Polymarket history. The near-cert gate
+        # must swallow it before any check runs.
+        trade = _make_trade(
+            market="Trump announces US x Iran ceasefire end by April 15, 2026?",
+            side="BUY",
+            size=25000.0,
+            price=0.97,  # already 97% implied probability
+            trader="0x" + "b" * 40,
+        )
+
+        with patch(
+            "src.copy_trading.wallet_age.get_wallet_age_days",
+            new=AsyncMock(return_value=0.1),
+        ), patch(
+            "src.copy_trading.wallet_history.get_prior_trade_ts",
+            new=AsyncMock(return_value=(None, 0, False)),
+        ):
+            alerts = await analyze_trade_for_patterns(trade)
+
+        assert alerts == []
+
+    @pytest.mark.asyncio
+    async def test_analyze_still_fires_just_below_threshold(self):
+        # Same trade, but price 0.94 — below the near-cert gate. At least one
+        # pattern check (new_account_geo or first_ever_bet_geo) should fire,
+        # proving the gate is the sole reason the 0.97 case was suppressed.
+        trade = _make_trade(
+            market="Trump announces US x Iran ceasefire end by April 15, 2026?",
+            side="BUY",
+            size=25000.0,
+            price=0.94,
+            trader="0x" + "c" * 40,
+        )
+
+        with patch(
+            "src.copy_trading.wallet_age.get_wallet_age_days",
+            new=AsyncMock(return_value=0.1),
+        ), patch(
+            "src.copy_trading.wallet_history.get_prior_trade_ts",
+            new=AsyncMock(return_value=(None, 0, False)),
+        ), patch(
+            "src.copy_trading.pattern_detector._send_pattern_alert",
+            new=AsyncMock(),
+        ):
+            alerts = await analyze_trade_for_patterns(trade)
+
+        assert len(alerts) >= 1
