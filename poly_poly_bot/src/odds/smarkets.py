@@ -76,6 +76,7 @@ _EVENTS_PATH = "/v3/events/"
 _EVENT_MARKETS_PATH = "/v3/events/{event_ids}/markets/"
 _MARKET_CONTRACTS_PATH = "/v3/markets/{market_ids}/contracts/"
 _MARKET_QUOTES_PATH = "/v3/markets/{market_ids}/quotes/"
+_MARKET_VOLUMES_PATH = "/v3/markets/{market_ids}/volumes/"
 
 # Per-call ID-batch caps. The OpenAPI schema declares maxItems=200 for the
 # market_ids array; we leave some headroom and use 100 to keep URLs short.
@@ -89,6 +90,17 @@ _DEFAULT_REQUEST_TIMEOUT = 15.0
 # Cache TTLs
 _EVENTS_CACHE_TTL_S = 300.0  # rebuild event list every 5 minutes
 _CONTRACTS_CACHE_TTL_S = 86400.0  # contract metadata never changes mid-match
+
+# Minimum Smarkets traded volume required before a market's price is trusted
+# as a sharp reference. The Smarkets order book can look "deep" on the surface
+# (resting quantities of millions) even when only a handful of trades have
+# actually validated the price — that's exactly the trap that produced the
+# false 15pp Royer/Cecchinato signal in testing (Polymarket $101k liquidity
+# vs Smarkets 3 traded units → untested resting quotes masquerading as sharp
+# consensus). Gating on traded volume filters those ghosts without losing
+# real signals (a normal mid-match WTA 250 like Rakhimova/Kalieva had 178
+# traded units in our verification run).
+_MIN_SMARKETS_VOLUME = int(os.getenv("SMARKETS_MIN_VOLUME", "100"))
 
 # Tennis market types we care about. Smarkets uses "Match winner" for
 # singles head-to-heads; everything else (set winner, total games, etc.) is
@@ -173,11 +185,28 @@ class SmarketsProvider(OddsProvider):
             logger.info("Smarkets: quotes endpoint returned nothing")
             return []
 
-        # 6. assemble MatchOdds objects
+        # 6. batched volumes call — used to filter out thin-book markets
+        #    whose quotes are resting orders with no trade flow backing them up.
+        volumes_by_market = self._fetch_volumes(market_ids)
+
+        # 7. assemble MatchOdds objects, applying the volume gate
         results: list[MatchOdds] = []
+        dropped_thin = 0
         for ev in usable_events:
             mid = event_id_to_market.get(ev["id"])
             if not mid:
+                continue
+            # Volume gate: skip markets with no validated trade flow.
+            # `volumes_by_market.get(mid, 0)` returns 0 for markets the
+            # volumes endpoint didn't cover — fail closed on those too.
+            market_volume = volumes_by_market.get(mid, 0)
+            if market_volume < _MIN_SMARKETS_VOLUME:
+                dropped_thin += 1
+                logger.debug(
+                    f"Smarkets: drop thin book market={mid} "
+                    f"volume={market_volume} (< {_MIN_SMARKETS_VOLUME}) — "
+                    f"{ev.get('name', '')[:50]}"
+                )
                 continue
             mo = self._build_match_odds(ev, mid, quotes_by_contract)
             if mo is not None:
@@ -185,7 +214,8 @@ class SmarketsProvider(OddsProvider):
 
         logger.info(
             f"Smarkets: {len(results)} match-odds pairs assembled "
-            f"(rate budget: {self._last_remaining}/{self._last_reset_at - time.time():.0f}s remaining)"
+            f"({dropped_thin} dropped for volume < {_MIN_SMARKETS_VOLUME}, "
+            f"rate budget: {self._last_remaining}/{self._last_reset_at - time.time():.0f}s remaining)"
         )
         return results
 
@@ -353,6 +383,45 @@ class SmarketsProvider(OddsProvider):
                 if isinstance(q, dict):
                     all_quotes[str(cid)] = q
         return all_quotes
+
+    # ------------------------------------------------------------------
+    # Traded volumes (used for the thin-book gate)
+    # ------------------------------------------------------------------
+    def _fetch_volumes(self, market_ids: list[str]) -> dict[str, int]:
+        """Batched traded-volume fetch. Returns `market_id → volume` (int).
+
+        Markets whose response is missing or malformed are treated as 0
+        volume, which fails the gate in `fetch_tennis_odds`. A whole-batch
+        HTTP error logs a debug line and returns an empty dict for that
+        chunk — the caller's gate then drops ALL markets in that chunk,
+        which is the conservative behavior (better to miss a signal than
+        produce a thin-book false positive).
+        """
+        all_volumes: dict[str, int] = {}
+        for chunk in _chunks(market_ids, _MAX_MARKET_IDS_PER_CALL):
+            joined = ",".join(chunk)
+            path = _MARKET_VOLUMES_PATH.format(market_ids=joined)
+            try:
+                data = self._get_json(path)
+            except Exception as exc:
+                logger.debug(f"Smarkets volumes fetch failed: {exc}")
+                continue
+            if not isinstance(data, dict):
+                continue
+            # Response shape: {"volumes": [{"market_id": "...", "volume": N,
+            # "double_stake_volume": M}, ...]}
+            for entry in data.get("volumes") or []:
+                if not isinstance(entry, dict):
+                    continue
+                mid = str(entry.get("market_id") or "")
+                if not mid:
+                    continue
+                try:
+                    vol = int(entry.get("volume") or 0)
+                except (TypeError, ValueError):
+                    vol = 0
+                all_volumes[mid] = vol
+        return all_volumes
 
     # ------------------------------------------------------------------
     # Assemble MatchOdds for one event

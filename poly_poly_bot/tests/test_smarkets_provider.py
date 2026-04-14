@@ -349,6 +349,10 @@ class TestFetchTennisOddsHappyPath:
             "/v3/events/45008901/markets/": FakeResponse(200, MARKETS_NORRIE),
             "/v3/markets/135840158/contracts/": FakeResponse(200, CONTRACTS_NORRIE),
             "/v3/markets/135840158/quotes/": FakeResponse(200, QUOTES_NORRIE_LIVE),
+            # Volume gate: 4798 trades passes the default 100 threshold
+            "/v3/markets/135840158/volumes/": FakeResponse(200, {
+                "volumes": [{"market_id": "135840158", "volume": 4798, "double_stake_volume": 9596}],
+            }),
         }
         sess = make_session(routes)
         provider = SmarketsProvider(session=sess)
@@ -391,6 +395,9 @@ class TestFetchTennisOddsHappyPath:
             "/v3/events/45008901/markets/": FakeResponse(200, MARKETS_NORRIE),
             "/v3/markets/135840158/contracts/": FakeResponse(200, CONTRACTS_NORRIE),
             "/v3/markets/135840158/quotes/": FakeResponse(200, QUOTES_NORRIE_LIVE),
+            "/v3/markets/135840158/volumes/": FakeResponse(200, {
+                "volumes": [{"market_id": "135840158", "volume": 4798, "double_stake_volume": 9596}],
+            }),
         }
         sess = make_session(routes)
         provider = SmarketsProvider(session=sess)
@@ -418,6 +425,12 @@ class TestFetchTennisOddsHappyPath:
             "/v3/markets/135840158,136000001/quotes/": FakeResponse(200, {
                 **QUOTES_NORRIE_LIVE,
                 **QUOTES_WTA,
+            }),
+            "/v3/markets/135840158,136000001/volumes/": FakeResponse(200, {
+                "volumes": [
+                    {"market_id": "135840158", "volume": 4798, "double_stake_volume": 9596},
+                    {"market_id": "136000001", "volume": 1200, "double_stake_volume": 2400},
+                ],
             }),
         }
         sess = make_session(routes)
@@ -490,6 +503,9 @@ class TestEventCaching:
             "/v3/events/45008901/markets/": FakeResponse(200, MARKETS_NORRIE),
             "/v3/markets/135840158/contracts/": FakeResponse(200, CONTRACTS_NORRIE),
             "/v3/markets/135840158/quotes/": FakeResponse(200, QUOTES_NORRIE_LIVE),
+            "/v3/markets/135840158/volumes/": FakeResponse(200, {
+                "volumes": [{"market_id": "135840158", "volume": 4798, "double_stake_volume": 9596}],
+            }),
         }
         sess = make_session(routes)
         provider = SmarketsProvider(session=sess)
@@ -557,3 +573,139 @@ class TestMarketDiscoveryEdgeCases:
 class TestProviderIdentity:
     def test_name(self):
         assert SmarketsProvider().name == "smarkets"
+
+
+# ---------------------------------------------------------------------------
+# Smarkets traded-volume gate
+# ---------------------------------------------------------------------------
+
+class TestVolumeGate:
+    """The thin-book filter that prevents false positives from untested
+    resting orders. Empirical motivation: during live testing, Valentin Royer
+    vs Marco Cecchinato (ATP Challenger) produced a +15pp "edge" against
+    Polymarket despite having only 3 traded units on Smarkets — the quotes
+    were stale resting orders, not validated price discovery. The gate
+    drops any market with volume below `_MIN_SMARKETS_VOLUME` (default 100).
+    """
+
+    def _base_routes_for_norrie(self) -> dict:
+        """Happy-path routes minus the volumes response, so tests can inject
+        different volume payloads per case."""
+        return {
+            "/v3/events/": FakeResponse(200, {"events": [EVENT_NORRIE], "pagination": {}}),
+            "/v3/events/45008901/markets/": FakeResponse(200, MARKETS_NORRIE),
+            "/v3/markets/135840158/contracts/": FakeResponse(200, CONTRACTS_NORRIE),
+            "/v3/markets/135840158/quotes/": FakeResponse(200, QUOTES_NORRIE_LIVE),
+        }
+
+    def test_high_volume_market_passes_gate(self):
+        """Market with volume well above threshold is included in the result."""
+        routes = self._base_routes_for_norrie()
+        routes["/v3/markets/135840158/volumes/"] = FakeResponse(200, {
+            "volumes": [{"market_id": "135840158", "volume": 4798, "double_stake_volume": 9596}],
+        })
+        sess = make_session(routes)
+        provider = SmarketsProvider(session=sess)
+        odds = provider.fetch_tennis_odds(tours=["ATP"])
+        assert len(odds) == 1
+        assert odds[0].player_a == "Cameron Norrie"
+
+    def test_low_volume_market_dropped(self):
+        """Market with volume below threshold (default 100) is silently dropped."""
+        routes = self._base_routes_for_norrie()
+        routes["/v3/markets/135840158/volumes/"] = FakeResponse(200, {
+            "volumes": [{"market_id": "135840158", "volume": 3, "double_stake_volume": 6}],
+        })
+        sess = make_session(routes)
+        provider = SmarketsProvider(session=sess)
+        odds = provider.fetch_tennis_odds(tours=["ATP"])
+        assert odds == []
+
+    def test_zero_volume_market_dropped(self):
+        """A market that has never traded (volume = 0) is dropped."""
+        routes = self._base_routes_for_norrie()
+        routes["/v3/markets/135840158/volumes/"] = FakeResponse(200, {
+            "volumes": [{"market_id": "135840158", "volume": 0, "double_stake_volume": 0}],
+        })
+        sess = make_session(routes)
+        provider = SmarketsProvider(session=sess)
+        assert provider.fetch_tennis_odds(tours=["ATP"]) == []
+
+    def test_missing_volume_entry_dropped(self):
+        """If the volumes response doesn't contain an entry for a market,
+        fail closed: treat as 0 volume and drop."""
+        routes = self._base_routes_for_norrie()
+        routes["/v3/markets/135840158/volumes/"] = FakeResponse(200, {
+            "volumes": [],  # empty — no entry for our market
+        })
+        sess = make_session(routes)
+        provider = SmarketsProvider(session=sess)
+        assert provider.fetch_tennis_odds(tours=["ATP"]) == []
+
+    def test_volumes_endpoint_http_error_drops_all(self):
+        """If the volumes endpoint returns an error, we fail closed:
+        NO markets make it through, which is preferable to emitting
+        potentially-false signals from unvalidated books."""
+        routes = self._base_routes_for_norrie()
+        routes["/v3/markets/135840158/volumes/"] = FakeResponse(
+            500, {"error": "internal"},
+        )
+        sess = make_session(routes)
+        provider = SmarketsProvider(session=sess)
+        assert provider.fetch_tennis_odds(tours=["ATP"]) == []
+
+    def test_mixed_batch_only_high_volume_passes(self):
+        """In a scan with both liquid and thin markets, only the liquid one
+        makes it through while the thin one is silently dropped."""
+        routes = {
+            "/v3/events/": FakeResponse(200, {
+                "events": [EVENT_NORRIE, EVENT_WTA],
+                "pagination": {},
+            }),
+            "/v3/events/45008901,45011202/markets/": FakeResponse(200, {
+                "markets": MARKETS_NORRIE["markets"] + MARKETS_WTA["markets"],
+            }),
+            "/v3/markets/135840158,136000001/contracts/": FakeResponse(200, {
+                "contracts": CONTRACTS_NORRIE["contracts"] + CONTRACTS_WTA["contracts"],
+            }),
+            "/v3/markets/135840158,136000001/quotes/": FakeResponse(200, {
+                **QUOTES_NORRIE_LIVE,
+                **QUOTES_WTA,
+            }),
+            "/v3/markets/135840158,136000001/volumes/": FakeResponse(200, {
+                "volumes": [
+                    # Norrie: plenty of volume (passes gate)
+                    {"market_id": "135840158", "volume": 4798, "double_stake_volume": 9596},
+                    # WTA event: only 3 trades (thin — gated out)
+                    {"market_id": "136000001", "volume": 3, "double_stake_volume": 6},
+                ],
+            }),
+        }
+        sess = make_session(routes)
+        provider = SmarketsProvider(session=sess)
+        odds = provider.fetch_tennis_odds(tours=["ATP", "WTA"])
+        assert len(odds) == 1
+        assert odds[0].player_a == "Cameron Norrie"
+
+    def test_boundary_equal_to_threshold_passes(self):
+        """Market with volume exactly at the threshold (100) should PASS
+        because the gate uses `<` not `<=`."""
+        routes = self._base_routes_for_norrie()
+        routes["/v3/markets/135840158/volumes/"] = FakeResponse(200, {
+            "volumes": [{"market_id": "135840158", "volume": 100, "double_stake_volume": 200}],
+        })
+        sess = make_session(routes)
+        provider = SmarketsProvider(session=sess)
+        odds = provider.fetch_tennis_odds(tours=["ATP"])
+        assert len(odds) == 1
+        assert odds[0].player_a == "Cameron Norrie"
+
+    def test_boundary_one_below_threshold_dropped(self):
+        """Market with volume one below the threshold (99) should be dropped."""
+        routes = self._base_routes_for_norrie()
+        routes["/v3/markets/135840158/volumes/"] = FakeResponse(200, {
+            "volumes": [{"market_id": "135840158", "volume": 99, "double_stake_volume": 198}],
+        })
+        sess = make_session(routes)
+        provider = SmarketsProvider(session=sess)
+        assert provider.fetch_tennis_odds(tours=["ATP"]) == []
