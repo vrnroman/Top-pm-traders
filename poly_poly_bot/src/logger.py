@@ -67,6 +67,13 @@ class BotLogger:
         self._logger.setLevel(logging.DEBUG)
         self._logger.handlers.clear()
 
+        # Silence chatty HTTP libraries — each poll cycle generates dozens of
+        # DEBUG lines for TLS handshakes, header exchanges, and connection
+        # lifecycle events. At 21 wallets polled every 3s this adds up to
+        # multiple GB/day of log noise.
+        for noisy in ("httpcore", "httpx", "httpcore.connection", "httpcore.http11"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+
         log_format = os.environ.get("LOG_FORMAT", "text")
 
         # Console handler
@@ -84,7 +91,7 @@ class BotLogger:
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         log_file = logs_dir / f"bot-{date_str}.log"
         file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
-        file_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(logging.INFO)
         if log_format == "json":
             file_handler.setFormatter(JsonFormatter())
         else:
