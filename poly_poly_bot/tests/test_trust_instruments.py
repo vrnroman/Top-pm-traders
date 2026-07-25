@@ -78,10 +78,25 @@ def test_era_state_load_tolerates_corrupt(tmp_path):
 
 def test_era_state_save_preserves_other_keys(tmp_path):
     path = str(tmp_path / "s.json")
-    era_state.save(path, {"verdict_sent": True, "verdict_ts": 7.0})
+    era_state.save(path, {"verdict_sent": True, "verdict_ts": 7.0, "note": "x"})
     era_state.seed_era_floor(path, now=100.0)
     st = era_state.load(path)
-    assert st["verdict_sent"] is True and st["era_floor_ts"] == 100.0
+    # A NEW floor opens a NEW verdict window: the stale verdict keys are
+    # cleared (else a restored backup would silence the restarted race's
+    # verdict forever — 2026-07-25 review), unrelated keys are preserved.
+    assert "verdict_sent" not in st and "verdict_ts" not in st
+    assert st["era_floor_ts"] == 100.0 and st["note"] == "x"
+
+
+def test_seed_era_floor_reseeds_on_unparsable_floor(tmp_path):
+    # A typo'd hand-edit must not down the daily reporter: the seeder treats a
+    # garbage floor as absent and re-seeds (the reader tolerates the same).
+    path = str(tmp_path / "s.json")
+    era_state.save(path, {"era_floor_ts": "not-a-number", "verdict_sent": True})
+    floor = era_state.seed_era_floor(path, now=42.0)
+    assert floor == 42.0
+    st = era_state.load(path)
+    assert st["era_floor_ts"] == 42.0 and "verdict_sent" not in st
 
 
 # --------------------------------------------------------------------------- #
@@ -256,6 +271,22 @@ def test_split_half_corr_never_fabricates_from_float_noise():
     assert corr is None and n == 3
 
 
+def test_split_half_corr_excludes_dust_fills():
+    # Same quarantine as every other trust surface: one pre-fix dust fill
+    # ($50 swept into ~50k shares) must not put +99,900% in a wallet's half
+    # and dominate the kill-criterion number (2026-07-25 review).
+    positions = _three_wallet_flip()
+    dust = _pos("dust1", target="0xw0", their=0.60, entry=0.001, spent=50.0,
+                opened=1050.0, won=True, closed_ts=1100.0)
+    assert dust.pnl > 1000.0                      # the absurd-fill signature
+    with_dust = split_half_corr(positions + [dust])
+    without = split_half_corr(positions)
+    assert with_dust == without                   # dust row invisible to the metric
+    # a ledger of ONLY dust reports unmeasurable, never a dust-driven number
+    corr, n = split_half_corr([dust])
+    assert corr is None and n == 0
+
+
 def test_falsification_bar_constants_are_public():
     # The ROADMAP §7 bar, pinned as constants so surfaces and tests agree.
     assert FALSIFY_MIN_WALLETS == 15
@@ -412,6 +443,15 @@ def test_rebaseline_cli_matches_pnl_computation(tmp_path, capsys):
     assert cli.main([a_path, b_path, "--since", "5000.0"]) == 0
     out = capsys.readouterr().out
     assert "0 settled" in out                                    # nothing post-floor
+
+
+def test_rebaseline_cli_warns_on_missing_ledger(capsys, tmp_path):
+    # A typo'd path must not read as a vacuous "0 settled" acceptance pass.
+    import scripts.rebaseline_ledger as cli
+    missing = str(tmp_path / "nope.jsonl")
+    assert cli.main([missing, missing]) == 0
+    out = capsys.readouterr().out
+    assert out.count("WARNING") >= 2 and "not found" in out
 
 
 # --------------------------------------------------------------------------- #

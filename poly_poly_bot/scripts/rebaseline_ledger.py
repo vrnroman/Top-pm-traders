@@ -86,6 +86,11 @@ def main(argv: list[str] | None = None) -> int:
 
     books = []
     for label, path in (("A (lagged)", args.a_ledger), ("B (instant)", args.b_ledger)):
+        # A missing path loads as an EMPTY ledger by design (PaperCopyLedger);
+        # say so loudly — a typo'd path must not read as a vacuously-passing
+        # "0 settled" acceptance check (2026-07-25 review).
+        if not os.path.exists(path):
+            print(f"⚠ WARNING: {path} not found — {label} scored as an empty book")
         positions = list(PaperCopyLedger(path).positions.values())
         books.append((label, positions))
 
@@ -105,7 +110,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     if tot["spent"] > 0:
-        print(f"COMBINED: realized {_usd(tot['pnl'])} ({_pct(tot['pnl'] / tot['spent'])})"
+        # A+B race books only — /pnl's "Paper at-target-price" line also folds
+        # in S4 when that book has settled rows, so with S4 live the two totals
+        # differ by exactly S4's contribution (2026-07-25 review).
+        print(f"COMBINED (A+B): realized {_usd(tot['pnl'])} ({_pct(tot['pnl'] / tot['spent'])})"
               f" · at-their-price {_usd(tot['ideal'])} ({_pct(tot['ideal'] / tot['spent'])})"
               f" on ${tot['spent']:,.0f} deployed")
     print(f"kill bar (ROADMAP §7): clean-era at-price ROI < 0 AND split-half corr <= 0 "

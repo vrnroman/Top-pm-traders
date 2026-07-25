@@ -58,12 +58,27 @@ def era_floor_ts(path: str) -> Optional[float]:
 
 def seed_era_floor(path: str, now: Optional[float] = None) -> float:
     """Record the era floor if absent and return it. Idempotent: an existing
-    floor is NEVER moved (the clean era's start is a fact, not a setting)."""
+    VALID floor is NEVER moved (the clean era's start is a fact, not a setting).
+
+    When a new floor IS written (fresh file, wiped backup, or an unparsable
+    hand-edit), any prior ``verdict_sent``/``verdict_ts`` is cleared: a new era
+    is a new verdict window. Without this, the fallback path this function
+    exists for (a restored pre-P0-3 backup carrying ``verdict_sent: true``)
+    would scope the race to clean fills while the verdict memo stayed silenced
+    forever, with nothing logged (2026-07-25 code-review catch). An unparsable
+    floor is treated as absent — the daily reporter must not go down on a bad
+    hand-edit of a file whose reader side tolerates the same input.
+    """
     st = load(path)
     existing = st.get("era_floor_ts")
     if existing is not None:
-        return float(existing)
+        try:
+            return float(existing)
+        except (TypeError, ValueError):
+            pass  # unparsable floor: fall through and re-seed
     ts = now if now is not None else time.time()
     st["era_floor_ts"] = ts
+    st.pop("verdict_sent", None)
+    st.pop("verdict_ts", None)
     save(path, st)
     return ts

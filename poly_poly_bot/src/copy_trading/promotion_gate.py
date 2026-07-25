@@ -106,6 +106,11 @@ def split_half_corr(
 
     ``pnl_attr="ideal_pnl"`` recomputes it on at-their-price economics (the
     fill-model-proof variant); ``min_opened_ts`` restricts to the clean era.
+    Dust fills are excluded (same quarantine as every other trust surface): one
+    pre-fix absurd fill (~$50 swept into ~50k shares) would put +99,900% in a
+    wallet's half and dominate the correlation — the 2026-07-25 review caught
+    this number disagreeing with the dust-quarantined book stats printed right
+    beside it on dust-bearing backup ledgers.
 
     Returns ``(corr, n_qualifying_wallets)``; ``corr`` is None when undefined —
     fewer than ``min_wallets`` qualify (a correlation over 2 points is always
@@ -113,12 +118,19 @@ def split_half_corr(
     side has zero variance. ``n`` is still returned so surfaces can show how
     far off measurability the book is.
     """
+    from src.copy_trading.copy_paper import is_dust_fill
+
     by_wallet: dict = {}
     for p in positions:
         if _num(getattr(p, "spent", 0.0)) <= 0.0:
             continue
         if not getattr(p, "closed", False):
             continue
+        try:
+            if is_dust_fill(p):
+                continue
+        except AttributeError:
+            pass  # row lacks price fields: can't classify as dust — keep it
         if (min_opened_ts is not None
                 and _num(getattr(p, "opened_ts", 0.0)) < min_opened_ts):
             continue
