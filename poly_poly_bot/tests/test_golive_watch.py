@@ -20,7 +20,7 @@ NOW = 1_000_000.0
 
 
 def _pos(i, target="0xW", won=True, spent=10.0, pnl=None, opened=NOW - 3600,
-         closed=True):
+         closed=True, ideal=None):
     if pnl is None:
         pnl = 2.0 if won else -spent
     return PaperPosition(
@@ -28,7 +28,8 @@ def _pos(i, target="0xW", won=True, spent=10.0, pnl=None, opened=NOW - 3600,
         token_id=f"T{i}", outcome_index=0, category="sports",
         their_price=0.5, entry_price=0.5, shares=spent / 0.5, spent=spent,
         drag_bps=0, opened_ts=opened, closed=closed, won=won, pnl=pnl,
-        closed_ts=opened + 60 if closed else 0.0)
+        closed_ts=opened + 60 if closed else 0.0,
+        ideal_pnl=ideal if ideal is not None else pnl)
 
 
 def _ready_book(n=4):
@@ -190,3 +191,84 @@ def test_transient_empty_promoted_read_does_not_wipe_state():
         t3 = run_golive_watch(_ready_book(), promoted=["0xW"], state_path=state,
                               send=send, now=NOW + 120, **GATE)
         assert t3 == [] and len(send.sent) == 1
+
+
+# --- honest-metrics floors (owner ruling 2026-07-25): evaluated on the clean
+# era, fail closed while the era is too young to measure ---
+
+def _clean_book():
+    """Three wallets with 10 clean-era settles each, positive split-half corr
+    (halves: -0.04/-0.28/-0.52 first, +0.20/-0.04/-0.28 second -> +1.0)."""
+    patterns = {"0xW": (4, 5), "0xW2": (3, 4), "0xW3": (2, 3)}
+    positions = []
+    for target, (fw, sw) in patterns.items():
+        for i in range(10):
+            won = (i < fw) if i < 5 else (i - 5 < sw)
+            positions.append(_pos(f"{target}-{i}", target=target, won=won,
+                                  opened=NOW - 1000 + i * 10))
+    return positions
+
+
+def test_honest_floors_ready_alert_fires_on_clean_era():
+    with tempfile.TemporaryDirectory() as d:
+        send = SendSpy()
+        t = run_golive_watch(
+            _clean_book(), promoted=["0xW"], state_path=os.path.join(d, "s.json"),
+            send=send, now=NOW, era_floor=NOW - 2000,
+            min_ideal_roi=0.0, min_split_half_corr=0.0, **GATE)
+        assert t == [("0xw", True)]
+        assert "GO-LIVE READY" in send.sent[-1]
+
+
+def test_honest_floors_fail_closed_without_clean_era():
+    # all-time READY record but every row is PRE-floor: the honest checks must
+    # not bless it (fail closed; first sight is silent, state remembers).
+    with tempfile.TemporaryDirectory() as d:
+        state = os.path.join(d, "s.json")
+        send = SendSpy()
+        t = run_golive_watch(
+            _ready_book(), promoted=["0xW"], state_path=state,
+            send=send, now=NOW, era_floor=NOW - 60,   # rows opened NOW-3600 < floor
+            min_ideal_roi=0.0, min_split_half_corr=0.0, **GATE)
+        assert t == [] and send.sent == []
+        assert json.load(open(state))["0xw"]["ready"] is False
+
+
+def test_honest_floors_fail_closed_when_no_floor_recorded():
+    # era_floor=None means there IS no clean era: both checks fail closed.
+    with tempfile.TemporaryDirectory() as d:
+        send = SendSpy()
+        t = run_golive_watch(
+            _clean_book(), promoted=["0xW"], state_path=os.path.join(d, "s.json"),
+            send=send, now=NOW, era_floor=None,
+            min_ideal_roi=0.0, min_split_half_corr=0.0, **GATE)
+        assert t == [] and send.sent == []
+
+
+def test_honest_floors_negative_persistence_holds():
+    # the 2026-07 flip signature: every wallet's second half inverts its first
+    # -> corr -1.0 -> nobody goes live on a falsified approach.
+    positions = []
+    for j, (fw, sw) in enumerate(((5, 0), (4, 1), (3, 2))):
+        target = "0xW" if j == 0 else f"0xW{j}"
+        for i in range(10):
+            won = (i < fw) if i < 5 else (i - 5 < sw)
+            positions.append(_pos(f"{target}-{i}", target=target, won=won,
+                                  opened=NOW - 1000 + i * 10))
+    with tempfile.TemporaryDirectory() as d:
+        send = SendSpy()
+        t = run_golive_watch(
+            positions, promoted=["0xW"], state_path=os.path.join(d, "s.json"),
+            send=send, now=NOW, era_floor=NOW - 2000,
+            min_ideal_roi=0.0, min_split_half_corr=0.0, **GATE)
+        assert t == [] and send.sent == []
+
+
+def test_honest_floors_off_keeps_legacy_behavior():
+    # floors OFF (kwargs absent): the all-time record decides, as before.
+    with tempfile.TemporaryDirectory() as d:
+        send = SendSpy()
+        t = run_golive_watch(
+            _ready_book(), promoted=["0xW"], state_path=os.path.join(d, "s.json"),
+            send=send, now=NOW, **GATE)
+        assert t == [("0xw", True)]

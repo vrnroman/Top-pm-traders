@@ -39,6 +39,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
+from src.copy_trading.copy_paper import is_dust_fill
 from src.copy_trading.pnl_unified import wilson_lower_bound
 
 
@@ -118,8 +119,6 @@ def split_half_corr(
     side has zero variance. ``n`` is still returned so surfaces can show how
     far off measurability the book is.
     """
-    from src.copy_trading.copy_paper import is_dust_fill
-
     by_wallet: dict = {}
     for p in positions:
         if _num(getattr(p, "spent", 0.0)) <= 0.0:
@@ -334,6 +333,46 @@ def floor_kwargs_from(cfg) -> dict:
         min_categories=cfg.copy_promote_min_categories)
 
 
+def honest_kwargs_from(cfg) -> dict:
+    """The honest-metrics go-live floors (at-their-price ROI + book split-half
+    persistence, both evaluated on clean-era fills) from a CONFIG-like object.
+    ONE derivation shared by ``/golive`` and the go-live watch — same parity
+    rule as ``floor_kwargs_from`` above. Owner ruling 2026-07-25: wire these
+    now at mirrored values, recalibrate at the 08-22 kill-criterion verdict.
+    ``None`` (= the check is off) when the master toggle is off."""
+    if not getattr(cfg, "copy_golive_honest_metrics", True):
+        return dict(min_ideal_roi=None, min_split_half_corr=None)
+    return dict(
+        min_ideal_roi=cfg.copy_golive_min_ideal_roi,
+        min_split_half_corr=cfg.copy_golive_min_split_half_corr)
+
+
+def ideal_roi_for(positions: Iterable, *, min_opened_ts: Optional[float] = None
+                  ) -> tuple[Optional[float], int]:
+    """(at-their-price ROI, n) over settled, non-dust rows, optionally floored
+    to the clean era — the go-live gate's honest-ROI input. The ROI is None
+    when there are no qualifying rows: the gate fails CLOSED on it (real money
+    is never blessed on artifact-era or absent evidence)."""
+    rows = [p for p in positions
+            if getattr(p, "closed", False)
+            and _num(getattr(p, "spent", 0.0)) > 0
+            and (min_opened_ts is None or _num(getattr(p, "opened_ts", 0.0))
+                 >= min_opened_ts)]
+    clean = []
+    for p in rows:
+        try:
+            if is_dust_fill(p):
+                continue
+        except AttributeError:
+            pass
+        clean.append(p)
+    if not clean:
+        return (None, 0)
+    spent = sum(_num(p.spent) for p in clean)
+    ideal = sum(_num(getattr(p, "ideal_pnl", 0.0)) for p in clean)
+    return ((ideal / spent) if spent > 0 else None, len(clean))
+
+
 def golive_check(
     stats: PromotionStats,
     *,
@@ -343,6 +382,11 @@ def golive_check(
     max_idle_days: float,
     min_roi: float,
     floor_kwargs: dict,
+    ideal_roi: Optional[float] = None,
+    n_ideal_settled: int = 0,
+    min_ideal_roi: Optional[float] = None,
+    book_corr: Optional[tuple] = None,
+    min_split_half_corr: Optional[float] = None,
 ) -> tuple[bool, list[tuple]]:
     """Re-verify a promoted wallet is still worth REAL capital, right now.
 
@@ -351,7 +395,17 @@ def golive_check(
     offer (a doubled settled bar) and time-aware (a wallet that went silent since
     it was promoted is not ready). Returns ``(ready, checks)`` where each check is
     ``(label, ok, detail)``. Pure — the caller supplies the wallet's stats and
-    last-trade time."""
+    last-trade time.
+
+    Honest-metrics floors (owner ruling 2026-07-25, additive; each None = off):
+    the realized checks above were reading the ROI the fill artifact inflated,
+    so the gate also requires the AT-THEIR-PRICE ROI and the BOOK's split-half
+    persistence, both evaluated by the caller on clean-era (post-P0-1) fills.
+    Both fail CLOSED: a wallet with no clean-era settled copies, or a book
+    whose persistence is not yet measurable, is not ready — real money is
+    never blessed on artifact-era or absent evidence. Recalibrate the floor
+    values at the 08-22 kill-criterion verdict.
+    """
     checks: list[tuple] = []
 
     checks.append((
@@ -364,6 +418,24 @@ def golive_check(
         f"paper ROI ≥ {min_roi * 100:+.0f}% now",
         roi_ok,
         (f"{stats.roi * 100:+.0f}%" if stats.roi is not None else "no data")))
+
+    if min_ideal_roi is not None:
+        ideal_ok = ideal_roi is not None and ideal_roi >= min_ideal_roi
+        checks.append((
+            f"at-their-price ROI ≥ {min_ideal_roi * 100:+.0f}% (clean era)",
+            ideal_ok,
+            (f"{ideal_roi * 100:+.0f}% over {n_ideal_settled} clean settles"
+             if ideal_roi is not None else "no clean-era settled copies")))
+
+    if min_split_half_corr is not None:
+        corr = book_corr[0] if book_corr else None
+        n_w = book_corr[1] if book_corr else 0
+        corr_ok = corr is not None and corr >= min_split_half_corr
+        checks.append((
+            f"book persistence ≥ {min_split_half_corr:+.2f} (split-half, clean era)",
+            corr_ok,
+            (f"{corr:+.2f} ({n_w}w)" if corr is not None
+             else f"unmeasurable ({n_w}w with n≥{FALSIFY_MIN_N} settled)")))
 
     idle_days = ((now - last_trade_ts) / 86400.0) if last_trade_ts else float("inf")
     checks.append((

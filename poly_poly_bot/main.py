@@ -233,7 +233,8 @@ def _copy_paper_loop():
             # is configured, since state only records DELIVERED alerts.
             return
         try:
-            from src.copy_trading import golive_watch, promotion_gate, promotion_state
+            from src.copy_trading import (
+                era_state, golive_watch, promotion_gate, promotion_state)
             golive_watch.run_golive_watch(
                 ledger.positions.values(),
                 promoted=promotion_state.promoted_wallets(),
@@ -242,7 +243,12 @@ def _copy_paper_loop():
                 min_settled=CONFIG.copy_golive_min_settled,
                 max_idle_days=CONFIG.copy_golive_max_idle_days,
                 min_roi=CONFIG.copy_golive_min_roi,
-                floor_kwargs=promotion_gate.floor_kwargs_from(CONFIG))
+                floor_kwargs=promotion_gate.floor_kwargs_from(CONFIG),
+                # honest-metrics floors (owner ruling 2026-07-25): same single
+                # derivation as /golive, evaluated on the clean era only.
+                era_floor=era_state.era_floor_ts(
+                    os.path.join(CONFIG.data_dir, "ab_race_state.json")),
+                **promotion_gate.honest_kwargs_from(CONFIG))
         except Exception as e:
             # WARNING, not debug: this feature's whole job is telling the owner
             # what he isn't watching for — a silently dead watch is the worst

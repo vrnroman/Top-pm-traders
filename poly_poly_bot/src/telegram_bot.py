@@ -1118,14 +1118,17 @@ def _golive_target(query: str) -> str | None:
 
 
 def _wallet_ledger_view(wallet: str):
-    """(settled_positions, last_trade_ts) for a wallet from the paper-copy ledger."""
+    """(settled_positions, last_trade_ts, all_positions) for a wallet from the
+    paper-copy ledger. The full position list rides along so the honest-metrics
+    go-live floors can score the wallet's clean-era fills and the BOOK's
+    split-half persistence without a second ledger read."""
     from src.copy_trading.copy_paper import PaperCopyLedger, is_dust_fill
 
     key = (wallet or "").lower()
     try:
         ledger = PaperCopyLedger(CONFIG.copy_paper_ledger)
     except Exception:
-        return [], None
+        return [], None, []
     settled, last_ts = [], 0.0
     for p in ledger.positions.values():
         if (getattr(p, "target", "") or "").lower() != key:
@@ -1134,7 +1137,7 @@ def _wallet_ledger_view(wallet: str):
                       float(getattr(p, "closed_ts", 0.0) or 0.0))
         if getattr(p, "closed", False) and not is_dust_fill(p):
             settled.append(p)
-    return settled, (last_ts or None)
+    return settled, (last_ts or None), list(ledger.positions.values())
 
 
 def _handle_golive(text: str) -> None:
@@ -1162,14 +1165,31 @@ def _handle_golive(text: str) -> None:
         )
         return
 
-    settled, last_ts = _wallet_ledger_view(wallet)
+    settled, last_ts, all_positions = _wallet_ledger_view(wallet)
     stats = promotion_gate.compute_stats(wallet, settled)
     floor_kwargs = promotion_gate.floor_kwargs_from(CONFIG)
+    # Honest-metrics floors (owner ruling 2026-07-25): at-their-price ROI for
+    # THIS wallet and the book's split-half persistence, both on clean-era
+    # fills only — no floor recorded means no clean era, so both get None and
+    # fail closed. Same single derivation as the watch (gate parity).
+    from src.copy_trading import era_state as _era
+    era_floor = _era.era_floor_ts(_ab_race_state_path())
+    honest = promotion_gate.honest_kwargs_from(CONFIG)
+    ideal_roi, n_ideal = None, 0
+    if honest["min_ideal_roi"] is not None and era_floor is not None:
+        ideal_roi, n_ideal = promotion_gate.ideal_roi_for(
+            settled, min_opened_ts=era_floor)
+    book_corr = None
+    if honest["min_split_half_corr"] is not None and era_floor is not None:
+        book_corr = promotion_gate.split_half_corr(
+            all_positions, min_opened_ts=era_floor)
     ready, checks = promotion_gate.golive_check(
         stats, last_trade_ts=last_ts, now=_time.time(),
         min_settled=CONFIG.copy_golive_min_settled,
         max_idle_days=CONFIG.copy_golive_max_idle_days,
-        min_roi=CONFIG.copy_golive_min_roi, floor_kwargs=floor_kwargs)
+        min_roi=CONFIG.copy_golive_min_roi, floor_kwargs=floor_kwargs,
+        ideal_roi=ideal_roi, n_ideal_settled=n_ideal,
+        book_corr=book_corr, **honest)
 
     head = "✅ <b>READY for live</b>" if ready else "⏸ <b>HOLD — not ready for live</b>"
     lines = [f"{head} — <code>{_esc(wallet)}</code>"]

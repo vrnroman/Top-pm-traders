@@ -367,6 +367,19 @@ class Config:
     copy_golive_min_settled: int = _opt_int("COPY_GOLIVE_MIN_SETTLED", 30)
     copy_golive_max_idle_days: float = _opt_float("COPY_GOLIVE_MAX_IDLE_DAYS", 14.0)
     copy_golive_min_roi: float = _opt_float("COPY_GOLIVE_MIN_ROI", 0.0)
+    # Honest-metrics go-live floors (owner ruling 2026-07-25, desk item from the
+    # P0 trust run): the go-live gate ALSO requires the at-their-price ROI and
+    # the book's split-half persistence, both evaluated on CLEAN-ERA (post-P0-1)
+    # fills — the realized-only checks it sits next to were reading the metric
+    # the fill artifact inflated (A: +8.55% realized vs -0.11% at-price). Floor
+    # values mirror the realized ones and are uncalibrated (ideal ROI is
+    # structurally lower, so the same number is a stricter gate); recalibrate
+    # at the 08-22 kill-criterion verdict. Both checks FAIL CLOSED while the
+    # clean era is too young to measure. Master toggle false = checks off.
+    copy_golive_honest_metrics: bool = _opt_bool("COPY_GOLIVE_HONEST_METRICS", True)
+    copy_golive_min_ideal_roi: float = _opt_float("COPY_GOLIVE_MIN_IDEAL_ROI", 0.0)
+    copy_golive_min_split_half_corr: float = _opt_float(
+        "COPY_GOLIVE_MIN_SPLIT_HALF_CORR", 0.0)
     # Edge-triggered Telegram ping when a promoted wallet crosses (or drops
     # back off) the full /golive bar, so readiness never has to be polled by
     # hand (owner ask 2026-07-17). Advisory only — never flips anything.

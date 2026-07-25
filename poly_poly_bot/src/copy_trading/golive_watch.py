@@ -66,13 +66,23 @@ def evaluate_promoted(
     max_idle_days: float,
     min_roi: float,
     floor_kwargs: dict,
+    era_floor: Optional[float] = None,
+    min_ideal_roi: Optional[float] = None,
+    min_split_half_corr: Optional[float] = None,
 ) -> dict:
     """wallet(lower) -> (ready, stats, checks) for every promoted wallet,
     computed exactly like the manual ``/golive`` command (same gate, same
-    dust-fill exclusion)."""
+    dust-fill exclusion).
+
+    When the honest-metrics floors are on (``min_ideal_roi`` /
+    ``min_split_half_corr``, owner ruling 2026-07-25), each wallet's at-their-
+    price ROI and the book's split-half persistence are evaluated on clean-era
+    rows (opened >= ``era_floor``); with no floor recorded there IS no clean
+    era, so both checks get None and fail closed."""
     keys = {(w or "").lower() for w in promoted if w}
     settled: dict[str, list] = {k: [] for k in keys}
     last_ts: dict[str, float] = {k: 0.0 for k in keys}
+    positions = list(positions)
     for p in positions:
         k = (getattr(p, "target", "") or "").lower()
         if k not in keys:
@@ -82,13 +92,26 @@ def evaluate_promoted(
                          float(getattr(p, "closed_ts", 0.0) or 0.0))
         if getattr(p, "closed", False) and not is_dust_fill(p):
             settled[k].append(p)
+    # Book-level persistence over the clean era: one computation, shared by
+    # every promoted wallet's check (this book is what a go-live would trade).
+    book_corr = None
+    if min_split_half_corr is not None and era_floor is not None:
+        book_corr = promotion_gate.split_half_corr(
+            positions, min_opened_ts=era_floor)
     out = {}
     for k in keys:
         stats = promotion_gate.compute_stats(k, settled[k])
+        ideal_roi, n_ideal = None, 0
+        if min_ideal_roi is not None and era_floor is not None:
+            ideal_roi, n_ideal = promotion_gate.ideal_roi_for(
+                settled[k], min_opened_ts=era_floor)
         ready, checks = promotion_gate.golive_check(
             stats, last_trade_ts=last_ts[k] or None, now=now,
             min_settled=min_settled, max_idle_days=max_idle_days,
-            min_roi=min_roi, floor_kwargs=floor_kwargs)
+            min_roi=min_roi, floor_kwargs=floor_kwargs,
+            ideal_roi=ideal_roi, n_ideal_settled=n_ideal,
+            min_ideal_roi=min_ideal_roi,
+            book_corr=book_corr, min_split_half_corr=min_split_half_corr)
         out[k] = (ready, stats, checks)
     return out
 
@@ -130,13 +153,18 @@ def run_golive_watch(
     max_idle_days: float,
     min_roi: float,
     floor_kwargs: dict,
+    era_floor: Optional[float] = None,
+    min_ideal_roi: Optional[float] = None,
+    min_split_half_corr: Optional[float] = None,
 ) -> list[tuple[str, bool]]:
     """One watch pass. Returns the [(wallet, ready)] transitions it alerted."""
     now = time.time() if now is None else now
     results = evaluate_promoted(
         positions, promoted, now=now, min_settled=min_settled,
         max_idle_days=max_idle_days, min_roi=min_roi,
-        floor_kwargs=floor_kwargs)
+        floor_kwargs=floor_kwargs, era_floor=era_floor,
+        min_ideal_roi=min_ideal_roi,
+        min_split_half_corr=min_split_half_corr)
     state = _read_state(state_path)
     # prune wallets no longer promoted so the state file can't grow stale keys
     # — but ONLY when the promoted store actually returned wallets: its reader
