@@ -1,0 +1,527 @@
+# Roadmap — poly_poly_bot
+
+**Written 2026-07-25** from a full read of the code, the production VM logs, the
+live paper ledgers, and Langfuse. Supersedes `BACKLOG.md` (deleted; its one live
+item is carried into P1-5b below, the rest was shipped).
+
+This file is meant to be self-contained: a fresh session should be able to read
+only this and start working. Evidence and reproduction steps are included so
+nobody has to re-derive the numbers or re-litigate the conclusions.
+
+---
+
+## 0. State of play
+
+The bot is a Polymarket copy-trader. It is running on the GCP VM in
+`PREVIEW_MODE=true` — **no real money is at risk and none has been traded.**
+Two measurement harnesses run in background threads:
+
+- **Book A** — lagged copy, fills simulated by walking the live asks book.
+- **Book B** — instant copy, flat 100 bps slippage penalty.
+
+Wallet discovery hunts candidate wallets into a watchlist (27 wallets as of
+2026-07-24); an LLM gate (`claude-opus-4-8`) vets new admissions; a statistical
+promotion gate decides when a wallet is offered for real capital; `/golive`
+re-checks before the manual `PREVIEW_MODE=false` flip.
+
+**The headline conclusion of the 2026-07-25 analysis: the system currently has
+no measurable edge, and the apparent edge it reported was an artifact of its own
+fill simulator.** No wallet is ready for real money. Details in §1.
+
+Two promoted wallets exist in `promoted_wallets.json`
+(`0x48611e62…`, `0x5674f607…`) — both promoted via Telegram, both now sitting at
+`ready: false` in `golive_watch.json`, and both auto-demoted in book B. Nothing
+is pending a go-live decision.
+
+---
+
+## 1. Evidence base
+
+Recomputed independently from the raw production ledgers, not read off the bot's
+own reports. **Do not re-derive these before acting — reproduce them only if you
+change the fill model (P0-1), which invalidates the realized column.**
+
+### 1.1 The fill simulator gifts price — this is the whole "edge"
+
+`MIN_FILL_FRAC = 0.5` (`src/copy_trading/copy_paper.py:37`) lets the simulator
+sweep ask levels down to **half** the price the target paid.
+
+```
+79 of 201 settled A-copies (39%) filled >2% BETTER than the target.
+Those 79:  realized +$377.8   |   at the target's own price  -$157.5
+           => the fill model gifted +$535.3
+Book A's ENTIRE net PnL is +$537.5.
+```
+
+Worst offenders (the −5000 bps entries are the `MIN_FILL_FRAC` clamp binding):
+
+```
+drag -5000bps  their 0.560 -> ours 0.280   Bitcoin Up or Down - July 21, 5:35AM
+drag -4797bps  their 0.517 -> ours 0.269   Will Japan win on 2026-06-25?   pnl +135.9
+drag -3987bps  their 0.440 -> ours 0.265   Spread: Arizona Diamondbacks    pnl +139.0
+```
+
+Compounding it: `copy_paper.py:586` gates on `fill.drag_bps > fill_gate_bps` —
+**one-sided**. Fills 1.5% *worse* than the target are rejected; fills 50%
+*better* are kept. A filter that rejects bad luck and keeps good luck
+manufactures alpha by construction.
+
+### 1.2 The honest returns
+
+| Book | n settled | Capital | Realized ROI | ROI at target's own price |
+|---|---|---|---|---|
+| A (lagged) | 201 | $6,288 | **+8.55%** | **−0.11%** |
+| A, clean fills only (drag ≥ −200bps) | 122 | $3,965 | +4.03% | — |
+| B (instant) | 214 | $5,449 | −7.68% | −6.69% |
+| **A + B combined** | **415** | **$11,737** | — | **−3.17%** |
+
+Combined per-bet mean return **−4.05%**, SE 4.62%, **t = −0.88**,
+95% CI **[−13.1%, +5.0%]** — and that is *before* Polymarket fees and Polygon
+gas, neither of which either harness models.
+
+### 1.3 Wallet selection has negative persistence
+
+Per-wallet ROI split chronologically in half, all wallets with n ≥ 10:
+
+```
+A:  0x1e3b6822  1st +37.2%  2nd  +9.3%  HELD
+    0x48611e62  1st +18.2%  2nd -15.4%  FLIPPED
+    0x8dee870d  1st -16.7%  2nd +25.0%  FLIPPED
+    0x161a7f66  1st  -6.8%  2nd -47.2%  HELD
+    0x5674f607  1st +14.9%  2nd -23.8%  FLIPPED
+    0x4a3f86ed  1st -12.7%  2nd  +8.2%  FLIPPED
+    0x37c1ff27  1st +42.0%  2nd -20.3%  FLIPPED
+B:  0x4a3f86ed  1st +10.2%  2nd  -7.4%  FLIPPED
+    0xeef6ad0e  1st +37.8%  2nd -24.7%  FLIPPED
+    0x48611e62  1st  +9.7%  2nd -29.7%  FLIPPED
+    0x5674f607  1st +17.4%  2nd -29.8%  FLIPPED
+    0x161a7f66  1st -44.0%  2nd -20.7%  HELD
+    0x37c1ff27  1st +26.1%  2nd -17.1%  FLIPPED
+
+corr(1st half, 2nd half) = -0.184 (A), -0.099 (B).  11 of 13 flipped sign.
+```
+
+A wallet looking good is, empirically, slightly *negative* information about what
+it does next. **The bot has never computed this.** It is the single number that
+says whether copy-trading works at all.
+
+### 1.4 The "winners" are small samples that then go dark
+
+Book A wallets bucketed by settled count:
+
+```
+n in [1,4]    17 wallets   $1,216   +12.6%
+n in [5,14]    5 wallets   $1,349   +35.9%
+n in [15,inf]  6 wallets   $3,723    -2.7%   <- the only ones with enough data
+```
+
+Every headline wallet (+80.5%, +53.3%, +22.0%) has n ≤ 11 **and has been dark for
+22–30 days.** The wallets still trading sit at −12% to +4.5%.
+
+Book A by week, settled: `W25 +60.4% | W26 +29.2% | W27 +15.5% | W28 −14.9% |
+W29 −22.7% | W30 −15.5%`.
+
+### 1.5 Category and price concentration
+
+```
+A: sports n=148 $4,402  -1.0%  |  other n=41 $1,455 +26.0%  |  crypto n=9 $375 +46.5%
+B: sports n=185 $4,786  -8.8%  |  other n=17   $417  +4.6%  |  crypto n=5  $90 -22.9%
+B price bucket [0.2,0.4): n=19, ROI -61.5%, win rate 16% (breakeven ~30%)
+```
+
+Sports is 333 of 415 copies and is the losing category in both books. The
+positive slices are too small to act on (n=41, n=9) — this is a reason to **cut
+the known loser**, not to chase the apparent winner.
+
+### 1.6 The funnel is not searching
+
+`WALLET_DISCOVERY_SKILL_POOL=40` (`config.py:404`),
+`WALLET_DISCOVERY_INTERVAL_S=86400` (`config.py:402`). Production DISCOVERY log
+lines, one sweep per day:
+
+```
+2026-07-19  swept=43 qualified=23 new=0 removed=1 watchlist=23
+2026-07-20  swept=43 qualified=24 new=1 removed=0 watchlist=24
+2026-07-21  swept=42 qualified=24 new=0 removed=0 watchlist=24
+2026-07-22  swept=44 qualified=24 new=1 removed=1 watchlist=24
+2026-07-23  swept=41 qualified=25 new=2 removed=1 watchlist=25
+2026-07-24  swept=43 qualified=27 new=3 removed=1 watchlist=27
+```
+
+The same ~43 wallets are re-ranked daily. `consensus: ... 0 cells>=k · 0 new`
+every single day — the consensus detector has never fired.
+
+The top of the watchlist is ranked on raw wallet ROI with **no copy evidence at
+all**: `roi=6.26 t=61.2 copy_n=0`, `roi=6.14 t=22.6 copy_n=0`. Every LLM
+rejection says the same sentence — *"the classic signature of settlement-lag
+scooping near $1 which a delayed copier cannot capture."* The screen manufactures
+scoopers; Claude pays $0.09 a time to kill them.
+
+Evidence intake is also throttled: on 2026-07-24 the harness saw 34,779 target
+trade rows and rejected **28,334 (81.5%) as below the $300 minimum**
+(`copy_paper_min_usd`, `config.py:191`), netting ~15 copies/day across the whole
+watchlist. Meanwhile `COPY_GOLIVE_MIN_SETTLED=30` (`config.py:364`) and wallets
+go dark after ~20 copies — **nothing can ever reach the bar before its wallet
+dies.** Lowering the bar is not the fix; more wallets in parallel is.
+
+### 1.7 Gate integrity
+
+`data/gate-history.jsonl`, 71 decisions over 22 days:
+
+```
+verdicts: skip 28 | watch 25 | follow 6 | admit-fail-open 9 | skip-deferred 3
+admitted: 43     holdout admits: 0     confidence bands: low 25, medium 24, high 5
+```
+
+Langfuse, 99 traces since 2026-06-29 (`wallet-gate` 88, `promotion-gate` 9):
+
+```
+verdicts: skip 43 | watch 32 | follow 7 | NULL OUTPUT 15 | other 2
+latency: median 15.9s, max 45.2s      error traces: 0
+total spend ~$8 (~$0.30/day), model claude-opus-4-8
+```
+
+Three problems: **(a)** ~13–15% of gate calls fail open — the wallet is admitted
+unvetted and **zero error traces are recorded**, so the failures are invisible in
+telemetry. **(b)** `GATE_HOLDOUT_FRAC=0.1` is correctly wired (`main.py:826`) yet
+produced **0 holdouts across 28 skips**; expected ~3, p(zero) ≈ 5% — unlucky or
+broken, unresolved. **(c)** the dossier the gate judges is full of nulls
+(`n_closed`, `capital`, `hit_rate`, `concentration`, `mean_entry_price`,
+`up_ratio` all `null` in live traces) while `why_flagged` simultaneously claims
+"hit 100% over 455 closed markets, ROI +613%" against a `pnl_curve.net_pnl` of
+$767.
+
+### 1.8 Server health
+
+Healthy. VM up 39 days, container `RestartCount=0` since 2026-07-17, load 0.11,
+disk 7.0G/20G (38%), RAM 1.1G/2.0G. **No ERROR/WARNING/CRITICAL/tracebacks in
+seven days of logs.**
+
+The problems are cruft, not failure:
+
+- **93.5% of log volume is noise** — 68,889 of 73,666 lines on 2026-07-24 are
+  `urllib3.connectionpool` DEBUG from the Telegram long-poll. Real signal is
+  ~4,500 lines/day. Root cause: `main.py:885` sets the **root** logger to DEBUG
+  with a DEBUG file handler (`main.py:880`), capturing every third-party record.
+- Log retention **works correctly** — `_purge_old_bot_logs` runs on startup and
+  every midnight rollover; prod sets `BOT_LOG_RETENTION_DAYS=20`, so 19 days on
+  disk is the configured window, not a leak. Fix the noise, not the retention.
+- Docker json-file log driver has **no size cap** (`deploy.sh:178`), 18 MB and
+  growing.
+- ~14 MB of dead data in `data/` from strategies purged in `5f7a127` (2026-07-05).
+- 1.05 GB reclaimable Docker images.
+- **Port 22 open to `0.0.0.0/0`** via the `default-allow-ssh` project rule (hence
+  constant scanner hits in journalctl). RDP 3389 and two VNC 5901 rules are also
+  world-open. This VM holds a Polymarket private key.
+
+### 1.9 Caveats on the above
+
+- The −3.17% figure rests on `ideal_pnl` being computed correctly at
+  `their_price` — verified at `copy_paper.py:153` and spot-checked against raw
+  rows, but it shares the ledger's own resolution data. If market resolution is
+  mis-recorded anywhere, both this number and the bot's inherit it.
+- The persistence result (§1.3) is **independent of the fill model** and is the
+  finding to trust most.
+- n=9 crypto and n=41 "other" are too small to be findings. Treat them as noise.
+- The holdout anomaly (§1.7b) is p≈5% — suspicious, not proven broken.
+
+---
+
+## 2. How to reproduce
+
+Pull the live prod state (read-only; keys never leave the VM):
+
+```bash
+VM="gcloud compute ssh poly-poly-bot --zone asia-northeast1-a --project roman-vm --tunnel-through-iap"
+
+# ledgers + gate + promotion state
+$VM --command "cd /home/tianyuezhou/app/data && sudo tar czf /tmp/pm.tgz \
+  copy_paper_ledger.jsonl copy_paper_ledger_b.jsonl copy_watchlist.json \
+  gate-history.jsonl discovery_state.json promotion_offers*.json \
+  promoted_wallets.json golive_watch.json copy_blacklist*.json && sudo base64 /tmp/pm.tgz" \
+  | grep -vE 'WARNING|NumPy|cloud.google|please see' | tr -d '\n ' | base64 -d > pm.tgz
+tar xzf pm.tgz
+```
+
+Core numbers from the ledgers (note `copy_id` is append-with-update — last row
+per id wins, or you will double-count):
+
+```python
+import json, math, collections
+def load(p):
+    d = {}
+    for l in open(p):
+        if l.strip():
+            r = json.loads(l); d[r["copy_id"]] = r
+    return [r for r in d.values() if r.get("closed") and (r.get("spent") or 0) > 0]
+
+for lab, p in (("A", "copy_paper_ledger.jsonl"), ("B", "copy_paper_ledger_b.jsonl")):
+    rs = load(p)
+    sp = sum(r["spent"] for r in rs)
+    print(lab, "realized", sum(r.get("pnl") or 0 for r in rs) / sp,
+               "at-their-price", sum(r.get("ideal_pnl") or 0 for r in rs) / sp)
+```
+
+Split-half persistence (§1.3): group by `target`, sort each wallet's rows by
+`closed_ts`, compare `sum(pnl)/sum(spent)` of the first half vs the second,
+then Pearson-correlate the pairs across wallets.
+
+Langfuse (run **on the VM** so keys stay there):
+
+```bash
+$VM --command 'eval "$(docker exec poly-poly-bot env | grep -E "^LANGFUSE_" | sed "s/^/export /")"
+AUTH=$(printf "%s:%s" "$LANGFUSE_PUBLIC_KEY" "$LANGFUSE_SECRET_KEY" | base64 -w0)
+curl -s -H "Authorization: Basic $AUTH" "$LANGFUSE_HOST/api/public/traces?limit=100"'
+```
+
+---
+
+## 3. P0 — the measurement instrument is broken
+
+**Nothing downstream is trustworthy until P0-1 and P0-2 land. Do not tune
+thresholds, promote wallets, or judge strategies before then.**
+
+### P0-1 · Stop the fill simulator gifting price
+- **Why:** §1.1 — 39% of A-copies filled better than the target; that alone is
+  the book's entire profit.
+- **Change:** `src/copy_trading/copy_paper.py:37` — `MIN_FILL_FRAC = 0.5` → `0.97`.
+  A credible same-side ask cannot sit 3%+ under what the target just paid; at 0.5
+  the simulator sweeps stale book data.
+- **Also:** `copy_paper.py:586` — make the fill gate two-sided
+  (`abs(fill.drag_bps) > self.fill_gate_bps`) or add a separate favourable-side
+  floor. `copy_paper_fill_gate_bps=150` at `config.py:217`.
+- **Acceptance:** after 48h of fresh copies, `avg_drag_bps` in `/pnl` is ≥ 0 and
+  no new ledger row has `drag_bps < -300`.
+- **Effort:** ~1h incl. tests.
+
+### P0-2 · Re-baseline both books from `ideal_pnl`
+- **Why:** §1.2 — the honest combined number is −3.17%, not +8.55%.
+- **Change:** new `scripts/rebaseline_ledger.py` re-scoring
+  `copy_paper_ledger*.jsonl` on `ideal_pnl` (already stored per row,
+  `copy_paper.py:153`), emitting per-wallet and per-book ROI. Then make
+  `pnl_unified` report **both** realized and at-their-price ROI, permanently and
+  side by side.
+- **Why this shape:** keeps two months of history instead of discarding it, and
+  produces a number the fill model cannot inflate.
+- **Acceptance:** `/pnl` shows both columns; at-their-price matches the script.
+- **Effort:** ~3h.
+
+### P0-3 · Invalidate the A-vs-B race verdict
+- **Why:** the day-7 verdict memo went out 2026-07-18
+  (`ab_race_state.json: verdict_ts 1784361601`) on a book whose A-side profit is
+  the P0-1 artifact. A +8.55% vs B −7.68% is fill model, not strategy — at their
+  own price it is −0.11% vs −6.69%.
+- **Change:** reset `ab_race_state.json`, restart the race clock after P0-1, and
+  add the at-their-price metric to the `AB-RACE` daily snapshot so the next
+  verdict cannot be won on fills.
+- **Effort:** ~1h.
+
+### P0-4 · Ship the persistence test as a first-class metric
+- **Why:** §1.3 — corr = −0.18 / −0.10, never measured by the bot.
+- **Change:** `promotion_gate.py` already computes `second_half_roi` per wallet;
+  add a book-level `split_half_corr()` beside it and surface it in `/pnl` and the
+  daily digest. ~40 lines.
+- **Decision rule — write this down before you have a result you are attached
+  to:** if split-half correlation stays ≤ 0 on clean post-P0-1 data across ≥ 15
+  wallets with n ≥ 10, wallet-copying is falsified. Stop investing in it rather
+  than tuning it. See §5.
+- **Effort:** ~2h.
+
+---
+
+## 4. P1 — actually search for edge
+
+### P1-1 · Widen the funnel 10×
+- **Why:** §1.6 — `new=0..3`/day on a fixed 43-wallet pool is not a search.
+- **Change:** `config.py:404` `WALLET_DISCOVERY_SKILL_POOL` 40 → 400;
+  `config.py:402` `WALLET_DISCOVERY_INTERVAL_S` 86400 → 21600 (4×/day).
+- **Watch:** e2-small RAM is 1.1G/2.0G used. If this strains the VM, that is the
+  trigger to resize, not to stay small.
+- **Cost:** gate calls ~5/day → ~50–100/day, i.e. $0.30/day → ~$5–9/day. Against
+  the goal that is nothing (§1.7 — total spend to date is $8).
+- **Acceptance:** `new=` in the DISCOVERY sweep line averages > 10/day for a week.
+- **Effort:** config change, but needs a VM load check. ~2h.
+
+### P1-2 · Rank the pool on copy-replay ROI, not wallet ROI
+- **Why:** §1.6 — top-ranked watchlist wallets have `copy_n=0`, and the LLM gate
+  spends its budget killing the scoopers the screen keeps producing.
+- **Change:** make `copy_replay` ROI a **ranking key** in the skill screen, not
+  only a downstream filter (`wallet_discovery_min_copy_replay_roi` exists at
+  `config.py:428` — promote it to the sort). Wallets with `copy_n=0` should rank
+  *below* wallets with proven copy-replay, not above.
+- **Acceptance:** `hit-rate-scooper` + `replay-proven-negative` drop below 20% of
+  the cull histogram (they currently dominate it).
+- **Effort:** ~4h.
+
+### P1-3 · Fix the dossier the gate sees
+- **Why:** §1.7c — the model is refereeing contradictory, half-null inputs.
+- **Change:** `discovery_runner._dossier_from_eval` — populate the null fields or
+  drop them from the payload; reconcile `why_flagged` against `pnl_curve` before
+  sending.
+- **Acceptance:** no dossier ships with > 2 null fields; spot-check 5 Langfuse
+  traces.
+- **Effort:** ~3h.
+
+### P1-4 · Make gate fail-open visible
+- **Why:** §1.7a — ~13–15% of wallets admitted unvetted, zero error traces.
+- **Change:** `discovery_runner._llm_gate` — emit a Langfuse trace with
+  `level=ERROR` on parse/call failure; add the fail-open count to `/gate`; alert
+  on Telegram above 20% in a sweep.
+- **Effort:** ~2h.
+
+### P1-5 · Verify the holdout branch fires
+- **Why:** §1.7b — 0 holdouts across 28 skips.
+- **Change:** unit test driving `_llm_gate` with a stubbed RNG asserting the
+  holdout row is written (`discovery_runner.py` ~line 684); log the holdout roll
+  at DEBUG so it is observable.
+- **Effort:** ~2h.
+
+### P1-5b · Gate calibration Phase 2 — *carried over from the deleted BACKLOG.md*
+- **Status:** blocked on P1-5. Phase 1 (the holdout) shipped 2026-07-03 but has
+  produced **zero holdout rows in 22 days**, so the counterfactual clock has
+  never actually started.
+- **The measurement:** join `data/gate-history.jsonl` to `copy_paper_ledger.jsonl`
+  and report **admitted-ROI vs holdout-ROI**, sliced by confidence band and
+  qualifying theory. The money question: do the high-confidence skips we
+  holdout-admitted actually lose? If yes the gate is +EV; if the holdouts win,
+  the gate is rejecting edge.
+- **Why the holdout is non-negotiable:** a naive join only sees admitted wallets —
+  a selection-biased self-congratulation loop, not a test. Do **not** ship the
+  report without holdout data or it will only ever flatter the gate.
+- **Discipline:** treat the first calibration report as evidence to tune the gate
+  prompt/thresholds *by hand*, never to auto-change them. Keep the holdout
+  fraction small and its exposure capped — by construction it admits wallets the
+  gate thinks are bad.
+- **Entry points:** `gate_history.py` (`summarize` grows a calibration mode, or a
+  new `gate_calibration.py`), `telegram_bot._handle_gate`.
+- **Effort:** ~1 day, after weeks of holdout outcomes exist.
+
+### P1-6 · Act on the category evidence already in hand
+- **Why:** §1.5 — sports is 333 of 415 copies and loses in both books, while the
+  `approved_categories` filter (`copy_paper_live.py:506-520`) defaults to
+  unrestricted.
+- **Change:** flip the default from "absent → don't block" to "absent → require
+  ≥ N settled copies in that category first"; add the same treatment for
+  entry-price buckets.
+- **Caveat:** this is about cutting the known loser. Do **not** tilt into crypto
+  on n=9.
+- **Effort:** ~3h.
+
+### P1-7 · Model fees and gas
+- **Why:** §1.2 — even −3.17% is gross. Neither harness charges Polymarket fees
+  or Polygon gas.
+- **Change:** subtract realistic per-trade cost in both books.
+- **Effort:** ~2h.
+
+---
+
+## 5. P2 — hygiene
+
+### P2-1 · Kill the log noise — biggest win, smallest change
+- 68,889 of 73,666 lines/day are urllib3 DEBUG (§1.8).
+- **Change:** add `"urllib3"`, `"urllib3.connectionpool"`, `"web3"`, `"asyncio"`
+  to the noisy tuple at `src/logger.py:208`.
+- **Effect:** 16 MB/day → ~1 MB/day; 327 MB → ~20 MB at the same 20-day
+  retention. **Leave `BOT_LOG_RETENTION_DAYS=20` alone** — retention is not the
+  problem.
+- **Effort:** 5 min.
+
+### P2-2 · Cap the Docker json log
+`deploy.sh:178` has no `--log-opt`. Add
+`--log-opt max-size=50m --log-opt max-file=3`. **5 min.**
+
+### P2-3 · Delete dead strategy data
+`tennis_scan_metrics.jsonl` (12 MB), `tennis_trades.jsonl`,
+`tennis_bet_state.json`, `tennis_paper_book.json`, `weather_trades.jsonl` — ~14 MB
+from strategies purged in `5f7a127` (2026-07-05). Archive, then delete. **15 min.**
+
+### P2-4 · Prune Docker images
+1.05 GB reclaimable (`poly-poly-bot:latest` 933 MB, 5 weeks old).
+`docker image prune -a`. **5 min.**
+
+### P2-5 · Close the world-open ports
+`default-allow-ssh` permits `tcp:22` from `0.0.0.0/0`; `allow-iap-ssh`
+(35.235.240.0/20) already covers real access. Also world-open:
+`default-allow-rdp` (3389), `allow-vnc-5901` and `llow-vnc` (5901).
+- **Blocked on owner:** these are project-wide defaults — confirm no other
+  `roman-vm` instance depends on them before deleting.
+- **Effort:** 30 min incl. the check.
+
+### P2-6 · Fix Langfuse usage accounting
+Input tokens report as 2–6/call since ~2026-07-11 (vs 3,000–5,000 before);
+2026-07-11 → 07-14 report `totalCost: 0`. Post-07-11 costs are understated.
+Check the usage payload in `src/copy_trading/langfuse_telemetry.py`. **1h.**
+
+---
+
+## 6. Sequence
+
+1. **First 10 minutes:** P2-1, P2-2.
+2. **Then:** P0-1 → P0-2 → P0-3. This is the set that stops the bleeding.
+3. **Then:** P0-4.
+4. **Then:** P1-1 + P1-2 together — they are the same funnel fix from two ends.
+5. **Then:** P1-3, P1-4, P1-5 as one batch (all gate integrity), unblocking P1-5b.
+6. **Opportunistically:** P1-6, P1-7, P2-3/4/5/6.
+
+**Framing:** P0 does not find edge. It tells you whether the edge you thought you
+had is real — and the current read is that it is not. P1 is the bet that a 10×
+wider search finds something a 40-wallet pool could not.
+
+---
+
+## 7. Kill criterion
+
+Agree this now, while it is cheap:
+
+> After P0-1 ships and ≥ 4 weeks of clean fills have accrued, if the combined
+> at-their-price ROI is still negative **and** split-half correlation (P0-4) is
+> still ≤ 0 across ≥ 15 wallets with n ≥ 10, then wallet-copying on Polymarket is
+> falsified for this approach. Stop tuning it. Either pivot the search to rules
+> and market structure rather than wallet identity, or stop.
+
+The failure mode this guards against is the one the codebase has already shown:
+a wallet looks good at n=7, gets promoted, decays, gets blacklisted, and the
+cycle repeats with the next small sample.
+
+---
+
+## 8. Operational reference
+
+- **VM:** `poly-poly-bot`, zone `asia-northeast1-a`, project `roman-vm`,
+  `e2-small`, IAP-only access
+  (`gcloud compute ssh poly-poly-bot --zone asia-northeast1-a --project roman-vm --tunnel-through-iap`).
+- **Volumes:** `~/app/{data,logs,cache,results}` → `/app/...` in the container.
+- **It has gone network-dead before** (metadata server unreachable → SSH fails
+  with "failed to connect to port 22"). `gcloud compute instances reset` recovers
+  it; the container auto-restarts (`--restart unless-stopped`).
+- **Ship workflow** (see `CLAUDE.md`): full test suite must pass (363 tests,
+  `cd poly_poly_bot && .venv/bin/python -m pytest tests/ -q`) → commit → push to
+  `main` → GitHub Actions builds amd64 and pushes to Artifact Registry, VM pulls.
+  Watch with `gh run watch <id>`. **Never** run `bash deploy.sh` on the Mac — it
+  is arm64 and has no Docker.
+- **Report test counts as numbers** ("363 passed"), never "all tests pass".
+
+### Key config anchors
+
+| Setting | Location | Current |
+|---|---|---|
+| `MIN_FILL_FRAC` | `copy_paper.py:37` | `0.5` ← **P0-1** |
+| fill gate (one-sided) | `copy_paper.py:586` | `> fill_gate_bps` ← **P0-1** |
+| `ideal_pnl` computation | `copy_paper.py:153` | — |
+| `COPY_PAPER_FILL_GATE_BPS` | `config.py:217` | `150` |
+| `COPY_PAPER_MIN_USD` | `config.py:191` | `300` |
+| `WALLET_DISCOVERY_INTERVAL_S` | `config.py:402` | `86400` ← **P1-1** |
+| `WALLET_DISCOVERY_SKILL_POOL` | `config.py:404` | `40` ← **P1-1** |
+| `WALLET_DISCOVERY_MIN_COPY_REPLAY_ROI` | `config.py:428` | `0.02` ← **P1-2** |
+| `COPY_GOLIVE_MIN_SETTLED` | `config.py:364` | `30` |
+| `GATE_HOLDOUT_FRAC` | `config.py:487` | `0.1` ← **P1-5** |
+| holdout wiring | `main.py:826` | correct |
+| root logger set to DEBUG | `main.py:878-887` | ← **P2-1** |
+| noisy-logger suppression list | `logger.py:208` | ← **P2-1** |
+| `approved_categories` filter | `copy_paper_live.py:506-520` | ← **P1-6** |
+| docker run (no log cap) | `deploy.sh:178` | ← **P2-2** |
+
+Production env overrides (`docker exec poly-poly-bot env`): `PREVIEW_MODE=true`,
+`WALLET_DISCOVERY_ENABLED=true`, `COPY_PAPER_ENABLED=true`,
+`WALLET_DISCOVERY_LLM_REVIEW_ENABLED=true`, `BOT_LOG_RETENTION_DAYS=20`,
+`LANGFUSE_*`. Everything else runs on `config.py` defaults.

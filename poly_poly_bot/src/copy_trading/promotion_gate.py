@@ -25,8 +25,8 @@ Two design rules, both load-bearing:
   validated arithmetic and is allowed to *block* an auto-offer. The Claude
   promotion review (``llm_review.review_promotion``) runs on top but only
   annotates the surfaced offer — it never suppresses one, because the gate's own
-  calibration is itself still unvalidated (see the holdout / backfill BACKLOG
-  items). Statistical = gate, LLM = surfaced advice.
+  calibration is itself still unvalidated (see the holdout items ROADMAP P1-5 /
+  P1-5b). Statistical = gate, LLM = surfaced advice.
 
 Pure and defensive: ``compute_stats`` / ``evaluate_floor`` never raise on
 malformed positions; a wallet with too little data simply fails the floor with a

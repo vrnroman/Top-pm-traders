@@ -474,7 +474,7 @@ class Config:
     wallet_discovery_llm_review_enabled: bool = _opt_bool("WALLET_DISCOVERY_LLM_REVIEW_ENABLED", False)
     wallet_discovery_llm_review_top_n: int = _opt_int("WALLET_DISCOVERY_LLM_REVIEW_TOP_N", 20)
     wallet_discovery_llm_model: str = _optional("WALLET_DISCOVERY_LLM_MODEL", "claude-opus-4-8")
-    # Gate self-calibration holdout (BACKLOG Phase 1): to measure whether the LLM
+    # Gate self-calibration holdout (ROADMAP P1-5b, Phase 1): to measure whether the LLM
     # shortlist gate is actually +EV, occasionally admit a wallet it would SKIP,
     # flag the gate-history row holdout:true (keeping the original skip verdict),
     # and let the paper harness accrue its outcome — so a later job can compare

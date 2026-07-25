@@ -1,4 +1,4 @@
-"""Tests for the gate self-calibration holdout (BACKLOG Phase 1).
+"""Tests for the gate self-calibration holdout (ROADMAP P1-5 / P1-5b, Phase 1).
 
 When the shortlist gate says "skip", a small fraction of those wallets are
 admitted ANYWAY (holdout) and flagged, so a later job can compare their paper
