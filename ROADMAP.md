@@ -4,6 +4,18 @@
 live paper ledgers, and Langfuse. Supersedes `BACKLOG.md` (deleted; its one live
 item is carried into P1-5b below, the rest was shipped).
 
+> **STATUS 2026-07-25 (same day, commits `ec84422` + `1ba9647`): P0-1..P0-4 and
+> P2-1/P2-2 SHIPPED and live on the VM.** The fill model is fixed (0.97 floor,
+> two-sided gate), `/pnl` and the AB-RACE snapshot carry at-their-price ROI +
+> fill-health + split-half persistence next to the §7 kill bar, the race
+> verdict was voided (`ab_race_state.json`: `verdict_sent:false`,
+> `era_floor_ts=1784976482`), and `scripts/rebaseline_ledger.py` reproduces
+> §1.2/§1.3 exactly from the live ledgers. **Open watches:** (1) P0-1's 48h
+> acceptance (`rebaseline_ledger.py --era`, due ~07-27: avg drag ≥ 0, zero rows
+> < −300bps); (2) the §7 kill-criterion clock runs on clean fills from
+> 2026-07-25, verdict due ~08-22; (3) tomorrow's 08:00 UTC snapshot is the
+> first clean-era one.
+
 This file is meant to be self-contained: a fresh session should be able to read
 only this and start working. Evidence and reproduction steps are included so
 nobody has to re-derive the numbers or re-litigate the conclusions.
@@ -281,7 +293,20 @@ curl -s -H "Authorization: Basic $AUTH" "$LANGFUSE_HOST/api/public/traces?limit=
 **Nothing downstream is trustworthy until P0-1 and P0-2 land. Do not tune
 thresholds, promote wallets, or judge strategies before then.**
 
-### P0-1 · Stop the fill simulator gifting price
+> **P0-1..P0-4 all SHIPPED 2026-07-25** (`ec84422`, `1ba9647`; 886 tests green).
+> What landed beyond the letter of the items (owner asked "think what else
+> could be needed", manager-approved): a standing **fill-health witness**
+> (`copy_paper.fill_health`; avg/min drag, % better-than-target, deep-gift
+> count, rendered in `/pnl` and the daily snapshot), a **divergence tripwire**
+> (|realized − @price| > 200bps on ≥10 settled → `⚠SUSPECT-fills` + WARNING
+> log — would have flagged the 2026-07 artifact months early), split-half corr
+> computed on **both** realized and ideal returns, `era_state.py` as the single
+> clean-era marker every surface scopes by, and a verifier-caught guard so
+> `split_half_corr` can never fabricate a correlation from float noise.
+> Deferred to the owner (see the end-of-run desk): whether `/golive` +
+> `golive_watch` should also floor on at-their-price ROI + persistence.
+
+### P0-1 · Stop the fill simulator gifting price — **SHIPPED `ec84422`**
 - **Why:** §1.1 — 39% of A-copies filled better than the target; that alone is
   the book's entire profit.
 - **Change:** `src/copy_trading/copy_paper.py:37` — `MIN_FILL_FRAC = 0.5` → `0.97`.
@@ -294,7 +319,7 @@ thresholds, promote wallets, or judge strategies before then.**
   no new ledger row has `drag_bps < -300`.
 - **Effort:** ~1h incl. tests.
 
-### P0-2 · Re-baseline both books from `ideal_pnl`
+### P0-2 · Re-baseline both books from `ideal_pnl` — **SHIPPED `ec84422`**
 - **Why:** §1.2 — the honest combined number is −3.17%, not +8.55%.
 - **Change:** new `scripts/rebaseline_ledger.py` re-scoring
   `copy_paper_ledger*.jsonl` on `ideal_pnl` (already stored per row,
@@ -306,7 +331,7 @@ thresholds, promote wallets, or judge strategies before then.**
 - **Acceptance:** `/pnl` shows both columns; at-their-price matches the script.
 - **Effort:** ~3h.
 
-### P0-3 · Invalidate the A-vs-B race verdict
+### P0-3 · Invalidate the A-vs-B race verdict — **SHIPPED `ec84422`**
 - **Why:** the day-7 verdict memo went out 2026-07-18
   (`ab_race_state.json: verdict_ts 1784361601`) on a book whose A-side profit is
   the P0-1 artifact. A +8.55% vs B −7.68% is fill model, not strategy — at their
@@ -316,7 +341,7 @@ thresholds, promote wallets, or judge strategies before then.**
   verdict cannot be won on fills.
 - **Effort:** ~1h.
 
-### P0-4 · Ship the persistence test as a first-class metric
+### P0-4 · Ship the persistence test as a first-class metric — **SHIPPED `ec84422`+`1ba9647`**
 - **Why:** §1.3 — corr = −0.18 / −0.10, never measured by the bot.
 - **Change:** `promotion_gate.py` already computes `second_half_roi` per wallet;
   add a book-level `split_half_corr()` beside it and surface it in `/pnl` and the
@@ -417,7 +442,7 @@ thresholds, promote wallets, or judge strategies before then.**
 
 ## 5. P2 — hygiene
 
-### P2-1 · Kill the log noise — biggest win, smallest change
+### P2-1 · Kill the log noise — biggest win, smallest change — **SHIPPED `ec84422`**
 - 68,889 of 73,666 lines/day are urllib3 DEBUG (§1.8).
 - **Change:** add `"urllib3"`, `"urllib3.connectionpool"`, `"web3"`, `"asyncio"`
   to the noisy tuple at `src/logger.py:208`.
@@ -426,7 +451,7 @@ thresholds, promote wallets, or judge strategies before then.**
   problem.
 - **Effort:** 5 min.
 
-### P2-2 · Cap the Docker json log
+### P2-2 · Cap the Docker json log — **SHIPPED `ec84422`**
 `deploy.sh:178` has no `--log-opt`. Add
 `--log-opt max-size=50m --log-opt max-file=3`. **5 min.**
 
