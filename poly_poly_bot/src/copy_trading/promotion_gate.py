@@ -148,8 +148,17 @@ def split_half_corr(
     cov = sum((x - mx) * (y - my) for x, y in zip(first_rois, second_rois))
     vx = sum((x - mx) ** 2 for x in first_rois)
     vy = sum((y - my) ** 2 for y in second_rois)
-    if vx <= 0 or vy <= 0:
-        return (None, n)    # zero variance on one side: undefined, not zero
+    # Scale-aware degenerate guard, NOT vx <= 0: float summation leaves
+    # residuals like 5.8e-34 on bit-identical halves, which slips a zero check
+    # and then noise/noise FABRICATES a maximal ±1.0 (or a garbage 0.0 that
+    # would count toward the ROADMAP §7 kill bar) — verifier catch 2026-07-25
+    # (three flat-stake wallets at ROI 0.1 read as perfect +1.0 persistence).
+    # 1e-18 sits far above float noise and far below any real cross-wallet
+    # variance (ROIs differing by >=1e-4 give vx >= 1e-8). This is the
+    # kill-criterion number: it must never be manufactured.
+    eps = 1e-18 * max(1.0, mx * mx, my * my)
+    if vx <= eps or vy <= eps:
+        return (None, n)    # no measurable cross-wallet variance: undefined
     return (round(cov / math.sqrt(vx * vy), 4), n)
 
 

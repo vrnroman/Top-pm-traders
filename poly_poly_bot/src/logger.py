@@ -211,7 +211,7 @@ class BotLogger:
         # which was 93.5% of total log volume (68,889 of 73,666 lines on
         # 2026-07-24) and drowned real signal (~4,500 lines/day).
         for noisy in ("httpcore", "httpx", "httpcore.connection", "httpcore.http11",
-                      "urllib3", "urllib3.connectionpool", "web3", "asyncio"):
+                      "urllib3", "urllib3.connectionpool", "web3", "asyncio", "hpack"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
 
         log_format = os.environ.get("LOG_FORMAT", "text")

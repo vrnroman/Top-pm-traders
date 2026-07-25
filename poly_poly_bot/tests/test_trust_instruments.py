@@ -229,6 +229,33 @@ def test_split_half_corr_zero_variance_is_undefined_not_zero():
     assert corr is None and n == 3
 
 
+def test_split_half_corr_never_fabricates_from_float_noise():
+    # Verifier catch (2026-07-25): three flat-stake wallets whose four half
+    # ROIs are bit-identical at 0.1 — 0.1+0.1+0.1 = 0.30000000000000004, so a
+    # naive vx > 0 check slips and noise/noise returned a maximal +1.0. This
+    # is the §7 kill-criterion number: it must report unmeasurable, never a
+    # manufactured correlation. pnl=+5.0 on spent=50.0 for every row.
+    positions = []
+    for j in range(3):
+        for i in range(10):
+            p = _pos(f"flat{j}-{i}", target=f"0xflat{j}", their=0.50,
+                     entry=0.50, spent=50.0, opened=100.0 + i,
+                     closed_ts=200.0 + i, won=None)
+            p.closed, p.won, p.pnl, p.ideal_pnl = True, True, 5.0, 5.0
+            positions.append(p)
+    corr, n = split_half_corr(positions)
+    assert corr is None and n == 3
+    # the second variant from the repro: bit-identical FIRST halves (variance
+    # is float-summation noise only) with genuinely VARIED second halves —
+    # without the guard, cov/sqrt(vx*vy) = noise/real returned a garbage 0.0
+    # that would have counted TOWARD the kill bar. Must be unmeasurable.
+    mixed = []
+    for j, sw in enumerate((5, 3, 1)):          # second-half wins vary
+        mixed += _wallet_pattern(f"0xmix{j}", 3, sw, base_ts=500.0 + j * 100)
+    corr, n = split_half_corr(mixed)
+    assert corr is None and n == 3
+
+
 def test_falsification_bar_constants_are_public():
     # The ROADMAP §7 bar, pinned as constants so surfaces and tests agree.
     assert FALSIFY_MIN_WALLETS == 15
