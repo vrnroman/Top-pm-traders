@@ -71,6 +71,15 @@ PAPER_B_LABEL = "B-instant"
 MATURITY_THIN = 5      # below this: too few resolved bets to read the ROI as signal
 MATURITY_READY = 15    # at/above this: enough settled data to consider promoting
 
+# Realized-vs-at-their-price divergence tripwire (2026-07-25, instrumentation-
+# for-trust): a paper track whose realized ROI sits more than this far from its
+# at-their-price ROI is earning its result from the FILL MODEL, not from the
+# wallets — the exact 2026-07 artifact (realized +8.55% vs at-price -0.11%, an
+# 866bps gap, would have flagged SUSPECT months before it was found by hand).
+# Display-only: never gates anything, but it is rendered and logged loudly.
+DIVERGENCE_SUSPECT_BPS = 200
+DIVERGENCE_MIN_CLOSED = 10   # below this settled count the gap is small-sample noise
+
 
 def wilson_lower_bound(wins: int, n: int, z: float = 1.96) -> Optional[float]:
     """Lower bound of the Wilson score interval for a hit-rate over ``n``
@@ -127,6 +136,12 @@ class WalletPnl:
     n_closed: int = 0
     wins: int = 0
     losses: int = 0
+    # Honest-economics pair (paper books only, settled rows only): the PnL the
+    # same positions would have booked filled at the TARGET's price, and the
+    # capital those settled rows deployed. The at-their-price ROI derived from
+    # them cannot be inflated by the fill model (2026-07 artifact; P0-2).
+    ideal_pnl: float = 0.0
+    closed_cost: float = 0.0
 
     @property
     def net_pnl(self) -> float:
@@ -135,6 +150,17 @@ class WalletPnl:
     @property
     def roi(self) -> Optional[float]:
         return (self.net_pnl / self.cost_basis) if self.cost_basis > 0 else None
+
+    @property
+    def realized_roi_closed(self) -> Optional[float]:
+        """Realized ROI over SETTLED capital only — the like-for-like comparator
+        of ``at_price_roi`` (the headline ``roi`` includes marked opens)."""
+        return (self.realized_pnl / self.closed_cost) if self.closed_cost > 0 else None
+
+    @property
+    def at_price_roi(self) -> Optional[float]:
+        """ROI had every settled fill been at the target's own price."""
+        return (self.ideal_pnl / self.closed_cost) if self.closed_cost > 0 else None
 
     @property
     def hit_rate(self) -> Optional[float]:
@@ -154,6 +180,8 @@ class StrategyPnl:
     n_closed: int = 0
     wins: int = 0
     losses: int = 0
+    ideal_pnl: float = 0.0            # settled rows' drag-free PnL (paper books; see WalletPnl)
+    closed_cost: float = 0.0          # settled rows' deployed capital
     wallets: list = field(default_factory=list)   # list[WalletPnl]
 
     @property
@@ -163,6 +191,14 @@ class StrategyPnl:
     @property
     def roi(self) -> Optional[float]:
         return (self.net_pnl / self.cost_basis) if self.cost_basis > 0 else None
+
+    @property
+    def realized_roi_closed(self) -> Optional[float]:
+        return (self.realized_pnl / self.closed_cost) if self.closed_cost > 0 else None
+
+    @property
+    def at_price_roi(self) -> Optional[float]:
+        return (self.ideal_pnl / self.closed_cost) if self.closed_cost > 0 else None
 
     @property
     def n_wallets(self) -> int:
@@ -177,7 +213,23 @@ class StrategyPnl:
         self.n_closed += w.n_closed
         self.wins += w.wins
         self.losses += w.losses
+        self.ideal_pnl += w.ideal_pnl
+        self.closed_cost += w.closed_cost
         self.wallets.append(w)
+
+
+def divergence_suspect(sp: StrategyPnl) -> bool:
+    """True when a paper track's realized ROI and at-their-price ROI disagree
+    by more than DIVERGENCE_SUSPECT_BPS — i.e. the track's result is coming
+    from the fill model, not the wallets. Compared over SETTLED capital only
+    (like-for-like), and only once the sample clears DIVERGENCE_MIN_CLOSED so
+    a couple of lucky fills can't trip it."""
+    if sp.n_closed < DIVERGENCE_MIN_CLOSED:
+        return False
+    r, i = sp.realized_roi_closed, sp.at_price_roi
+    if r is None or i is None:
+        return False
+    return abs(r - i) * 10000 > DIVERGENCE_SUSPECT_BPS
 
 
 @dataclass
@@ -342,6 +394,8 @@ def aggregate_system_b(
         if p.closed:
             wp.realized_pnl += p.pnl
             wp.cost_basis += p.spent       # realized capital feeds ROI
+            wp.ideal_pnl += p.ideal_pnl    # drag-free comparator (P0-2)
+            wp.closed_cost += p.spent
             wp.n_closed += 1
             if p.won:
                 wp.wins += 1
@@ -389,6 +443,8 @@ def aggregate_strategy4(s4_positions: list[PaperPosition]) -> list[WalletPnl]:
         if p.closed:
             wp.realized_pnl += p.pnl
             wp.cost_basis += p.spent       # realized capital feeds ROI
+            wp.ideal_pnl += p.ideal_pnl    # drag-free comparator (P0-2)
+            wp.closed_cost += p.spent
             wp.n_closed += 1
             if p.won:
                 wp.wins += 1
@@ -426,6 +482,8 @@ def aggregate_paper_b(b_positions: list[PaperPosition]) -> list[WalletPnl]:
         if p.closed:
             wp.realized_pnl += p.pnl
             wp.cost_basis += p.spent       # realized capital feeds ROI
+            wp.ideal_pnl += p.ideal_pnl    # drag-free comparator (P0-2)
+            wp.closed_cost += p.spent
             wp.n_closed += 1
             if p.won:
                 wp.wins += 1
@@ -472,6 +530,8 @@ def build_unified(a_wallets: list[WalletPnl], b_wallets: list[WalletPnl]) -> Uni
         sp.unrealized_pnl = round(sp.unrealized_pnl, 2)
         sp.cost_basis = round(sp.cost_basis, 2)
         sp.open_cost = round(sp.open_cost, 2)
+        sp.ideal_pnl = round(sp.ideal_pnl, 2)
+        sp.closed_cost = round(sp.closed_cost, 2)
 
     total_realized = round(sum(w.realized_pnl for w in all_wallets), 2)
     total_unrealized = round(sum(w.unrealized_pnl for w in all_wallets), 2)
@@ -562,6 +622,8 @@ def _round(wps) -> None:
         wp.unrealized_pnl = round(wp.unrealized_pnl, 2)
         wp.cost_basis = round(wp.cost_basis, 2)
         wp.open_cost = round(wp.open_cost, 2)
+        wp.ideal_pnl = round(wp.ideal_pnl, 2)
+        wp.closed_cost = round(wp.closed_cost, 2)
 
 
 def _label_sort_key(label: str):

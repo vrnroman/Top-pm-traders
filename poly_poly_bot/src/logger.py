@@ -205,7 +205,13 @@ class BotLogger:
         self._logger.setLevel(logging.DEBUG)
         self._logger.handlers.clear()
 
-        for noisy in ("httpcore", "httpx", "httpcore.connection", "httpcore.http11"):
+        # Third-party chatter suppression: the named loggers are pinned to
+        # WARNING so their DEBUG/INFO records never reach our handlers. urllib3
+        # is the big one — the Telegram long-poll logs every connection at DEBUG,
+        # which was 93.5% of total log volume (68,889 of 73,666 lines on
+        # 2026-07-24) and drowned real signal (~4,500 lines/day).
+        for noisy in ("httpcore", "httpx", "httpcore.connection", "httpcore.http11",
+                      "urllib3", "urllib3.connectionpool", "web3", "asyncio"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
 
         log_format = os.environ.get("LOG_FORMAT", "text")

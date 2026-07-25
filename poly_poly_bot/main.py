@@ -706,31 +706,22 @@ def _ab_race_reporter_loop():
     the era (B's first open) is AB_RACE_VERDICT_DAYS old. Verdict-once semantics
     survive restarts via a small state file. The memo self-invalidates when
     either book sat starved 48h+ (a lopsided week must not sound confident).
+
+    Since 2026-07-25 (ROADMAP P0-3): the race runs on the CLEAN ERA only. The
+    2026-07-18 verdict was won on the artifact fill model (A's +8.55% was
+    gifted fills; at the target's own price it was -0.11%), so the state file
+    now carries ``era_floor_ts`` and both books are scored only on fills after
+    it. The snapshot carries the at-their-price ROI and the fill-health
+    witness, so the next verdict cannot be won on fills either.
     """
-    import json
     import time
     from datetime import datetime, timedelta, timezone
 
+    from src.copy_trading import era_state
     from src.copy_trading.strategy_compare import (
         compare, format_snapshot, format_verdict)
 
     state_path = os.path.join(CONFIG.data_dir, "ab_race_state.json")
-
-    def _load_state() -> dict:
-        try:
-            with open(state_path, encoding="utf-8") as f:
-                return json.load(f)
-        except (OSError, ValueError):
-            return {}
-
-    def _save_state(st: dict) -> None:
-        try:
-            tmp = state_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(st, f)
-            os.replace(tmp, state_path)
-        except OSError as e:
-            logger.warning(f"[AB-RACE] state save failed: {e}")
 
     while not _shutdown_event.is_set():
         # sleep to the NEXT daily fire time (known time, one wake per day)
@@ -742,15 +733,21 @@ def _ab_race_reporter_loop():
         if _shutdown_event.wait((fire - now_dt).total_seconds()):
             return
         try:
+            # The clean-era floor: written explicitly at the P0-1 deploy; seeded
+            # here as a fallback so a wiped state file still scopes the race to
+            # post-fix fills. Never moved once set — the era's start is a fact.
+            era_floor = era_state.seed_era_floor(state_path)
             cmp_ = compare(CONFIG.copy_paper_ledger, CONFIG.copy_paper_b_ledger,
-                           b_slippage_bps=CONFIG.copy_paper_b_slippage_bps)
+                           b_slippage_bps=CONFIG.copy_paper_b_slippage_bps,
+                           era_floor=era_floor)
             sent_snap = telegram_bot.send_message(format_snapshot(cmp_))
             # Log every reporter post — Telegram is the only other trace, and an
             # unauditable daily job reads as "never ran" from the logs.
             logger.info(
                 f"[AB-RACE] daily snapshot {'sent' if sent_snap else 'SEND FAILED'} "
-                f"(era_day={cmp_.get('era_days', 0):.1f})")
-            st = _load_state()
+                f"(era_day={cmp_.get('era_days', 0):.1f}, "
+                f"era_floor={era_floor:.0f})")
+            st = era_state.load(state_path)
             era = cmp_.get("era_start")
             if (era and not st.get("verdict_sent")
                     and time.time() - era >= CONFIG.ab_race_verdict_days * 86400.0):
@@ -763,7 +760,7 @@ def _ab_race_reporter_loop():
                 if sent:
                     st["verdict_sent"] = True
                     st["verdict_ts"] = time.time()
-                    _save_state(st)
+                    era_state.save(state_path, st)
         except Exception as e:  # the reporter must never die — next fire retries
             logger.warning(f"[AB-RACE] daily report failed: {e}")
 

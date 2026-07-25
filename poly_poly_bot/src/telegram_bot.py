@@ -383,6 +383,7 @@ def _compute_unified():
     # Strategy B — the borrowed-clock instant-copy book (2026-07 A-vs-B race).
     # Its own ledger, grouped under the single "B-instant" track. Open copies are
     # marked on-read exactly like the near-term book's above.
+    b_positions: list = []
     if CONFIG.copy_paper_b_enabled:
         try:
             b_ledger = PaperCopyLedger(CONFIG.copy_paper_b_ledger)
@@ -394,7 +395,10 @@ def _compute_unified():
         b_wallets = b_wallets + u.aggregate_paper_b(b_positions)
 
     unified = u.build_unified(a_wallets, b_wallets)
-    return unified, a_wallets, b_wallets, n_unpriced
+    # The raw paper positions ride along so /pnl can compute the trust
+    # witnesses (fill health, wallet persistence) without re-reading ledgers.
+    paper_books = {"near": paper_positions, "b": b_positions}
+    return unified, a_wallets, b_wallets, n_unpriced, paper_books
 
 
 def _handle_pnl():
@@ -405,7 +409,7 @@ def _handle_pnl():
     by), plus ``untagged-*`` for un-attributed positions."""
     from src.copy_trading import pnl_unified as u
 
-    unified, a_wallets, b_wallets, n_unpriced = _compute_unified()
+    unified, a_wallets, b_wallets, n_unpriced, paper_books = _compute_unified()
 
     all_w = a_wallets + b_wallets
     total_open = sum(w.n_open for w in all_w)
@@ -428,6 +432,16 @@ def _handle_pnl():
         lines.append(
             f"  ↳ current strategies: <b>${unified.total_net - legacy_net:+.2f}</b>"
             f" · legacy backlog: ${legacy_net:+.2f}")
+    # The honest-economics twin (P0-2): what the paper books' settled fills
+    # earned at the TARGET's own price. Shown side by side with realized,
+    # permanently — realized minus this is what the fill model added, which was
+    # the entire apparent edge in 2026-07.
+    paper_closed = sum(w.closed_cost for w in b_wallets)
+    if paper_closed > 0:
+        paper_ideal = sum(w.ideal_pnl for w in b_wallets)
+        lines.append(
+            f"  Paper at-target-price: <b>${paper_ideal:+.2f}</b> "
+            f"(ROI {paper_ideal / paper_closed:+.0%} on settled ${paper_closed:,.0f})")
     lines.append(f"  Open bets:   <b>{total_open}</b>")
     if total_closed:
         hit = wins / total_closed if total_closed else 0.0
@@ -448,12 +462,24 @@ def _handle_pnl():
         lines.append(f"  ⚠ {n_unpriced} System-A position(s) unpriced (no live quote)")
 
     lines.append("")
-    lines.append("<b>By strategy</b>  <i>(🧊/🌱/✅ settled | net | r/u | ROI | wallets | closed/open | hit lo)</i>")
+    lines.append("<b>By strategy</b>  <i>(🧊/🌱/✅ settled | net | r/u | ROI · @price | wallets | closed/open | hit lo)</i>")
     if not unified.strategies:
         lines.append("  (no positions yet)")
     for sp in unified.strategies:
         roi = sp.roi
         roi_str = f"ROI {roi:+.0%}" if roi is not None else "ROI n/a"
+        # The at-their-price twin (P0-2): the same settled fills scored at the
+        # target's own price — the number the fill model cannot inflate.
+        if sp.at_price_roi is not None:
+            roi_str += f" · @price {sp.at_price_roi:+.0%}"
+        # Divergence tripwire: realized sitting far from @price means the
+        # result is coming from the fill model, not the wallets (2026-07).
+        if u.divergence_suspect(sp):
+            roi_str += " ⚠SUSPECT-fills"
+            logger.warning(
+                f"[PNL] SUSPECT fill divergence on {sp.label}: realized "
+                f"{sp.realized_roi_closed:+.2%} vs at-price {sp.at_price_roi:+.2%} "
+                f"over {sp.n_closed} settled")
         # Show realized + unrealized for System A and any System-B/S4 strategy that
         # has marked-to-market opens; strategies with no live mark show realized only.
         if sp.system == "A" or sp.unrealized_pnl:
@@ -474,11 +500,75 @@ def _handle_pnl():
         )
 
     lines.append("")
+    lines.extend(_trust_lines(paper_books))
+    lines.append("")
     lines.append("<i>/wallets — top wallets overall + best/worst per strategy</i>")
     if CONFIG.preview_mode:
         lines.append("<i>PREVIEW MODE — positions are simulated</i>")
 
     _send_chunked("\n".join(lines))
+
+
+def _ab_race_state_path() -> str:
+    """ab_race_state.json carries the clean-era floor (era_floor_ts) every
+    trust surface scopes post-fix data by."""
+    return os.path.join(CONFIG.data_dir, "ab_race_state.json")
+
+
+def _trust_lines(paper_books: dict) -> list:
+    """The instrumentation-for-trust block of /pnl (2026-07-25, ROADMAP P0-2 /
+    P0-4): the fill-health witness (is the simulator gifting price again?)
+    scoped to the clean era, and split-half wallet persistence (the number
+    that says whether copy-trading works at all) all-time, at-their-price, and
+    post-fix — rendered next to the falsification bar agreed in ROADMAP §7 so
+    the bar is public before the data accrues."""
+    from src.copy_trading import era_state
+    from src.copy_trading.copy_paper import fill_health, fill_health_suspect
+    from src.copy_trading.promotion_gate import (
+        FALSIFY_MIN_N, FALSIFY_MIN_WALLETS, split_half_corr)
+
+    if not (paper_books.get("near") or paper_books.get("b")):
+        return []
+    floor = era_state.era_floor_ts(_ab_race_state_path())
+    lines: list = []
+
+    near = paper_books.get("near") or []
+    h = fill_health(near, min_opened_ts=floor)
+    if h["n"] == 0 and floor is not None:
+        # A fresh clean era has no fills yet — say so (with the all-time read
+        # as context) rather than dropping the witness right when it matters.
+        h_all = fill_health(near)
+        lines.append(
+            f"🔬 Fill health A (post-fix): no fills yet · "
+            f"all-time avg drag {h_all['avg_drag_bps']:+.0f}bps (n={h_all['n']})")
+    elif h["n"]:
+        scope = "post-fix" if floor is not None else "all-time"
+        warn = "⚠ " if fill_health_suspect(h) else ""
+        lines.append(
+            f"🔬 {warn}Fill health A ({scope}): avg drag {h['avg_drag_bps']:+.0f}bps · "
+            f"min {h['min_drag_bps']:+d} · {h['pct_better'] * 100:.0f}% better · "
+            f"deep-gift {h['n_deep_gift']}/{h['n']}")
+
+    def _corr(positions, pnl_attr, since):
+        corr, n = split_half_corr(positions, pnl_attr=pnl_attr, min_opened_ts=since)
+        return (f"{corr:+.2f}" if corr is not None else "n/a"), n
+
+    lines.append(f"📈 Wallet persistence (split-half corr, n≥{FALSIFY_MIN_N}/wallet):")
+    for label, key in (("A", "near"), ("B", "b")):
+        positions = paper_books.get(key) or []
+        if not positions:
+            continue
+        r_all, n_all = _corr(positions, "pnl", None)
+        i_all, _ = _corr(positions, "ideal_pnl", None)
+        seg = f"   {label}: {r_all} ({n_all}w) · @price {i_all}"
+        if floor is not None:
+            r_era, n_era = _corr(positions, "pnl", floor)
+            seg += f" · post-fix {r_era} ({n_era}w)"
+        lines.append(seg)
+    lines.append(
+        f"   kill bar: clean-era corr ≤ 0 across ≥{FALSIFY_MIN_WALLETS}w "
+        f"(n≥{FALSIFY_MIN_N}) → wallet-copying falsified (ROADMAP §7)")
+    return lines
 
 
 def _wallet_line(w, *, tags=None, strategies=None) -> str:
@@ -518,7 +608,7 @@ def _handle_wallets():
     lists that printed the same wallet several times."""
     from src.copy_trading import pnl_unified as u
 
-    unified, a_w, b_w, _n = _compute_unified()
+    unified, a_w, b_w, _n, _books = _compute_unified()
     if not unified.strategies:
         send_message("\U0001f3c5 <b>Wallet leaderboard</b>\nNo positions yet.")
         return

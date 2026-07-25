@@ -209,8 +209,11 @@ class Config:
     copy_paper_feed_min_usd: float = _opt_float("COPY_PAPER_FEED_MIN_USD", 100.0)
     # Entry guardrails (cut the copies that historically leaked ROI). Reversible
     # via env; set a cap <= 0 to disable it. fill-gate: skip a copy whose
-    # achievable fill is > this many bps ABOVE the target's price (don't chase a
-    # moved book). first-entry-only: copy the opening trade per market, not
+    # achievable fill is > this many bps from the target's price ON EITHER SIDE
+    # (don't chase a moved book — and don't sweep a suspiciously cheap one:
+    # two-sided since 2026-07-25, ROADMAP P0-1, because keeping only favourable
+    # surprises manufactured the book's entire apparent edge). first-entry-only:
+    # copy the opening trade per market, not
     # averaging-down adds. The per-day caps are the slate circuit-breaker —
     # one correlated same-day slate (the 82-copy World-Cup day that drove the
     # observed -25%) can't dominate the book.

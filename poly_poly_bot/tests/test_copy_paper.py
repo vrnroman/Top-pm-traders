@@ -61,7 +61,7 @@ def test_fill_skips_stale_dust_ask_below_floor():
     fill = simulate_copy_fill(
         0.62, [(0.001, 1_000_000), (0.63, 1000)], copy_usd=50, max_slippage_bps=200,
     )
-    assert fill.avg_price >= 0.62 * 0.5         # filled on the credible level, not the dust
+    assert fill.avg_price >= 0.62 * 0.97        # filled on the credible level, not the dust
     assert fill.shares < 200                    # ~80 shares, not ~50k
     assert abs(fill.drag_bps) < 500             # bounded, not -9984bps
 
@@ -72,11 +72,24 @@ def test_fill_unfilled_when_only_sub_floor_liquidity():
     assert fill.shares == 0 and fill.spent == 0
 
 
-def test_fill_allows_genuine_favourable_move_within_floor():
-    # A real pullback to 0.40 from a 0.62 entry (within the 50% floor) still fills.
+def test_fill_refuses_deep_favourable_move_p0_1():
+    # ROADMAP P0-1 (2026-07-25): a 0.40 ask under a 0.62 target price is NOT a
+    # genuine pullback we get to keep — it is stale/erroneous book data, and
+    # sweeping it is exactly how the old 0.5 floor manufactured Book A's
+    # apparent edge (39% of copies filled >2% better than the target; that gift
+    # was the book's entire profit). The 0.97 floor refuses it: unfilled.
     fill = simulate_copy_fill(0.62, [(0.40, 10000)], copy_usd=50, max_slippage_bps=200)
+    assert fill.shares == 0 and fill.spent == 0
+
+
+def test_fill_allows_small_favourable_move_within_floor():
+    # A modest pullback INSIDE the 3% credibility band still fills: 0.605 vs a
+    # 0.62 target (-2.4%, above the 0.6014 floor) is a plausible same-side ask.
+    fill = simulate_copy_fill(0.62, [(0.605, 10000)], copy_usd=50, max_slippage_bps=200)
     assert fill.shares > 0
-    assert abs(fill.avg_price - 0.40) < 1e-9
+    assert abs(fill.avg_price - 0.605) < 1e-9
+    assert fill.drag_bps < 0                    # genuinely (slightly) better price
+    assert fill.drag_bps > -300                 # ...but never better than the floor allows
 
 
 # --------------------------------------------------------------------------- #
@@ -200,6 +213,53 @@ def test_engine_fill_gate_allows_no_drag_fill():
         )
         s = eng.run_cycle(now=1)
         assert s.opened == 1 and s.skipped_fill_gate == 0
+
+
+def test_engine_fill_gate_two_sided_rejects_gifted_fill():
+    # ROADMAP P0-1: the gate is TWO-SIDED. A fill 180bps BETTER than the target
+    # (0.491 ask vs their 0.50 — inside the 0.97 floor, so the simulator takes
+    # it) is the same evidence corruption as a chase: the old one-sided gate
+    # kept exactly these, and they were the book's entire apparent edge.
+    # (Deeper gifts, >300bps, never reach the gate — the 0.97 floor refuses
+    # them as non-credible book data, covered above.)
+    with tempfile.TemporaryDirectory() as d:
+        led = PaperCopyLedger(os.path.join(d, "l.jsonl"))
+        eng = CopyPaperEngine(
+            led, detector=lambda: [_trade("t1", "TOK", their_price=0.50)],
+            book_fetcher=lambda t: [(0.491, 10000)],   # -180bps "gift"
+            resolver=lambda c: None, max_slippage_bps=500, fill_gate_bps=100,
+        )
+        s = eng.run_cycle(now=1)
+        assert s.opened == 0 and s.skipped_fill_gate == 1
+
+
+def test_engine_fill_gate_two_sided_allows_small_favourable():
+    # A small favourable fill inside the band (-40bps < gate 100) still opens.
+    with tempfile.TemporaryDirectory() as d:
+        led = PaperCopyLedger(os.path.join(d, "l.jsonl"))
+        eng = CopyPaperEngine(
+            led, detector=lambda: [_trade("t1", "TOK", their_price=0.50)],
+            book_fetcher=lambda t: [(0.498, 10000)],
+            resolver=lambda c: None, max_slippage_bps=500, fill_gate_bps=100,
+        )
+        s = eng.run_cycle(now=1)
+        assert s.opened == 1 and s.skipped_fill_gate == 0
+
+
+def test_is_dust_fill_decoupled_from_sim_floor():
+    # Manager-mandated boundary regression (P0-1): is_dust_fill's quarantine
+    # threshold is DUST_FILL_FRAC (0.5), NOT the simulator's MIN_FILL_FRAC
+    # (raised 0.5 -> 0.97). Bumping the sim floor must never reclassify the
+    # legacy fills in [0.5x, 0.97x) whose honest economics the re-baseline
+    # needs visible in the settled sample.
+    from src.copy_trading import copy_paper as cp
+    assert cp.MIN_FILL_FRAC == 0.97      # the P0-1 simulator floor
+    assert cp.DUST_FILL_FRAC == 0.5      # the quarantine, pinned at its legacy value
+    their = 0.60
+    assert cp.is_dust_fill(_pos(their_price=their, entry_price=0.29)) is True   # 0.48x: absurd
+    assert cp.is_dust_fill(_pos(their_price=their, entry_price=0.31)) is False  # 0.52x: legacy gift, KEPT
+    assert cp.is_dust_fill(_pos(their_price=their, entry_price=0.57)) is False  # 0.95x: legacy gift, KEPT
+    assert cp.is_dust_fill(_pos(their_price=their, entry_price=0.60)) is False  # at price: clean
 
 
 def test_engine_first_entry_only_skips_readd():

@@ -34,7 +34,24 @@ from typing import Callable, Optional
 # same-side ask far below what the target just paid is stale/erroneous book
 # data (a real CLOB ask under the market is arbitraged instantly), so we don't
 # fill there. Shared by the live fill simulator and the dust-position guard.
-MIN_FILL_FRAC = 0.5
+#
+# 2026-07-25 (ROADMAP P0-1): raised 0.5 -> 0.97. At 0.5 the simulator swept
+# asks down to HALF the target's price: 39% of settled A-copies filled >2%
+# better than the target, and that +$535 gift was the book's entire +$537
+# profit — the whole "edge" was a fill-model artifact. A credible same-side
+# ask cannot sit 3%+ under what the target just paid (our detection lag is
+# minutes, not hours); anything cheaper is stale book data we now refuse.
+MIN_FILL_FRAC = 0.97
+
+# Threshold for the historical dust-fill quarantine, as a fraction of the
+# target's price. Deliberately DECOUPLED from MIN_FILL_FRAC: the simulator
+# floor moved (0.5 -> 0.97, P0-1) but the quarantine must keep its original
+# semantics — it exists to hide only the pre-fix ABSURD fills (a stale ~0.001
+# ask swept into tens of thousands of shares), not to reclassify the legacy
+# fills in [0.5x, 0.97x) whose honest economics the at-their-price re-baseline
+# (P0-2) needs visible in the settled sample. is_dust_fill() pins this at 0.5
+# no matter where the simulator floor sits.
+DUST_FILL_FRAC = 0.5
 
 
 @dataclass
@@ -262,7 +279,7 @@ class CycleSummary:
     opened: int = 0
     skipped_unfilled: int = 0
     # guardrail skips (why a detected BUY was NOT copied):
-    skipped_fill_gate: int = 0          # our fill would chase too far above their price
+    skipped_fill_gate: int = 0          # our fill landed too far from their price (either side)
     skipped_not_first_entry: int = 0    # averaging-down / re-entry into a copied market
     skipped_slate_cap: int = 0          # per-(wallet|category)-day concentration cap hit
     skipped_event_cap: int = 0          # per-(wallet,event) concurrent-exposure cap hit
@@ -309,8 +326,15 @@ class CopyPaperEngine:
         bid_fetcher: Optional[BookFn] = None,
         # --- entry guardrails (all default-OFF so the bare engine is unchanged;
         # the live runner switches them on from config) ---
-        # fill-gate: skip a copy whose achievable fill is more than this many bps
-        # ABOVE the target's price — i.e. don't chase a moved book (None = off).
+        # fill-gate: skip a copy whose achievable fill lands more than this many
+        # bps from the target's price ON EITHER SIDE (None = off). Two-sided
+        # since 2026-07-25 (ROADMAP P0-1): the old one-sided gate rejected fills
+        # 1.5% WORSE than the target but kept fills 50% BETTER — a filter that
+        # rejects bad luck and keeps good luck manufactures alpha by
+        # construction (it was Book A's entire profit). A far-better fill is the
+        # same class of evidence corruption as a far-worse one: the book moved
+        # since the target traded, so the copy no longer measures the target's
+        # edge at the target's price.
         fill_gate_bps: Optional[int] = None,
         # only copy a wallet's FIRST entry into a (market, outcome); skip its
         # averaging-down / re-entry buys (the harness copies the opening trade).
@@ -581,9 +605,12 @@ class CopyPaperEngine:
             if fill.shares <= 0:
                 s.skipped_unfilled += 1
                 continue
-            # fill-gate: don't chase a moved book — skip when our achievable fill
-            # is more than fill_gate_bps above the target's price.
-            if self.fill_gate_bps is not None and fill.drag_bps > self.fill_gate_bps:
+            # fill-gate: don't copy a moved book — skip when our achievable fill
+            # is more than fill_gate_bps from the target's price IN EITHER
+            # DIRECTION (two-sided, P0-1: keeping only favourable surprises is
+            # how the old ledger manufactured its edge).
+            if (self.fill_gate_bps is not None
+                    and abs(fill.drag_bps) > self.fill_gate_bps):
                 s.skipped_fill_gate += 1
                 continue
             self.ledger.add(PaperPosition(
@@ -655,13 +682,19 @@ class CopyPaperEngine:
 # Reporting
 # --------------------------------------------------------------------------- #
 
-def is_dust_fill(p: PaperPosition, min_fill_frac: float = MIN_FILL_FRAC) -> bool:
+def is_dust_fill(p: PaperPosition, min_fill_frac: float = DUST_FILL_FRAC) -> bool:
     """True if a position's recorded entry is an implausible deep-discount fill.
 
     These can only exist in ledgers written before ``simulate_copy_fill`` grew
     its price floor — a $50 budget swept a stale ~0.001 ask into ~50k shares,
     which is what made the cumulative drag read ``-$30000``. Excluding them keeps
     the cumulative stats and notifications honest without rewriting history.
+
+    The default threshold is ``DUST_FILL_FRAC`` (0.5), NOT ``MIN_FILL_FRAC``:
+    the simulator floor and the historical quarantine are separate concerns
+    (see the constants above). Pinning this at 0.5 keeps legacy fills in
+    [0.5x, 0.97x) of the target's price INSIDE the reported sample, where the
+    at-their-price re-baseline can show their honest economics.
     """
     return (
         p.their_price > 0
@@ -693,6 +726,58 @@ def report(ledger: PaperCopyLedger) -> dict:
         "avg_drag_bps": round(sum(drags) / len(drags), 1) if drags else 0.0,
         "hit_rate": round(wins / len(closed), 4) if closed else 0.0,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Fill-health witness (P0-1's acceptance, made standing)
+# --------------------------------------------------------------------------- #
+
+# In the clean era the two-sided gate (|drag| <= fill_gate_bps, 150) and the
+# 0.97 floor make a fill below -300bps IMPOSSIBLE by construction — seeing one
+# means the fill path bypassed the engine or regressed. Matches the ROADMAP
+# P0-1 acceptance ("no new ledger row has drag_bps < -300").
+DEEP_GIFT_BPS = -300
+
+
+def drag_stats(drags: list) -> dict:
+    """Reduce a list of per-fill drag_bps to the fill-quality witness numbers:
+    how far our entries landed from the target's price on average, the worst
+    single case, how often we filled BETTER than the target (drag < 0 — small
+    values are normal book drift, systematically negative averages are not),
+    and how many fills breached the impossible-by-construction deep-gift floor.
+    """
+    n = len(drags)
+    if not n:
+        return {"n": 0, "avg_drag_bps": 0.0, "min_drag_bps": 0,
+                "pct_better": 0.0, "n_deep_gift": 0}
+    return {
+        "n": n,
+        "avg_drag_bps": round(sum(drags) / n, 1),
+        "min_drag_bps": min(drags),
+        "pct_better": round(sum(1 for d in drags if d < 0) / n, 4),
+        "n_deep_gift": sum(1 for d in drags if d < DEEP_GIFT_BPS),
+    }
+
+
+def fill_health(positions, min_opened_ts: Optional[float] = None) -> dict:
+    """The fill-quality witness over settled, non-dust positions, optionally
+    floored to the clean era (``min_opened_ts``). P0-1's 48h acceptance —
+    "avg drag >= 0, no row < -300bps" — stays a one-line read forever."""
+    drags = [int(p.drag_bps) for p in positions
+             if p.closed and not is_dust_fill(p)
+             and (min_opened_ts is None or (getattr(p, "opened_ts", 0) or 0)
+             >= min_opened_ts)]
+    return drag_stats(drags)
+
+
+def fill_health_suspect(h: dict, min_n: int = 5) -> bool:
+    """True when the fill model looks like it is gifting price again: any
+    deep gift (impossible by construction post-P0-1 — flags at any n), or a
+    negative AVERAGE drag on a non-trivial sample (fills landing systematically
+    better than the target's own price, the 2026-07 artifact signature)."""
+    if h["n_deep_gift"] > 0:
+        return True
+    return h["n"] >= min_n and h["avg_drag_bps"] < 0
 
 
 # --------------------------------------------------------------------------- #

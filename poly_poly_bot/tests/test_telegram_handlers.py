@@ -296,8 +296,9 @@ def _unified_fixture():
             flagged_by=("1b",), closed=True, won=(pnl > 0), pnl=pnl,
         )
 
-    b = u.aggregate_system_b([pp("0xbbb222", 20.0, "c1"), pp("0xccc333", -15.0, "c2")])
-    return u.build_unified(a, b), a, b, 0
+    positions = [pp("0xbbb222", 20.0, "c1"), pp("0xccc333", -15.0, "c2")]
+    b = u.aggregate_system_b(positions)
+    return u.build_unified(a, b), a, b, 0, {"near": positions, "b": []}
 
 
 def test_pnl_unified_shows_total_and_per_strategy(captured_messages, monkeypatch):
@@ -333,7 +334,7 @@ def _unified_with_open_paper():
         return p
 
     b = u.aggregate_system_b([op("c1", mark=True), op("c2", mark=False)])
-    return u.build_unified([], b), [], b, 0
+    return u.build_unified([], b), [], b, 0, {"near": [], "b": []}
 
 
 def test_pnl_footer_discloses_open_paper_exposure_and_unpriced(captured_messages, monkeypatch):

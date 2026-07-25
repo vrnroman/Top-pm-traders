@@ -20,9 +20,15 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import time
+from types import SimpleNamespace
 from typing import Optional
 
 from src.copy_trading import promotion_state
+from src.copy_trading.copy_paper import drag_stats, fill_health_suspect
+from src.copy_trading.pnl_unified import (
+    DIVERGENCE_MIN_CLOSED, DIVERGENCE_SUSPECT_BPS)
+from src.copy_trading.promotion_gate import (
+    FALSIFY_MIN_N, FALSIFY_MIN_WALLETS, split_half_corr)
 
 STALL_VOID_HOURS = 48.0     # a zero-open window this long compromises the verdict
 MIN_WALLET_N = 5            # per-wallet routing needs at least this many settled
@@ -52,15 +58,31 @@ def _book_stats(rows: list[dict]) -> dict:
     open_rows = [r for r in rows if not r.get("closed")]
     pnl = sum(float(r.get("pnl") or 0.0) for r in closed)
     spent = sum(float(r.get("spent") or 0.0) for r in closed)
+    ideal = sum(float(r.get("ideal_pnl") or 0.0) for r in closed)
     wins = sum(1 for r in closed if r.get("won"))
+    roi = (pnl / spent) if spent else 0.0
+    ideal_roi = (ideal / spent) if spent else 0.0
+    # Drag witness (P0-1 acceptance, standing): how far fills landed from the
+    # target's price — avg must be >= 0 and no fill below -300bps in the clean
+    # era; the deep-gift count is impossible by construction post-fix.
+    drag = drag_stats([int(r.get("drag_bps") or 0) for r in closed])
+    # Divergence tripwire: realized vs at-their-price disagreeing past the bar
+    # means the result is coming from the fill model, not the wallets.
+    suspect = (len(closed) >= DIVERGENCE_MIN_CLOSED and spent > 0
+               and abs(roi - ideal_roi) * 10000 > DIVERGENCE_SUSPECT_BPS)
     return {
         "n_settled": len(closed),
         "n_open": len(open_rows),
         "open_usd": round(sum(float(r.get("spent") or 0.0) for r in open_rows), 2),
         "pnl": round(pnl, 2),
         "spent": round(spent, 2),
-        "roi": round(pnl / spent, 4) if spent else 0.0,
+        "roi": round(roi, 4),
+        "ideal_pnl": round(ideal, 2),
+        "ideal_roi": round(ideal_roi, 4),
+        "gifted": round(pnl - ideal, 2),
         "win_rate": round(wins / len(closed), 4) if closed else 0.0,
+        "drag": drag,
+        "fill_suspect": suspect or fill_health_suspect(drag),
     }
 
 
@@ -114,11 +136,21 @@ def compare(
     *,
     b_slippage_bps: int = 0,
     now: Optional[float] = None,
+    era_floor: Optional[float] = None,
 ) -> dict:
-    """Compute the full A-vs-B comparison. Era = [B's first open, now]."""
+    """Compute the full A-vs-B comparison. Era = [B's first open, now].
+
+    ``era_floor`` (the clean-era marker written when the P0-1 fill fix
+    deployed) restricts BOTH books to rows opened after it: the race that
+    produced the 2026-07-18 verdict ran on the artifact fill model, so the
+    restarted race only scores post-fix fills. A's all-time record remains as
+    a witness, never the comparator."""
     now = now if now is not None else time.time()
     a_rows_all = _load_rows(a_ledger_path)
-    b_rows = _load_rows(b_ledger_path)
+    b_rows_all = _load_rows(b_ledger_path)
+    b_rows = ([r for r in b_rows_all
+               if float(r.get("opened_ts") or 0.0) >= era_floor]
+              if era_floor else b_rows_all)
 
     era_start = min((float(r.get("opened_ts") or 0.0) for r in b_rows),
                     default=None)
@@ -182,23 +214,74 @@ def compare(
             out.append((day, round(cum, 2)))
         return out
 
+    # Split-half wallet persistence (P0-4) — realized and at-their-price,
+    # all-time and clean-era. THE number that says whether wallet-copying
+    # works at all; rendered next to the ROADMAP §7 falsification bar.
+    def _persist_corr(rows: list[dict]) -> dict:
+        positions = [SimpleNamespace(**r) for r in rows if r.get("closed")]
+        realized, n = split_half_corr(positions, pnl_attr="pnl")
+        ideal, _ = split_half_corr(positions, pnl_attr="ideal_pnl")
+        return {"realized": realized, "ideal": ideal, "n": n}
+
+    a_rows_floor = ([r for r in a_rows_all
+                     if float(r.get("opened_ts") or 0.0) >= era_floor]
+                    if era_floor else None)
+    persistence = {
+        "a": {"all": _persist_corr(a_rows_all),
+              "era": (_persist_corr(a_rows_floor)
+                      if a_rows_floor is not None else None)},
+        "b": {"all": _persist_corr(b_rows_all),
+              "era": (_persist_corr(b_rows) if era_floor else None)},
+    }
+
     return {
         "now": now,
         "era_start": era_start,
+        "era_floor": era_floor,
         "era_days": round((now - era_start) / 86400.0, 2) if era_start else 0.0,
         "b_slippage_bps": b_slippage_bps,
         "a": a_stats, "b": b_stats, "a_all_time": a_all,
         "routing": routing,
         "validity": validity,
+        "persistence": persistence,
         "gov_a": _gov(""), "gov_b": _gov("b"),
         "daily_a": _daily(a_rows_era), "daily_b": _daily(b_rows),
     }
 
 
 def _fmt_book(name: str, s: dict) -> str:
-    return (f"{name}: {s['n_settled']} settled, ${s['pnl']:+.0f} "
-            f"({s['roi'] * 100:+.1f}%/copy, win {s['win_rate'] * 100:.0f}%, "
-            f"${s['spent']:.0f} cycled) · {s['n_open']} open (${s['open_usd']:.0f})")
+    line = (f"{name}: {s['n_settled']} settled, ${s['pnl']:+.0f} "
+            f"({s['roi'] * 100:+.1f}%/copy · @price {s['ideal_roi'] * 100:+.1f}%, "
+            f"win {s['win_rate'] * 100:.0f}%, ${s['spent']:.0f} cycled) · "
+            f"{s['n_open']} open (${s['open_usd']:.0f})")
+    if s.get("fill_suspect"):
+        line += " ⚠SUSPECT-fills"
+    return line
+
+
+def _persistence_lines(cmp: dict) -> list:
+    """The split-half persistence line(s) for the snapshot/verdict: all-time
+    corr beside the clean-era read, with the ROADMAP §7 bar spelled out — so
+    the race is watched against the number that can falsify it."""
+    pa, pb = cmp["persistence"]["a"], cmp["persistence"]["b"]
+    if not (pa["all"]["n"] or pb["all"]["n"] or cmp.get("era_floor")):
+        return []
+
+    def _seg(p: dict) -> str:
+        r = p["all"]["realized"]
+        s = f"{r:+.2f}" if r is not None else "n/a"
+        s += f" ({p['all']['n']}w)"
+        if p.get("era") is not None:
+            e = p["era"]["realized"]
+            s += (f" · post-fix {e:+.2f}" if e is not None else " · post-fix n/a")
+            s += f" ({p['era']['n']}w)"
+        return s
+
+    return [
+        f"📈 persistence (split-half, n≥{FALSIFY_MIN_N}): A {_seg(pa)} | B {_seg(pb)}",
+        f"   kill bar: clean-era corr ≤ 0 across ≥{FALSIFY_MIN_WALLETS}w "
+        f"(n≥{FALSIFY_MIN_N}) → falsified (ROADMAP §7)",
+    ]
 
 
 def format_snapshot(cmp: dict) -> str:
@@ -210,6 +293,16 @@ def format_snapshot(cmp: dict) -> str:
         _fmt_book("A (lagged)", cmp["a"]),
         _fmt_book(f"B (instant, +{cmp['b_slippage_bps']}bps)", cmp["b"]),
     ]
+    # Fill-health witness on A's live-book fills (P0-1's acceptance, standing):
+    # the first place a fill-model regression shows up, within 24h.
+    da = cmp["a"]["drag"]
+    if da["n"]:
+        warn = " ⚠" if cmp["a"]["fill_suspect"] else ""
+        lines.append(
+            f"fills A{warn}: avg drag {da['avg_drag_bps']:+.0f}bps · "
+            f"min {da['min_drag_bps']:+d} · {da['pct_better'] * 100:.0f}% better · "
+            f"deep-gift {da['n_deep_gift']}/{da['n']}")
+    lines.extend(_persistence_lines(cmp))
     routed = [r for r in cmp["routing"] if r["route"] in ("A", "B")]
     if routed:
         lines.append("routes: " + ", ".join(
@@ -240,11 +333,21 @@ def format_verdict(cmp: dict) -> str:
         if v["extend_days"]:
             out.append(f"⚠ extend the window by ~{v['extend_days']:.1f} day(s) "
                        f"before calling a winner")
+    # A verdict can never again be won on fills: if realized and at-their-price
+    # diverge, the fill model is gifting and the race says so up front.
+    for name, key in (("A", "a"), ("B", "b")):
+        if cmp[key].get("fill_suspect"):
+            out.append(
+                f"⚠ FILL-SUSPECT {name}: realized {cmp[key]['roi'] * 100:+.1f}% vs "
+                f"@price {cmp[key]['ideal_roi'] * 100:+.1f}% — the gap is the fill "
+                f"model, not the wallets; do not call a winner on realized $")
     out.append("")
-    out.append("HEADLINE (realized $ decides; the rest are witnesses):")
+    out.append("HEADLINE (realized $ decides; @price is the artifact-proof cross-check:")
     out.append("  " + _fmt_book("A in-era ", cmp["a"]))
     out.append("  " + _fmt_book(f"B (+{cmp['b_slippage_bps']}bps)", cmp["b"]))
     out.append("  " + _fmt_book("A all-time", cmp["a_all_time"]) + "  [witness]")
+    out.append("")
+    out.extend(_persistence_lines(cmp))
     out.append("")
     out.append(f"ROUTING TABLE (per-wallet, n>={MIN_WALLET_N} to route):")
     for r in cmp["routing"]:

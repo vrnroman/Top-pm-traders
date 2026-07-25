@@ -73,6 +73,85 @@ class FloorResult:
 # JSON-standard in the history log and readable in Telegram rather than ±inf.
 _TSTAT_CLAMP = 99.0
 
+# --------------------------------------------------------------------------- #
+# The pre-registered falsification bar (ROADMAP §7, agreed 2026-07-25 — written
+# down BEFORE the clean data accrues, so the result can't be negotiated after
+# the fact): after the P0-1 fill fix, if ≥ 4 weeks of clean fills show combined
+# at-their-price ROI still negative AND split-half correlation still <= 0
+# across >= FALSIFY_MIN_WALLETS wallets with n >= FALSIFY_MIN_N settled copies
+# each, then wallet-copying on Polymarket is falsified for this approach. Stop
+# tuning it; pivot the search to rules/market structure, or stop.
+# --------------------------------------------------------------------------- #
+FALSIFY_MIN_WALLETS = 15
+FALSIFY_MIN_N = 10
+
+
+def split_half_corr(
+    positions: Iterable,
+    *,
+    min_n: int = FALSIFY_MIN_N,
+    min_wallets: int = 3,
+    pnl_attr: str = "pnl",
+    min_opened_ts: Optional[float] = None,
+) -> Optional[tuple[float, int]]:
+    """Split-half persistence of wallet edge — THE number that says whether
+    copy-trading works at all (ROADMAP §1.3/P0-4).
+
+    For every wallet with >= ``min_n`` settled copies: sort chronologically,
+    split in half, compute each half's ROI; then Pearson-correlate (first-half,
+    second-half) pairs ACROSS wallets. Positive = a wallet looking good is
+    information about what it does next; <= 0 = the promotion gate is promoting
+    noise (the 2026-07-25 external measurement: -0.18 book A, -0.10 book B,
+    11 of 13 wallets flipped sign — never before computed by the bot itself).
+
+    ``pnl_attr="ideal_pnl"`` recomputes it on at-their-price economics (the
+    fill-model-proof variant); ``min_opened_ts`` restricts to the clean era.
+
+    Returns ``(corr, n_qualifying_wallets)``; ``corr`` is None when undefined —
+    fewer than ``min_wallets`` qualify (a correlation over 2 points is always
+    ±1, so it is reported as "not measurable yet", never as a number) or a
+    side has zero variance. ``n`` is still returned so surfaces can show how
+    far off measurability the book is.
+    """
+    by_wallet: dict = {}
+    for p in positions:
+        if _num(getattr(p, "spent", 0.0)) <= 0.0:
+            continue
+        if not getattr(p, "closed", False):
+            continue
+        if (min_opened_ts is not None
+                and _num(getattr(p, "opened_ts", 0.0)) < min_opened_ts):
+            continue
+        w = (getattr(p, "target", "") or "").lower()
+        by_wallet.setdefault(w, []).append(p)
+
+    first_rois: list[float] = []
+    second_rois: list[float] = []
+    for rows in by_wallet.values():
+        if len(rows) < min_n:
+            continue
+        ordered = sorted(rows, key=_closed_key)
+        half = len(ordered) // 2
+        fh, sh = ordered[:half], ordered[half:]
+        fh_spent = sum(_num(p.spent) for p in fh)
+        sh_spent = sum(_num(p.spent) for p in sh)
+        if fh_spent <= 0 or sh_spent <= 0:
+            continue
+        first_rois.append(sum(_num(getattr(p, pnl_attr, 0.0)) for p in fh) / fh_spent)
+        second_rois.append(sum(_num(getattr(p, pnl_attr, 0.0)) for p in sh) / sh_spent)
+
+    n = len(first_rois)
+    if n < min_wallets:
+        return (None, n)
+    mx = sum(first_rois) / n
+    my = sum(second_rois) / n
+    cov = sum((x - mx) * (y - my) for x, y in zip(first_rois, second_rois))
+    vx = sum((x - mx) ** 2 for x in first_rois)
+    vy = sum((y - my) ** 2 for y in second_rois)
+    if vx <= 0 or vy <= 0:
+        return (None, n)    # zero variance on one side: undefined, not zero
+    return (round(cov / math.sqrt(vx * vy), 4), n)
+
 
 def _return_tstat(returns: list[float]) -> float:
     """One-sample t-stat of per-bet copy returns against zero.

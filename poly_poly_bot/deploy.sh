@@ -180,6 +180,7 @@ gcloud compute ssh "$TARGET" \
             --restart unless-stopped \
             --memory=1500m \
             --memory-swap=1500m \
+            --log-opt max-size=50m --log-opt max-file=3 \
             --env-file .env \
             -v ~/app/data:/app/data \
             -v ~/app/cache:/app/cache \
