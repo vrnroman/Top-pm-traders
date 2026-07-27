@@ -1,4 +1,8 @@
-FROM python:3.12-slim
+# Pinned to bookworm: the bare `python:3.12-slim` tag rolled to Debian 13
+# (trixie) on 2026-07-27, whose own nodejs 20 package shadowed the nodesource
+# repo and splits npm into a separate package — the build died at
+# `npm: not found`. Pin the distro so upstream tag drift can't break the build.
+FROM python:3.12-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ && rm -rf /var/lib/apt/lists/*
 
