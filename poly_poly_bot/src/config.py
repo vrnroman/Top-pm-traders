@@ -446,9 +446,13 @@ class Config:
     # yields up to this cap) on a slow multi-day cadence. The funnel paces its
     # requests (WALLET_DISCOVERY_PAGE_PAUSE_S / _BATCH_PAUSE_S) to stay under the
     # 429 ceiling and streams the scoring in chunks so RAM stays bounded.
-    wallet_discovery_interval_s: int = _opt_int("WALLET_DISCOVERY_INTERVAL_S", 86400)  # 1d
+    wallet_discovery_interval_s: int = _opt_int("WALLET_DISCOVERY_INTERVAL_S", 21600)  # 6h (ROADMAP P1-1: 4x/day)
     wallet_discovery_universe: int = _opt_int("WALLET_DISCOVERY_UNIVERSE", 200000)
-    wallet_discovery_skill_pool: int = _opt_int("WALLET_DISCOVERY_SKILL_POOL", 40)
+    # Deep-eval pool per sweep. 400 (was 40, ROADMAP P1-1): a 40-wallet pool
+    # re-ranked the same ~43 wallets every day (new=0..3/sweep — not a search).
+    # Feasible on the e2-small only because the disk caches (wcache/rescache)
+    # are alive again — see discovery_data.evaluate_sweep's makedirs.
+    wallet_discovery_skill_pool: int = _opt_int("WALLET_DISCOVERY_SKILL_POOL", 400)
     # Paper watchlist size cap. 500 (was 25) so a single weak wallet can't squat a
     # scarce slot and starve out stronger candidates — discovery is paper-only, so
     # a wide shortlist just measures more wallets in parallel. The shared-feed

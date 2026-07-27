@@ -4,6 +4,16 @@
 live paper ledgers, and Langfuse. Supersedes `BACKLOG.md` (deleted; its one live
 item is carried into P1-5b below, the rest was shipped).
 
+> **STATUS 2026-07-28 (P1 batch SHIPPED, commits `6bc4837`, `b661126`, `+config`;
+> 931 tests green):** P1-1..P1-7 all landed (details at the top of §4). Two prod
+> findings fell out of the P1-1 load check: the discovery disk caches
+> (wcache/rescache) had been **silently dead since ~2026-06** (dirs never
+> created; every sweep re-fetched everything — 18 of the 24 min sweep), now
+> self-healing in code; and the §1.7b holdout anomaly **resolved itself** — the
+> first holdout fired 2026-07-27 16:03 UTC (the 22-day drought was the p≈5%
+> unlucky streak, wiring was correct all along). The counterfactual clock
+> P1-5b needs has started.
+>
 > **STATUS 2026-07-25 (same day, commits `ec84422` + `1ba9647`): P0-1..P0-4 and
 > P2-1/P2-2 SHIPPED and live on the VM.** The fill model is fixed (0.97 floor,
 > two-sided gate), `/pnl` and the AB-RACE snapshot carry at-their-price ROI +
@@ -368,7 +378,27 @@ thresholds, promote wallets, or judge strategies before then.**
 
 ## 4. P1 — actually search for edge
 
-### P1-1 · Widen the funnel 10×
+> **P1-1..P1-7 SHIPPED 2026-07-28** (931 tests; `6bc4837` cache+RAM fix,
+> `b661126` feature batch, config flip as the tip commit so the 10× revert is
+> one commit). What landed beyond the letter of the items (ideator field,
+> manager-filtered): per-sweep **funnel telemetry** (I2: pool → qualified →
+> gate → fail-open → holdout → admitted, one structured line), a **persistent
+> cull-histogram.jsonl** (I4: the P1-2 acceptance share is trendable, not
+> hand-counted), and a **cost sensitivity panel** in the `/pnl` trust block
+> (I8: combined at-price ROI under ×0/×0.5/×1/×2 cost multipliers — the 08-22
+> kill verdict now reads in real-money terms). Rejected at the gate: a
+> copy-replay sample guard (redundant with the proven tier), a runtime
+> dossier preflight (would fail-open or change gate semantics; the ≤2-null
+> unit test covers it), a synthetic fail-open test path (would pollute
+> gate-history calibration data). Re-watch items: (1) `new=` in the DISCOVERY
+> line averages > 10/day for a week (P1-1 acceptance); (2) hit-rate-scooper +
+> replay-proven-negative drop below 20% of the cull histogram (P1-2
+> acceptance, readable from cull-histogram.jsonl); (3) first wide sweep's
+> duration + VM RAM; (4) 5 Langfuse traces show no >2-null dossiers (P1-3
+> acceptance); (5) P1-6 shrinks the copied universe the 08-22 verdict
+> measures — a still-negative verdict then is *more* damning, not less.
+
+### P1-1 · Widen the funnel 10× — **SHIPPED** (config flip + `6bc4837` prereq)
 - **Why:** §1.6 — `new=0..3`/day on a fixed 43-wallet pool is not a search.
 - **Change:** `config.py:404` `WALLET_DISCOVERY_SKILL_POOL` 40 → 400;
   `config.py:402` `WALLET_DISCOVERY_INTERVAL_S` 86400 → 21600 (4×/day).
@@ -379,7 +409,7 @@ thresholds, promote wallets, or judge strategies before then.**
 - **Acceptance:** `new=` in the DISCOVERY sweep line averages > 10/day for a week.
 - **Effort:** config change, but needs a VM load check. ~2h.
 
-### P1-2 · Rank the pool on copy-replay ROI, not wallet ROI
+### P1-2 · Rank the pool on copy-replay ROI, not wallet ROI — **SHIPPED `b661126`**
 - **Why:** §1.6 — top-ranked watchlist wallets have `copy_n=0`, and the LLM gate
   spends its budget killing the scoopers the screen keeps producing.
 - **Change:** make `copy_replay` ROI a **ranking key** in the skill screen, not
@@ -390,7 +420,7 @@ thresholds, promote wallets, or judge strategies before then.**
   the cull histogram (they currently dominate it).
 - **Effort:** ~4h.
 
-### P1-3 · Fix the dossier the gate sees
+### P1-3 · Fix the dossier the gate sees — **SHIPPED `b661126`**
 - **Why:** §1.7c — the model is refereeing contradictory, half-null inputs.
 - **Change:** `discovery_runner._dossier_from_eval` — populate the null fields or
   drop them from the payload; reconcile `why_flagged` against `pnl_curve` before
@@ -399,14 +429,14 @@ thresholds, promote wallets, or judge strategies before then.**
   traces.
 - **Effort:** ~3h.
 
-### P1-4 · Make gate fail-open visible
+### P1-4 · Make gate fail-open visible — **SHIPPED `b661126`**
 - **Why:** §1.7a — ~13–15% of wallets admitted unvetted, zero error traces.
 - **Change:** `discovery_runner._llm_gate` — emit a Langfuse trace with
   `level=ERROR` on parse/call failure; add the fail-open count to `/gate`; alert
   on Telegram above 20% in a sweep.
 - **Effort:** ~2h.
 
-### P1-5 · Verify the holdout branch fires
+### P1-5 · Verify the holdout branch fires — **SHIPPED `b661126`** (and the prod anomaly self-resolved 07-27: first holdout fired; drought was the p≈5% streak)
 - **Why:** §1.7b — 0 holdouts across 28 skips.
 - **Change:** unit test driving `_llm_gate` with a stubbed RNG asserting the
   holdout row is written (`discovery_runner.py` ~line 684); log the holdout roll
@@ -433,7 +463,7 @@ thresholds, promote wallets, or judge strategies before then.**
   new `gate_calibration.py`), `telegram_bot._handle_gate`.
 - **Effort:** ~1 day, after weeks of holdout outcomes exist.
 
-### P1-6 · Act on the category evidence already in hand
+### P1-6 · Act on the category evidence already in hand — **SHIPPED `b661126`**
 - **Why:** §1.5 — sports is 333 of 415 copies and loses in both books, while the
   `approved_categories` filter (`copy_paper_live.py:506-520`) defaults to
   unrestricted.
@@ -444,7 +474,7 @@ thresholds, promote wallets, or judge strategies before then.**
   on n=9.
 - **Effort:** ~3h.
 
-### P1-7 · Model fees and gas
+### P1-7 · Model fees and gas — **SHIPPED `b661126`**
 - **Why:** §1.2 — even −3.17% is gross. Neither harness charges Polymarket fees
   or Polygon gas.
 - **Change:** subtract realistic per-trade cost in both books.
@@ -547,8 +577,8 @@ cycle repeats with the next small sample.
 | `ideal_pnl` computation | `copy_paper.py:153` | — |
 | `COPY_PAPER_FILL_GATE_BPS` | `config.py:217` | `150` |
 | `COPY_PAPER_MIN_USD` | `config.py:191` | `300` |
-| `WALLET_DISCOVERY_INTERVAL_S` | `config.py:402` | `86400` ← **P1-1** |
-| `WALLET_DISCOVERY_SKILL_POOL` | `config.py:404` | `40` ← **P1-1** |
+| `WALLET_DISCOVERY_INTERVAL_S` | `config.py:423` | `21600` (shipped P1-1) |
+| `WALLET_DISCOVERY_SKILL_POOL` | `config.py:430` | `400` (shipped P1-1) |
 | `WALLET_DISCOVERY_MIN_COPY_REPLAY_ROI` | `config.py:428` | `0.02` ← **P1-2** |
 | `COPY_GOLIVE_MIN_SETTLED` | `config.py:364` | `30` |
 | `GATE_HOLDOUT_FRAC` | `config.py:487` | `0.1` ← **P1-5** |
