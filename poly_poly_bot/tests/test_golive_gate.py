@@ -103,12 +103,30 @@ def test_honest_kwargs_from_toggle():
     class C:
         copy_golive_honest_metrics = True
         copy_golive_min_ideal_roi = 0.0
+        copy_golive_min_ideal_settled = 5
         copy_golive_min_split_half_corr = 0.0
     assert pg.honest_kwargs_from(C) == {
-        "min_ideal_roi": 0.0, "min_split_half_corr": 0.0}
+        "min_ideal_roi": 0.0, "min_ideal_settled": 5,
+        "min_split_half_corr": 0.0}
     C.copy_golive_honest_metrics = False
     assert pg.honest_kwargs_from(C) == {
-        "min_ideal_roi": None, "min_split_half_corr": None}
+        "min_ideal_roi": None, "min_ideal_settled": None,
+        "min_split_half_corr": None}
+
+
+def test_golive_honest_ideal_roi_needs_a_minimum_sample():
+    # 2026-07-27 review: one lucky clean settle must not clear the real-money
+    # gate — the ideal check carries the repo's thin-sample band (5).
+    s = pg.compute_stats("0xA", _ready_positions(30))
+    ready, checks = pg.golive_check(
+        s, min_ideal_roi=0.0, min_ideal_settled=5,
+        ideal_roi=0.90, n_ideal_settled=1, **_BASE)
+    assert ready is False
+    assert any("need ≥5" in str(detail) for _, ok, detail in checks if not ok)
+    ready, _ = pg.golive_check(
+        s, min_ideal_roi=0.0, min_ideal_settled=5,
+        ideal_roi=0.03, n_ideal_settled=5, **_BASE)
+    assert ready is True
 
 
 def test_ideal_roi_for_scopes_quarantines_and_empties():

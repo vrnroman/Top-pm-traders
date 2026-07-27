@@ -378,6 +378,11 @@ class Config:
     # clean era is too young to measure. Master toggle false = checks off.
     copy_golive_honest_metrics: bool = _opt_bool("COPY_GOLIVE_HONEST_METRICS", True)
     copy_golive_min_ideal_roi: float = _opt_float("COPY_GOLIVE_MIN_IDEAL_ROI", 0.0)
+    # Minimum CLEAN-ERA settled copies before the ideal-ROI check can pass at
+    # all — one lucky settle must not clear the real-money gate (2026-07-27
+    # review). Mirrors the repo's thin-sample band (MATURITY_THIN=5): below it,
+    # an ROI is noise, not signal.
+    copy_golive_min_ideal_settled: int = _opt_int("COPY_GOLIVE_MIN_IDEAL_SETTLED", 5)
     copy_golive_min_split_half_corr: float = _opt_float(
         "COPY_GOLIVE_MIN_SPLIT_HALF_CORR", 0.0)
     # Edge-triggered Telegram ping when a promoted wallet crosses (or drops

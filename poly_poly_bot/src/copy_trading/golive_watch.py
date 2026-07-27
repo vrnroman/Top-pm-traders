@@ -68,6 +68,7 @@ def evaluate_promoted(
     floor_kwargs: dict,
     era_floor: Optional[float] = None,
     min_ideal_roi: Optional[float] = None,
+    min_ideal_settled: Optional[int] = None,
     min_split_half_corr: Optional[float] = None,
 ) -> dict:
     """wallet(lower) -> (ready, stats, checks) for every promoted wallet,
@@ -110,19 +111,22 @@ def evaluate_promoted(
             min_settled=min_settled, max_idle_days=max_idle_days,
             min_roi=min_roi, floor_kwargs=floor_kwargs,
             ideal_roi=ideal_roi, n_ideal_settled=n_ideal,
-            min_ideal_roi=min_ideal_roi,
+            min_ideal_roi=min_ideal_roi, min_ideal_settled=min_ideal_settled,
             book_corr=book_corr, min_split_half_corr=min_split_half_corr)
         out[k] = (ready, stats, checks)
     return out
 
 
-def _ready_message(wallet: str, stats, min_settled: int) -> str:
+def _ready_message(wallet: str, stats, min_settled: int,
+                   honest_on: bool = False) -> str:
     w = html.escape(wallet)
+    floors_txt = ("floor + clean-era honest floors hold" if honest_on
+                  else "floor holds")
     return (
         f"🟢 <b>GO-LIVE READY</b> — <code>{w}</code>\n"
         f"{stats.n_closed} settled (≥{min_settled}) · "
         f"ROI {(stats.roi or 0) * 100:+.0f}% · ${stats.net_pnl:+.0f} paper · "
-        f"floor holds · recently active\n"
+        f"{floors_txt} · recently active\n"
         f"Confirm with <code>/golive {w}</code>. Real money still needs "
         f"the manual <code>PREVIEW_MODE</code> flip — nothing was changed."
     )
@@ -155,6 +159,7 @@ def run_golive_watch(
     floor_kwargs: dict,
     era_floor: Optional[float] = None,
     min_ideal_roi: Optional[float] = None,
+    min_ideal_settled: Optional[int] = None,
     min_split_half_corr: Optional[float] = None,
 ) -> list[tuple[str, bool]]:
     """One watch pass. Returns the [(wallet, ready)] transitions it alerted."""
@@ -163,7 +168,7 @@ def run_golive_watch(
         positions, promoted, now=now, min_settled=min_settled,
         max_idle_days=max_idle_days, min_roi=min_roi,
         floor_kwargs=floor_kwargs, era_floor=era_floor,
-        min_ideal_roi=min_ideal_roi,
+        min_ideal_roi=min_ideal_roi, min_ideal_settled=min_ideal_settled,
         min_split_half_corr=min_split_half_corr)
     state = _read_state(state_path)
     # prune wallets no longer promoted so the state file can't grow stale keys
@@ -187,8 +192,11 @@ def run_golive_watch(
             state[w] = {"ready": False, "ts": now}
             changed = True
             continue
-        msg = (_ready_message(w, stats, min_settled) if ready
-               else _unready_message(w, checks))
+        msg = (_ready_message(
+                   w, stats, min_settled,
+                   honest_on=(min_ideal_roi is not None
+                              or min_split_half_corr is not None))
+               if ready else _unready_message(w, checks))
         if not send(msg):
             # Telegram failed — leave state untouched so next cycle retries.
             logger.warning(f"[GOLIVE-WATCH] alert send failed for {w} — will retry")

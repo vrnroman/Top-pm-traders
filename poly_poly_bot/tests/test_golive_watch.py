@@ -272,3 +272,18 @@ def test_honest_floors_off_keeps_legacy_behavior():
             _ready_book(), promoted=["0xW"], state_path=os.path.join(d, "s.json"),
             send=send, now=NOW, **GATE)
         assert t == [("0xw", True)]
+
+
+def test_honest_floors_ideal_sample_floor_binds():
+    # 3 clean settles (< the 5 thin-sample band) at +20% ideal: a thin clean
+    # record must not clear the real-money gate (2026-07-27 review).
+    with tempfile.TemporaryDirectory() as d:
+        state = os.path.join(d, "s.json")
+        send = SendSpy()
+        t = run_golive_watch(
+            _ready_book(3), promoted=["0xW"], state_path=state,
+            send=send, now=NOW, era_floor=NOW - 7200,
+            min_ideal_roi=0.0, min_ideal_settled=5,
+            min_split_half_corr=None, **GATE)
+        assert t == [] and send.sent == []
+        assert json.load(open(state))["0xw"]["ready"] is False

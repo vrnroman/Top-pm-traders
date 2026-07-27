@@ -341,9 +341,11 @@ def honest_kwargs_from(cfg) -> dict:
     now at mirrored values, recalibrate at the 08-22 kill-criterion verdict.
     ``None`` (= the check is off) when the master toggle is off."""
     if not getattr(cfg, "copy_golive_honest_metrics", True):
-        return dict(min_ideal_roi=None, min_split_half_corr=None)
+        return dict(min_ideal_roi=None, min_ideal_settled=None,
+                    min_split_half_corr=None)
     return dict(
         min_ideal_roi=cfg.copy_golive_min_ideal_roi,
+        min_ideal_settled=cfg.copy_golive_min_ideal_settled,
         min_split_half_corr=cfg.copy_golive_min_split_half_corr)
 
 
@@ -385,6 +387,7 @@ def golive_check(
     ideal_roi: Optional[float] = None,
     n_ideal_settled: int = 0,
     min_ideal_roi: Optional[float] = None,
+    min_ideal_settled: Optional[int] = None,
     book_corr: Optional[tuple] = None,
     min_split_half_corr: Optional[float] = None,
 ) -> tuple[bool, list[tuple]]:
@@ -420,16 +423,28 @@ def golive_check(
         (f"{stats.roi * 100:+.0f}%" if stats.roi is not None else "no data")))
 
     if min_ideal_roi is not None:
-        ideal_ok = ideal_roi is not None and ideal_roi >= min_ideal_roi
+        # The at-their-price check needs a minimum SAMPLE, not just a sign:
+        # without it one lucky clean settle clears the real-money gate while
+        # the wallet's clean record is still thin (2026-07-27 review catch —
+        # the corr check has a real minimum via split_half_corr, this one did
+        # not). min_ideal_settled mirrors the repo's thin-sample band (5).
+        thin = min_ideal_settled is not None and n_ideal_settled < min_ideal_settled
+        ideal_ok = (ideal_roi is not None and not thin
+                    and ideal_roi >= min_ideal_roi)
+        if ideal_roi is None:
+            detail = "no clean-era settled copies"
+        elif thin:
+            detail = (f"{ideal_roi * 100:+.0f}% over {n_ideal_settled} clean "
+                      f"settles (need ≥{min_ideal_settled})")
+        else:
+            detail = f"{ideal_roi * 100:+.0f}% over {n_ideal_settled} clean settles"
         checks.append((
             f"at-their-price ROI ≥ {min_ideal_roi * 100:+.0f}% (clean era)",
-            ideal_ok,
-            (f"{ideal_roi * 100:+.0f}% over {n_ideal_settled} clean settles"
-             if ideal_roi is not None else "no clean-era settled copies")))
+            ideal_ok, detail))
 
     if min_split_half_corr is not None:
         corr = book_corr[0] if book_corr else None
-        n_w = book_corr[1] if book_corr else 0
+        n_w = book_corr[1] if (book_corr and len(book_corr) > 1) else 0
         corr_ok = corr is not None and corr >= min_split_half_corr
         checks.append((
             f"book persistence ≥ {min_split_half_corr:+.2f} (split-half, clean era)",
