@@ -208,6 +208,43 @@ gcloud compute ssh "$TARGET" \
     --project="$GCP_PROJECT_ID" --zone="$ZONE" "${SSH_FLAGS[@]}" \
     --command='docker logs poly-poly-bot --tail 20'
 
+# ─── Step 5b: build manifest + claude-version drift witness (J2) ──
+# The image's unpinned inputs changing under us is the 2026-07-27 breakage
+# class (nodesource 403; claude CLI drift on 2026-07-11). Record a one-line
+# BOM per deploy in the VM's hygiene.log; if the claude CLI moved, print it
+# loud and drop a marker the bot surfaces on Telegram at boot (consumed once,
+# see main.py _consume_claude_drift_marker). NEVER fails the deploy.
+echo "[5/5] Recording build manifest..."
+gcloud compute ssh "$TARGET" \
+    --project="$GCP_PROJECT_ID" --zone="$ZONE" "${SSH_FLAGS[@]}" \
+    --command='
+        set +e
+        GIT_SHA="'"$GIT_SHA"'"
+        IMAGE="'"$IMAGE_LATEST"'"
+        LOG="$HOME/app/logs/hygiene.log"
+        TS="$(date -u +%Y%m%dT%H%M%SZ)"
+        DIGEST="$(docker inspect --format "{{index .RepoDigests 0}}" "$IMAGE" 2>/dev/null)"
+        OS_ID="$(docker exec poly-poly-bot sh -c ". /etc/os-release; echo \$VERSION_ID" 2>/dev/null)"
+        NODE_V="$(docker exec poly-poly-bot node --version 2>/dev/null)"
+        CLAUDE_V="$(docker exec poly-poly-bot claude --version 2>/dev/null | awk "{print \$1}")"
+        PY_V="$(docker exec poly-poly-bot python --version 2>/dev/null | awk "{print \$2}")"
+        PIP_H="$(docker exec poly-poly-bot sh -c "pip freeze | sort | sha256sum" 2>/dev/null | cut -c1-16)"
+        LINE="$TS build-manifest sha=$GIT_SHA image=$DIGEST os=$OS_ID node=$NODE_V claude=$CLAUDE_V python=$PY_V pipfreeze=$PIP_H"
+        echo "$LINE" >> "$LOG"
+        echo "  $LINE"
+        # Diff vs the LAST manifest line (grep the marker, never tail -1 —
+        # vm_hygiene.sh appends other receipts to the same log).
+        PREV="$(grep " build-manifest " "$LOG" | grep -v "$TS" | tail -1)"
+        OLD_CLAUDE="$(echo "$PREV" | sed -n "s/.*claude=\([^ ]*\).*/\1/p")"
+        if [ -n "$OLD_CLAUDE" ] && [ -n "$CLAUDE_V" ] && [ "$OLD_CLAUDE" != "$CLAUDE_V" ]; then
+            echo "  WARNING: claude-code CLI CHANGED: $OLD_CLAUDE -> $CLAUDE_V (gate behavior may drift)"
+            echo "$TS WARNING claude-version-drift $OLD_CLAUDE -> $CLAUDE_V" >> "$LOG"
+            printf "{\"old\": \"%s\", \"new\": \"%s\", \"ts\": \"%s\"}\n" \
+                "$OLD_CLAUDE" "$CLAUDE_V" "$TS" > ~/app/data/claude-version-drift.json
+        fi
+        true
+    ' || echo "  (build-manifest step failed — non-fatal)"
+
 echo ""
 echo "=== Deployment complete ($IMAGE_SHA) ==="
 echo "  Monitor: gcloud compute ssh $INSTANCE --zone=$ZONE --tunnel-through-iap --command='docker logs -f poly-poly-bot'"

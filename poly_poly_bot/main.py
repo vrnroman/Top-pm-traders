@@ -924,6 +924,35 @@ def _signal_handler(sig, frame):
     _shutdown_event.set()
 
 
+def _consume_claude_drift_marker() -> None:
+    """One-shot deploy witness (J2, 2026-07-28): deploy.sh drops
+    ``claude-version-drift.json`` into the data dir when the image's
+    claude-code CLI version moved vs the previous build — the 2026-07-11
+    telemetry drift and the 2026-07-27 build break both came from unpinned
+    external inputs changing silently. Surface it once on Telegram (the
+    channel that gets watched), then remove the marker. Never raises: a
+    marker problem must not take the boot down."""
+    import json
+    path = os.path.join(CONFIG.data_dir, "claude-version-drift.json")
+    try:
+        if not os.path.exists(path):
+            return
+        with open(path) as f:
+            d = json.load(f)
+        # Consume-once BEFORE sending: a Telegram outage must not re-alert on
+        # every restart (the marker is also logged in ~/app/logs/hygiene.log).
+        os.remove(path)
+        telegram_bot.send_message(
+            "⚠️ <b>claude-code CLI changed on this deploy</b>\n"
+            f"<code>{d.get('old', '?')}</code> → <code>{d.get('new', '?')}</code>\n"
+            "Gate prompt/cost behavior may drift — watch the next gate traces "
+            "(the telemetry-suspect tag guards usage shape).")
+        logger.warning(f"[BOOT] claude-code CLI changed on this deploy: "
+                       f"{d.get('old', '?')} -> {d.get('new', '?')}")
+    except Exception:
+        logger.exception("[BOOT] claude-drift marker consume failed")
+
+
 async def main():
     """Main entry point — runs Strategy #1 plus its measurement harnesses."""
     _setup_logging()
@@ -955,6 +984,7 @@ async def main():
         f"Strategy #1 (Copy): {'ON' if CONFIG.strategy1_enabled else 'OFF'}\n"
         f"Mode: {'PREVIEW' if CONFIG.preview_mode else 'LIVE'}"
     )
+    _consume_claude_drift_marker()
 
     # Start the copy-paper validation harness (Strategy 1b) in a thread.
     # Measurement only — never places real orders — so it is always safe to run.

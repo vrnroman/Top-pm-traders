@@ -490,6 +490,30 @@ thresholds, promote wallets, or judge strategies before then.**
 
 ## 5. P2 — hygiene
 
+> **P2-3/P2-4/P2-6 SHIPPED 2026-07-28** (P2-5 stays owner-REJECTED). Beyond the
+> letter of the items (ideator field, manager-filtered): telemetry **regression
+> tests** pinning the envelope→Langfuse mapping + cost fallback + a
+> **`telemetry-suspect` watchdog** (a successful generation with zero usage now
+> WARNINGs instead of silently corrupting a week of cost data), an idempotent
+> **`scripts/vm_hygiene.sh`** (archive+sha256-manifest+delete, prune, df
+> receipts to `~/app/logs/hygiene.log`), and a src pin test for the deleted
+> filenames. Two fell out of the run: **the deploy broke twice** —
+> `deb.nodesource.com/setup_22.x` now returns HTTP 403 and the old
+> `curl | bash` (no pipefail) swallowed it, so apt installed the distro nodejs
+> (npm split out) and the build died; earlier greens were layer-cache luck.
+> Node now installs from a **pinned official tarball** (v22.17.0) and the base
+> is pinned to `python:3.12-slim-bookworm`. And a disk census found **wcache at
+> 6.7GB after its first day back** — the `CACHE_MAX_FILES=15000` backstop was
+> ~37GB on a 20G disk (a bound that fires only after the disk is full), now
+> 4000 (~10GB, `ecbf421`). The one-off orphan scan (I2; standing sentinel
+> rejected) archived+deleted 2 more dead files (`price_paths.json` 2.5M,
+> `resolutions.json` 48K, stale since 2026-05-23);
+> `discovery_state.json.consensus.json` looked orphaned but is LIVE (computed
+> ref, `discovery_runner.py:280`). **Watch:** (1) claude-code CLI in the image
+> is still unpinned (`npm -g` latest) — every rebuild is a lottery on gate
+> behavior; the watchdog detects shape drift, recalibrate if it ever fires;
+> (2) rescache grows slowly forever (578MB, immutable) — years to matter.
+
 ### P2-1 · Kill the log noise — biggest win, smallest change — **SHIPPED `ec84422`**
 - 68,889 of 73,666 lines/day are urllib3 DEBUG (§1.8).
 - **Change:** add `"urllib3"`, `"urllib3.connectionpool"`, `"web3"`, `"asyncio"`
@@ -503,16 +527,16 @@ thresholds, promote wallets, or judge strategies before then.**
 `deploy.sh:178` has no `--log-opt`. Add
 `--log-opt max-size=50m --log-opt max-file=3`. **5 min.**
 
-### P2-3 · Delete dead strategy data
+### P2-3 · Delete dead strategy data — **SHIPPED** (archive + sha256 manifest in `~/app/data/archive/`, then delete; orphans included)
 `tennis_scan_metrics.jsonl` (12 MB), `tennis_trades.jsonl`,
 `tennis_bet_state.json`, `tennis_paper_book.json`, `weather_trades.jsonl` — ~14 MB
 from strategies purged in `5f7a127` (2026-07-05). Archive, then delete. **15 min.**
 
-### P2-4 · Prune Docker images
+### P2-4 · Prune Docker images — **SHIPPED** (reclaimed 1.052 GB, df receipt in `hygiene.log`)
 1.05 GB reclaimable (`poly-poly-bot:latest` 933 MB, 5 weeks old).
 `docker image prune -a`. **5 min.**
 
-### P2-5 · Close the world-open ports
+### P2-5 · Close the world-open ports — **REJECTED by owner (2026-07-25, do not re-pitch)**
 `default-allow-ssh` permits `tcp:22` from `0.0.0.0/0`; `allow-iap-ssh`
 (35.235.240.0/20) already covers real access. Also world-open:
 `default-allow-rdp` (3389), `allow-vnc-5901` and `llow-vnc` (5901).
@@ -520,7 +544,7 @@ from strategies purged in `5f7a127` (2026-07-05). Archive, then delete. **15 min
   `roman-vm` instance depends on them before deleting.
 - **Effort:** 30 min incl. the check.
 
-### P2-6 · Fix Langfuse usage accounting
+### P2-6 · Fix Langfuse usage accounting — **SHIPPED `7adc2e3`**
 Input tokens report as 2–6/call since ~2026-07-11 (vs 3,000–5,000 before);
 2026-07-11 → 07-14 report `totalCost: 0`. Post-07-11 costs are understated.
 Check the usage payload in `src/copy_trading/langfuse_telemetry.py`. **1h.**
