@@ -102,6 +102,12 @@ def record_generation(
                 "timestamp": _iso(start),
                 "name": name,
                 **io,
+                # P1-4: the level must ride the TRACE, not only the generation —
+                # Langfuse's error views/filter key on trace level, which is why
+                # ~13-15% of gate calls could fail open with "zero error traces"
+                # (§1.7a) while the generations quietly carried level=ERROR.
+                "level": level,
+                **({"statusMessage": error} if error else {}),
                 "tags": tags or [],
                 "metadata": meta,
             },

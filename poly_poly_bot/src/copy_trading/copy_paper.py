@@ -25,6 +25,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Optional
 
+from src.copy_trading.copy_cost import CostModel
+
 
 # --------------------------------------------------------------------------- #
 # Fill simulation (pure)
@@ -52,6 +54,24 @@ MIN_FILL_FRAC = 0.97
 # (P0-2) needs visible in the settled sample. is_dust_fill() pins this at 0.5
 # no matter where the simulator floor sits.
 DUST_FILL_FRAC = 0.5
+
+
+# Entry-price buckets for the P1-6 book-evidence gate. Edges match the §1.5
+# analysis that found book B's [0.2, 0.4) bucket at −61.5% ROI (win rate 16%
+# vs ~30% breakeven). The copyable band the detectors enforce is [0.05, 0.95],
+# so the outer buckets are where tail entries would land if the band ever moved.
+PRICE_BUCKET_EDGES = (0.2, 0.4, 0.6, 0.8)
+
+
+def price_bucket(price: float) -> str:
+    """Bucket label for an entry price: '0.0-0.2', '0.2-0.4', …, '0.8-1.0'."""
+    p = min(max(float(price or 0.0), 0.0), 0.9999)
+    lo = 0.0
+    for edge in PRICE_BUCKET_EDGES:
+        if p < edge:
+            return f"{lo:.1f}-{edge:.1f}"
+        lo = edge
+    return f"{PRICE_BUCKET_EDGES[-1]:.1f}-1.0"
 
 
 @dataclass
@@ -162,6 +182,17 @@ class PaperPosition:
     # review can audit how much of a wallet's paper evidence came in over the
     # real cap. Default-safe: old ledger rows load as False.
     over_real_cap: bool = False
+    # Modeled real-money costs (ROADMAP P1-7), stamped at open:
+    #   cost_usd       — charged against REALIZED pnl: gas + trading fee (the
+    #                    fill mechanics already charge each book its own spread:
+    #                    A walks the asks, B pays its flat bps — never re-charged).
+    #   ideal_cost_usd — charged against the AT-THEIR-PRICE counterfactual:
+    #                    cost_usd + the full category spread a real copier would
+    #                    pay on top of the target's price (the ideal column
+    #                    otherwise assumes free fills, which no real copier gets).
+    # Default 0 so rows written before P1-7 load with net == gross.
+    cost_usd: float = 0.0
+    ideal_cost_usd: float = 0.0
 
     def realize(self, won: bool, now: Optional[float] = None) -> None:
         payout = self.shares if won else 0.0
@@ -289,6 +320,10 @@ class CycleSummary:
                                         # cap could not group it; visible, not silent)
     skipped_category_gate: int = 0      # market category not in this wallet's approved
                                         # "winning markets" set (copy-and-hold edge gate)
+    skipped_category_evidence: int = 0  # P1-6: unstamped wallet, category already
+                                        # proven-losing in THIS book's own ledger
+    skipped_price_bucket_evidence: int = 0  # P1-6: unstamped wallet, entry-price
+                                        # bucket proven-losing in this book
     skipped_horizon: int = 0            # bet's resolution date is on the wrong side of the
                                         # horizon cut for this book (S1 skips longs, S4 skips shorts)
     resolved: int = 0
@@ -412,6 +447,38 @@ class CopyPaperEngine:
         # which shouldn't throttle evidence accrual. None = off.
         relief_evidence_n: Optional[int] = None,
         relief_max_per_category_day: Optional[int] = None,
+        # --- book-evidence gates (ROADMAP P1-6; default-OFF so the bare engine
+        # is unchanged) ---
+        # A copy from a wallet with NO discovery-approved stamp for its category
+        # is blocked when THIS book's own ledger already proves that slice a
+        # loser: >= category_evidence_min_n settled copies with realized ROI < 0,
+        # checked per market category AND per entry-price bucket (their_price).
+        # Stamped wallets are exempt — discovery's replay (run on the wallet's
+        # own activity, independent of this gate) is the re-admission channel,
+        # so blocking a losing slice can never deadlock re-entry. The old
+        # default ("absent stamp -> copy unrestricted") is how sports became
+        # 333/415 copies while losing in both books (§1.5). None = gate off.
+        category_evidence_min_n: Optional[int] = None,
+        # Only ledger rows opened at/after this timestamp count as evidence
+        # (0 = all-time). The shipped default is all-time: the pre-P0-1 fill
+        # artifact flattered realized ROI UPWARD, so an all-time-negative slice
+        # is a robust loser. Flip to the era floor later via config, no code
+        # change.
+        category_evidence_floor_ts: float = 0.0,
+        # --- modeled real-money costs (ROADMAP P1-7; None = legacy zero-cost
+        # rows, bare engine unchanged) ---
+        # When a CostModel is given, every opened row is stamped with:
+        #   cost_usd       = gas_usd_per_trade + trade_fee_bps x spent
+        #                    (charged against realized pnl; the fill mechanics
+        #                    already charge each book its own spread)
+        #   ideal_cost_usd = cost_usd + spent x CostModel.cost_of(category)
+        #                    (charged against the at-their-price column, which
+        #                    otherwise assumes free fills)
+        # Fill mechanics are NOT touched — mid-race, both books keep their own
+        # fill regimes and get identical cost treatment.
+        cost_model: Optional[CostModel] = None,
+        gas_usd_per_trade: float = 0.0,
+        trade_fee_bps: float = 0.0,
     ):
         self.ledger = ledger
         self.detector = detector
@@ -450,6 +517,33 @@ class CopyPaperEngine:
         self.starved_priority = starved_priority
         self.relief_evidence_n = relief_evidence_n
         self.relief_max_per_category_day = relief_max_per_category_day
+        self.category_evidence_min_n = category_evidence_min_n
+        self.category_evidence_floor_ts = category_evidence_floor_ts
+        self.cost_model = cost_model
+        self.gas_usd_per_trade = gas_usd_per_trade
+        self.trade_fee_bps = trade_fee_bps
+
+    def _evidence_maps(self) -> tuple[dict, dict]:
+        """Settled-record maps for the P1-6 book-evidence gates:
+        category -> (n, realized ROI) and price-bucket -> (n, realized ROI),
+        built from THIS book's own closed ledger rows (spent > 0, opened at/
+        after category_evidence_floor_ts). Recomputed per cycle — a slice that
+        turns its record around re-opens on the next cycle's read."""
+        cat: dict[str, list] = {}
+        buck: dict[str, list] = {}
+        for p in self.ledger.positions.values():
+            if not p.closed or (p.spent or 0) <= 0:
+                continue
+            if (p.opened_ts or 0) < self.category_evidence_floor_ts:
+                continue
+            c = cat.setdefault(p.category or "other", [0, 0.0, 0.0])
+            c[0] += 1; c[1] += p.pnl; c[2] += p.spent
+            b = buck.setdefault(price_bucket(p.their_price), [0, 0.0, 0.0])
+            b[0] += 1; b[1] += p.pnl; b[2] += p.spent
+        return ({k: (v[0], v[1] / v[2] if v[2] > 0 else 0.0)
+                 for k, v in cat.items()},
+                {k: (v[0], v[1] / v[2] if v[2] > 0 else 0.0)
+                 for k, v in buck.items()})
 
     def _copy_size(self, target: str, their_usd: float) -> float:
         """USD to deploy on a copy. Conviction-sized (target's bet vs its own
@@ -505,6 +599,13 @@ class CopyPaperEngine:
             for p in self.ledger.positions.values():
                 evidence_n[p.target] = evidence_n.get(p.target, 0) + 1
 
+        # P1-6: this book's own settled record per category / price bucket —
+        # the "known loser" evidence the unstamped-wallet gates read (§1.5).
+        cat_evidence: dict = {}
+        bucket_evidence: dict = {}
+        if self.category_evidence_min_n is not None:
+            cat_evidence, bucket_evidence = self._evidence_maps()
+
         trades = list(self.detector())
         if self.starved_priority:
             # coldest wallet first — stable sort keeps each wallet's own trades
@@ -536,10 +637,29 @@ class CopyPaperEngine:
             # winning-markets-only gate: copy a wallet's BUY only in the market
             # categories where its copy-and-hold edge cleared real-money cost.
             # Absent wallet -> unrestricted (no category data); present -> enforce.
+            stamped = False
             if self.allowed_categories is not None:
                 approved = self.allowed_categories.get((target or "").lower())
                 if approved is not None and category not in approved:
                     s.skipped_category_gate += 1
+                    continue
+                stamped = approved is not None and category in approved
+            # P1-6 book-evidence gates: an UNSTAMPED wallet (no discovery proof
+            # for this category) may not copy into a slice this book has already
+            # proven a loser — per category, and per entry-price bucket. The
+            # default flips from "absent -> don't block" to "absent -> require
+            # the slice to be unproven-or-winning first" (§1.5: sports is the
+            # losing majority in both books; B's 0.2-0.4 bucket is −61.5%).
+            if self.category_evidence_min_n is not None and not stamped:
+                rec = cat_evidence.get(category)
+                if (rec is not None and rec[0] >= self.category_evidence_min_n
+                        and rec[1] < 0):
+                    s.skipped_category_evidence += 1
+                    continue
+                brec = bucket_evidence.get(price_bucket(tr["their_price"]))
+                if (brec is not None and brec[0] >= self.category_evidence_min_n
+                        and brec[1] < 0):
+                    s.skipped_price_bucket_evidence += 1
                     continue
             # first-entry-only: skip averaging-down / re-entry into a market we
             # already copied from this target (we copy the opening trade only).
@@ -613,6 +733,17 @@ class CopyPaperEngine:
                     and abs(fill.drag_bps) > self.fill_gate_bps):
                 s.skipped_fill_gate += 1
                 continue
+            # P1-7: stamp the modeled real-money costs. Realized pnl is charged
+            # gas + fee only (the fill mechanics already made this book pay its
+            # own spread); the at-their-price counterfactual is additionally
+            # charged the category's full spread — the column that assumed free
+            # fills finally reads as what a real copier could have kept.
+            cost_usd = ideal_cost_usd = 0.0
+            if self.cost_model is not None:
+                cost_usd = (self.gas_usd_per_trade
+                            + fill.spent * self.trade_fee_bps / 10000.0)
+                ideal_cost_usd = (cost_usd
+                                  + fill.spent * self.cost_model.cost_of(category))
             self.ledger.add(PaperPosition(
                 copy_id=cid, target=target, condition_id=tr["condition_id"],
                 token_id=token, outcome_index=int(tr["outcome_index"]),
@@ -625,6 +756,7 @@ class CopyPaperEngine:
                 entry_price=fill.avg_price, shares=fill.shares, spent=fill.spent,
                 drag_bps=fill.drag_bps, opened_ts=now,
                 over_real_cap=over_real_cap,
+                cost_usd=round(cost_usd, 6), ideal_cost_usd=round(ideal_cost_usd, 6),
             ))
             s.opened += 1
             entered_tokens.add((target, token))

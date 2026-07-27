@@ -56,6 +56,10 @@ logger = logging.getLogger("poly_poly_bot")
 # per sweep, so an unbounded retry loop silently burns the whole gate budget.
 RECHECK_MAX_ATTEMPTS = 3
 
+# P1-2: persisted per-wallet copy stats older than this are pruned from
+# discovery state (a wallet unseen for a month starts over with a clean slate).
+COPY_STATS_TTL_S = 30 * 86400.0
+
 
 def _release_freed_memory() -> None:
     """Hand the sweep's freed heap back to the OS.
@@ -160,18 +164,37 @@ def _dossier_from_eval(e: Eval, paper_record: Optional[dict] = None) -> dict:
     block and stays fully skippable — the settlement-lag scoopers still get cut.
     ``paper_record`` (paper-proven re-entries only) adds the REALIZED forward
     paper record so the gate can weigh what actually happened when we copied.
+
+    Reads defensively (getattr) so partial Eval-shaped callers (the shortlist
+    audit script's watchlist-row reconstruction) omit absent fields instead of
+    erroring — same contract as ``build_dossier`` itself.
     """
+    def g(name, default=None):
+        return getattr(e, name, default)
+
     return build_dossier(
         e.wallet,
-        metrics=SimpleNamespace(roi=e.roi, tstat=e.tstat),
-        evaluation=e if e.n > 0 else None,  # omit lead-lag block when unmeasured
+        # P1-3: carry the FULL skill/entry/curve blocks. These used to ship as
+        # explicit nulls (n_closed, capital, hit_rate, concentration, mean_entry,
+        # up_ratio), so the gate judged why_flagged claims like "hit 100% over
+        # 455 closed, ROI +613%" with no way to see they were earned on $125 of
+        # capital — the numbers below come from the same source and make the
+        # claim self-reconciling against pnl_curve.net_pnl.
+        metrics=SimpleNamespace(roi=g("roi", 0.0), tstat=g("tstat", 0.0),
+                                n_closed=g("n_closed"),
+                                capital=g("capital"),
+                                hit_rate=g("closed_hit_rate"),
+                                concentration=g("concentration")),
+        evaluation=e if g("n", 0) > 0 else None,  # omit lead-lag block when unmeasured
         copy_replay=e,  # copy_roi/copy_n/copy_hit/exit_roi (self-omits when copy_n==0)
-        qualifying_theories=_theory_brief(e.flagged_by),
-        why_flagged=e.reason or None,
-        entry=SimpleNamespace(mean_entry=None, tail_ratio=e.tail_ratio,
-                              copyable_ratio=e.copyable_ratio),
-        curve=SimpleNamespace(net_pnl=e.net_pnl, max_drawdown_frac=e.curve_drawdown,
-                              up_ratio=None, sharpe=e.curve_sharpe),
+        qualifying_theories=_theory_brief(g("flagged_by", ())),
+        why_flagged=g("reason") or None,
+        entry=SimpleNamespace(mean_entry=g("mean_entry"),
+                              tail_ratio=g("tail_ratio"),
+                              copyable_ratio=g("copyable_ratio")),
+        curve=SimpleNamespace(net_pnl=g("net_pnl"),
+                              max_drawdown_frac=g("curve_drawdown"),
+                              up_ratio=g("up_ratio"), sharpe=g("curve_sharpe")),
         paper_record=paper_record,
     )
 
@@ -193,6 +216,11 @@ class DiscoveryRunner:
         llm_model: str = DEFAULT_MODEL,
         holdout_frac: float = 0.0,
         holdout_max_per_sweep: int = 2,
+        # P1-4: alert (WARNING + Telegram) when the share of this sweep's gate
+        # calls that admitted a wallet UNVETTED (fail-open on error, or a
+        # deferred re-check that exhausted its retries) exceeds this fraction.
+        # 20% because a healthy gate fails open ~never; 0 disables.
+        failopen_alert_frac: float = 0.2,
         # Paper-evidence retention override (2026-07 starvation RCA): when a
         # ledger path is given, wallets whose REALIZED paper record clears the
         # floors are force-included in the sweep and qualify while swept —
@@ -230,6 +258,11 @@ class DiscoveryRunner:
         self.llm_model = llm_model
         self.holdout_frac = holdout_frac
         self.holdout_max_per_sweep = holdout_max_per_sweep
+        self.failopen_alert_frac = failopen_alert_frac
+        # Per-sweep gate accounting (P1-4), reset in run_once: LLM calls made and
+        # how many admitted a wallet UNVETTED (fail-open / recheck-exhausted).
+        self._sweep_gate_calls = 0
+        self._sweep_gate_failopen = 0
         self.paper_ledger_path = paper_ledger_path
         self.paper_proven_min_n = paper_proven_min_n
         self.paper_proven_min_roi = paper_proven_min_roi
@@ -252,6 +285,11 @@ class DiscoveryRunner:
         # claude -p was spend/rate-limited (drained each sweep once the limit clears).
         self.gate_recheck_queue_path = (
             os.path.join(os.path.dirname(state_path), "gate-recheck-queue.json")
+            if state_path else None)
+        # I4: per-sweep cull-reason histogram, append-only JSONL beside the other
+        # discovery state, so gate-mix trends are queryable (P1-2 acceptance).
+        self.cull_histogram_path = (
+            os.path.join(os.path.dirname(state_path), "cull-histogram.jsonl")
             if state_path else None)
         self._consensus_fetch_buys_fn = consensus_fetch_buys or self._live_consensus_buys
         self._consensus_funder_map_fn = consensus_funder_map or self._live_funder_map
@@ -322,6 +360,30 @@ class DiscoveryRunner:
             out[w] = rec
         return out
 
+    def _updated_copy_stats(self, prior: dict, evaluated: dict) -> dict:
+        """Merge this sweep's deep-eval copy stats into the persisted map (P1-2).
+
+        The next sweep's skill screen excludes wallets whose replay is already
+        proven-negative and demotes the hit-rate-scooper signature, so this map
+        is what makes copy-replay ROI a ranking input of the screen rather than
+        only a downstream filter. A fresh record only replaces an older one when
+        it carries at least as much replay evidence (the /activity record cap
+        can shrink a wallet's window between sweeps — never downgrade n)."""
+        now = self._now()
+        stats = dict(prior or {})
+        for w, e in evaluated.items():
+            old = stats.get(w.lower())
+            if old is not None and e.copy_n < int(old.get("copy_n") or 0):
+                continue
+            stats[w.lower()] = {
+                "copy_roi": e.copy_roi, "copy_n": e.copy_n,
+                "copy_tstat": e.copy_tstat,
+                "closed_hit_rate": e.closed_hit_rate, "n_closed": e.n_closed,
+                "ts": now,
+            }
+        return {w: r for w, r in stats.items()
+                if now - float(r.get("ts") or 0.0) <= COPY_STATS_TTL_S}
+
     # ── one sweep ──
     def run_once(self, stop: Optional[threading.Event] = None) -> "CycleResultLike":
         prev = self._load_state()
@@ -337,6 +399,7 @@ class DiscoveryRunner:
         evaluated = self._evaluate(
             self.cfg, must_include=set(prev.on_watchlist) | set(seeds) | set(proven),
             cache_dir=self.cache_dir, activity_ttl_s=self.activity_ttl_s, stop=stop,
+            prior_copy_stats=prev.copy_stats,
         )
         if not evaluated:
             logger.info("[DISCOVERY] sweep produced no evaluations (stopped or empty)")
@@ -370,6 +433,8 @@ class DiscoveryRunner:
         parked_before = {e.get("wallet") for e in
                          gate_recheck_queue.pending(self.gate_recheck_queue_path)}
 
+        self._sweep_gate_calls = 0
+        self._sweep_gate_failopen = 0
         verdicts, holdouts, gate_calls = (({}, set(), 0) if result.first_init
                                           else self._llm_gate(result, proven))
 
@@ -387,6 +452,10 @@ class DiscoveryRunner:
                 budget=self.llm_review_top_n - gate_calls)
         except Exception:  # a broken re-check must never break the sweep
             logger.warning("[DISCOVERY] gate re-check drain failed; continuing", exc_info=True)
+
+        # P1-4: a sweep whose gate mostly failed open must page, not just log —
+        # 13-15% of wallets used to be admitted unvetted with zero visibility.
+        self._maybe_alert_gate_failopen()
 
         # auto-paper: rewrite the watchlist the harness consumes (post-gate).
         # Carried wallets (on the list but not evaluated this cycle — an
@@ -420,7 +489,11 @@ class DiscoveryRunner:
                 logger.info("[DISCOVERY] long-horizon (Strategy 4): %d wallets tracked",
                             len(result.long_horizon))
 
-        # persist (stamp real time)
+        # persist (stamp real time). P1-2: refresh the persisted copy stats the
+        # next sweep's skill screen excludes/demotes on BEFORE saving, so a
+        # restart between here and the write never loses a sweep of evidence.
+        result.new_state.copy_stats = self._updated_copy_stats(
+            prev.copy_stats, evaluated)
         result.new_state.last_run = self._now()
         self._save_state(result.new_state)
 
@@ -457,6 +530,17 @@ class DiscoveryRunner:
             len(evaluated), len(result.watchlist), len(result.newly_qualified),
             len(result.removed), len(result.watchlist),
         )
+        # I2 funnel telemetry: one structured line per sweep with counts at
+        # every stage, so "where do candidates die?" never needs a log trawl.
+        # (gate_in = wallets sent to the Claude gate this sweep.)
+        gated_n = sum(1 for e in result.newly_qualified
+                      if e.wallet in verdicts) + self._sweep_gate_failopen
+        logger.info(
+            "[DISCOVERY] funnel: pool=%d qualified=%d new=%d gate_in=%d "
+            "gate_failopen=%d holdout=%d admitted=%d removed=%d",
+            len(evaluated), len(result.watchlist), len(result.newly_qualified),
+            gated_n, self._sweep_gate_failopen, len(holdouts),
+            len(result.newly_qualified), len(result.removed))
         if result.paper_proven:
             logger.info("[DISCOVERY] paper-proven (realized-ledger override): %s",
                         ", ".join(result.paper_proven))
@@ -504,6 +588,14 @@ class DiscoveryRunner:
             logger.info("[DISCOVERY] cull histogram: %s",
                         ", ".join(f"{k}={n}" for k, n in
                                   sorted(gate_counts.items(), key=lambda kv: -kv[1])))
+            # I4: persist the histogram (one JSONL row per sweep) so the P1-2
+            # acceptance share (hit-rate-scooper + replay-proven-negative < 20%
+            # of culls) is trendable instead of reconstructed by hand.
+            gate_history.append(self.cull_histogram_path, {
+                "ts": self._now(), "swept": len(evaluated),
+                "qualified": len(result.watchlist),
+                "histogram": gate_counts,
+            })
 
         # consensus-of-sharps signal (signal-only) over the copy-validated wallets
         try:
@@ -618,6 +710,28 @@ class DiscoveryRunner:
         )
         self._save_consensus_fired(fired)
 
+    def _maybe_alert_gate_failopen(self) -> None:
+        """WARNING + Telegram when this sweep's unvetted-admit share is too high.
+
+        Counts only sweeps with >= 3 gate calls so a single 1/1 sweep doesn't
+        read as 100% fail-open. Fires at most once per sweep (4x/day), so the
+        noise ceiling is bounded even while the gate stays broken."""
+        calls, fo = self._sweep_gate_calls, self._sweep_gate_failopen
+        if (self.failopen_alert_frac <= 0.0 or calls < 3 or fo <= 0):
+            return
+        share = fo / calls
+        if share <= self.failopen_alert_frac:
+            return
+        logger.warning(
+            "[DISCOVERY] LLM gate fail-open this sweep: %d/%d calls (%.0f%% > %.0f%%) "
+            "— wallets admitted UNVETTED (gate broken or CLI down)",
+            fo, calls, share * 100, self.failopen_alert_frac * 100)
+        self._send(
+            f"⚠️ <b>LLM gate fail-open</b> — {fo}/{calls} gate calls this sweep "
+            f"({share:.0%}, alert at {self.failopen_alert_frac:.0%}) admitted wallets "
+            "<b>unvetted</b>. The gate is erroring (CLI down/auth/quota) — check "
+            "<code>bot.log</code> for [LLM-GATE] warnings.")
+
     def _llm_gate(self, result, proven: Optional[dict] = None) -> tuple[dict, set]:
         """Claude admission gate over this sweep's NEW qualifiers (mutates result).
 
@@ -645,6 +759,7 @@ class DiscoveryRunner:
         rejected: set = set()
         holdout_wallets: set = set()
         holdouts = 0
+        rolls = 0               # skip verdicts that took a holdout roll this sweep
         calls = 0                 # claude -p calls made (shared budget with the drain)
         for i, e in enumerate(result.newly_qualified):
             paper_rec = proven.get(e.wallet.lower())
@@ -659,6 +774,7 @@ class DiscoveryRunner:
             except Exception:  # pragma: no cover - belt-and-suspenders
                 v = None
             calls += 1
+            self._sweep_gate_calls += 1
             if v is RATE_LIMITED:
                 # Spend/rate-limited: don't lose the wallet. Admit it provisionally
                 # (paper-only, reversible) AND park the check so it's redone once the
@@ -672,6 +788,7 @@ class DiscoveryRunner:
             if v is None:  # fail-open: a broken gate must not freeze discovery
                 logger.warning("[DISCOVERY] LLM gate unavailable for %s — admitting (fail-open)",
                                e.wallet)
+                self._sweep_gate_failopen += 1
                 self._record_gate(e, "admit-fail-open", admitted=True, paper_record=paper_rec)
                 continue
             verdicts[e.wallet] = v
@@ -681,8 +798,20 @@ class DiscoveryRunner:
                 # be compared against the admitted wallets — the counterfactual the
                 # gate's +EV can't be measured without. Capped per sweep, since it
                 # is by construction admitting wallets the gate thinks are bad.
-                if (self.holdout_frac > 0.0 and holdouts < self.holdout_max_per_sweep
-                        and self._rand() < self.holdout_frac):
+                # The roll is logged at DEBUG so a holdout drought (22 days, 28
+                # skips, zero rolls won at frac=0.1 — p≈5%, resolved 2026-07-27
+                # when the first holdout fired) is diagnosable from the logs
+                # instead of needing a gate-history re-derivation (ROADMAP P1-5).
+                roll = self._rand() if (self.holdout_frac > 0.0
+                                        and holdouts < self.holdout_max_per_sweep) else None
+                rolls += 1 if roll is not None else 0
+                logger.debug(
+                    "[DISCOVERY] holdout roll: %s roll=%s frac=%.2f cap=%d/%d -> %s",
+                    e.wallet, f"{roll:.3f}" if roll is not None else "—",
+                    self.holdout_frac, holdouts, self.holdout_max_per_sweep,
+                    ("HOLDOUT" if (roll is not None and roll < self.holdout_frac)
+                     else "no-holdout" if roll is not None else "ineligible"))
+                if (roll is not None and roll < self.holdout_frac):
                     holdouts += 1
                     holdout_wallets.add(e.wallet)
                     self._record_gate(e, v.verdict, admitted=True, holdout=True,
@@ -711,6 +840,14 @@ class DiscoveryRunner:
                 self._record_gate(e, v.verdict, admitted=True,
                                   confidence=v.confidence, reasoning=v.reasoning,
                                   paper_record=paper_rec)
+        if rolls:
+            # Audible-in-prod companion to the per-roll DEBUG line (P1-5): one
+            # INFO per sweep with the drought math, so "is the holdout firing?"
+            # never needs a gate-history re-derivation again.
+            logger.info(
+                "[DISCOVERY] holdout rolls this sweep: %d skip(s) rolled, %d "
+                "holdout(s) admitted (frac %.2f, cap %d)",
+                rolls, holdouts, self.holdout_frac, self.holdout_max_per_sweep)
         if rejected:
             self._drop_from_result(result, rejected)
             logger.info("[DISCOVERY] LLM gate dropped %d/%d new wallet(s) before watchlist add",
@@ -808,6 +945,7 @@ class DiscoveryRunner:
             if checked >= budget:
                 break                          # shared cap; leave the rest parked
             checked += 1
+            self._sweep_gate_calls += 1
             try:
                 v = self._llm_review(entry.get("dossier") or {}, model=self.llm_model)
             except Exception:  # pragma: no cover - defensive
@@ -830,6 +968,7 @@ class DiscoveryRunner:
                     "[DISCOVERY] deferred gate re-check for %s failed %d sweeps "
                     "in a row — admitting UNVETTED (visible fail-open), dequeuing",
                     wallet, attempts)
+                self._sweep_gate_failopen += 1
                 resolved.add(wallet)
                 self._record_recheck(entry, None)
                 continue

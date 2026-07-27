@@ -15,7 +15,9 @@ from __future__ import annotations
 import threading
 from typing import Callable, Optional
 
+from src.copy_trading import era_state
 from src.copy_trading import promotion_state
+from src.copy_trading.copy_cost import CostModel
 from src.copy_trading.copy_paper import CopyPaperEngine, CycleSummary, PaperCopyLedger
 from src.copy_trading.copy_paper_live import (
     fetch_asks,
@@ -92,6 +94,19 @@ class CopyPaperRunner:
         # borrowed-clock fill (strategy B) — forwarded to the engine; None keeps
         # the live-book walk (see CopyPaperEngine.fill_at_their_price_bps).
         fill_at_their_price_bps: Optional[int] = None,
+        # --- P1-6 book-evidence gates + P1-7 modeled costs (forwarded) ---
+        # Unstamped wallets are blocked from slices (market category, entry-price
+        # bucket) THIS book's ledger proves losing (>= min_n settled, ROI < 0).
+        # era_only scopes the evidence to clean-era rows via era_state_path.
+        category_evidence_min_n: Optional[int] = None,
+        category_evidence_era_only: bool = False,
+        era_state_path: Optional[str] = None,
+        # When on, each opened row is stamped with modeled real-money costs:
+        # gas + fee against realized pnl, plus the category spread against the
+        # at-their-price column (see CopyPaperEngine). Fill mechanics untouched.
+        costs_enabled: bool = False,
+        gas_usd_per_trade: float = 0.0,
+        trade_fee_bps: float = 0.0,
         # which auto-demote blacklist binds this book. Default (None) reads the
         # legacy global store; a per-strategy book passes its own scoped reader
         # so strategy A's demotions never filter strategy B's watchlist (a wallet
@@ -136,6 +151,12 @@ class CopyPaperRunner:
         self.max_horizon_days = max_horizon_days
         self.strategy = strategy
         self.fill_at_their_price_bps = fill_at_their_price_bps
+        self.category_evidence_min_n = category_evidence_min_n
+        self.category_evidence_era_only = category_evidence_era_only
+        self.era_state_path = era_state_path
+        self.gas_usd_per_trade = gas_usd_per_trade
+        self.trade_fee_bps = trade_fee_bps
+        self._cost_model = CostModel.from_env() if costs_enabled else None
         self._blacklist_provider = blacklist_provider
         self._mark_fetcher = mark_fetcher
         self._extra_watchlist_paths = list(extra_watchlist_paths or [])
@@ -224,6 +245,17 @@ class CopyPaperRunner:
                if band == "low" and settled.get(w, 0) < self.low_conf_until_n}
         return out or None
 
+    def _evidence_floor_ts(self) -> float:
+        """Floor for the P1-6 evidence window. era_only + a recorded clean-era
+        floor -> that ts; era_only without a floor yet -> +inf (the gate is
+        inert until clean evidence accrues — never all-time by accident);
+        default -> 0 (all-time, the shipped setting: the pre-P0-1 artifact
+        flattered realized ROI upward, so an all-time-losing slice is robust)."""
+        if not self.category_evidence_era_only:
+            return 0.0
+        floor = era_state.era_floor_ts(self.era_state_path) if self.era_state_path else None
+        return floor if floor is not None else float("inf")
+
     def run_once(self) -> CycleSummary:
         wallets = self.wallets()
         if not wallets:
@@ -278,6 +310,11 @@ class CopyPaperRunner:
             starved_priority=self.starved_priority,
             relief_evidence_n=self.relief_evidence_n,
             relief_max_per_category_day=self.relief_max_per_category_day,
+            category_evidence_min_n=self.category_evidence_min_n,
+            category_evidence_floor_ts=self._evidence_floor_ts(),
+            cost_model=self._cost_model,
+            gas_usd_per_trade=self.gas_usd_per_trade,
+            trade_fee_bps=self.trade_fee_bps,
         )
         summary = engine.run_cycle()
         # starvation autopsy: surface the detector's own reject mix (rows the

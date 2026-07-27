@@ -183,6 +183,14 @@ class Eval:
     long_horizon: bool = False
     long_horizon_ratio: float = 0.0   # share of dated buy $ placed long before resolution
     horizon_days: float = 0.0         # USD-weighted mean days-before-resolution
+    # Dossier completeness (ROADMAP P1-3): the gate's dossier shipped these as
+    # explicit nulls because the sweep computed but never carried them. All four
+    # are the fields the LLM rejections cite (a "+613% ROI" claim is only
+    # legible next to the capital it was earned on).
+    capital: float = 0.0              # closed-position capital (WalletMetrics)
+    concentration: float = 0.0        # share of gross profit from the best market
+    mean_entry: float = 0.0           # USD-weighted mean BUY entry price
+    up_ratio: float = 0.0             # fraction of pnl-curve periods up
 
 
 @dataclass
@@ -192,6 +200,14 @@ class DiscoveryState:
     on_watchlist: dict[str, dict] = field(default_factory=dict)  # wallet -> last metrics
     last_run: float = 0.0
     initialized: bool = False  # first completed sweep done (suppresses ping storm)
+    # P1-2: wallet(lower) -> latest deep-eval copy stats {copy_roi, copy_n,
+    # copy_tstat, closed_hit_rate, n_closed, ts}. The next sweep's skill screen
+    # reads this to EXCLUDE wallets already proven-negative under our copy
+    # action (instead of re-selecting and re-culling the same scoopers every
+    # sweep — the loop that dominated the cull histogram, §1.6) and to demote
+    # the hit-rate-scooper signature at screen time. Rewritten each sweep from
+    # the fresh evaluations; entries older than ~30d are pruned.
+    copy_stats: dict[str, dict] = field(default_factory=dict)
 
     @classmethod
     def from_json(cls, d: dict | None) -> "DiscoveryState":
@@ -200,6 +216,7 @@ class DiscoveryState:
             on_watchlist=dict(d.get("on_watchlist") or {}),
             last_run=float(d.get("last_run") or 0.0),
             initialized=bool(d.get("initialized") or False),
+            copy_stats=dict(d.get("copy_stats") or {}),
         )
 
     def to_json(self) -> dict:
@@ -207,6 +224,7 @@ class DiscoveryState:
             "on_watchlist": self.on_watchlist,
             "last_run": self.last_run,
             "initialized": self.initialized,
+            "copy_stats": self.copy_stats,
         }
 
 
@@ -261,6 +279,11 @@ def _meta(e: Eval) -> dict:
         "long_horizon": e.long_horizon,
         "long_horizon_ratio": round(e.long_horizon_ratio, 3),
         "horizon_days": round(e.horizon_days, 1),
+        # P1-3 dossier fields — also on the watchlist row so tooling that
+        # rebuilds a dossier from the row (the shortlist audit) sees them too
+        "n_closed": e.n_closed, "closed_hit_rate": round(e.closed_hit_rate, 3),
+        "capital": round(e.capital, 2), "concentration": round(e.concentration, 3),
+        "mean_entry": round(e.mean_entry, 4), "up_ratio": round(e.up_ratio, 3),
     }
 
 
@@ -476,6 +499,11 @@ def _rank_key(cfg: DiscoveryConfig, e: Eval):
             len(e.approved_categories) if cfg.category_select else 0,
             1 if proven else 0,
             e.copy_roi if proven else 0.0,
+            # P1-2: among the copy-UNPROVEN, a wallet whose replay evidence is
+            # accruing non-negatively outranks one with no evidence at all —
+            # copy_n=0 must never sit above a wallet the harness is actually
+            # measuring (§1.6: the watchlist top was all copy_n=0 wallets).
+            1 if (not proven and e.copy_n > 0 and e.copy_roi >= 0) else 0,
             len(e.flagged_by),
             e.capture_cents)
 

@@ -260,6 +260,32 @@ class Config:
     copy_paper_conviction_base_usd: float = _opt_float("COPY_PAPER_CONVICTION_BASE_USD", 25.0)
     copy_paper_conviction_min: float = _opt_float("COPY_PAPER_CONVICTION_MIN", 0.25)
     copy_paper_conviction_max: float = _opt_float("COPY_PAPER_CONVICTION_MAX", 2.0)
+    # Book-evidence gates (ROADMAP P1-6): a wallet with NO discovery-approved
+    # stamp for a category may not copy into a slice this book's own ledger
+    # already proves losing — >= N settled copies with realized ROI < 0, checked
+    # per market category AND per entry-price bucket. The default flips from
+    # "absent stamp -> don't block" to "absent -> require the slice unproven-or-
+    # winning" (§1.5: sports is 333/415 copies and loses in both books; B's
+    # 0.2-0.4 bucket is −61.5% at n=19). 15 catches the n=19 bucket and
+    # everything bigger; 0 disables. Stamped wallets stay exempt (discovery
+    # replay is the re-admission channel, so the block never deadlocks).
+    copy_paper_category_evidence_min_n: int = _opt_int(
+        "COPY_PAPER_CATEGORY_EVIDENCE_MIN_N", 15)
+    # Evidence window for those gates: all-time by default — the pre-P0-1 fill
+    # artifact flattered realized ROI UPWARD, so an all-time-losing slice is a
+    # robust loser. Flip to clean-era-only later, once the era has accrued
+    # enough settled rows for the gate to read.
+    copy_paper_category_evidence_era_only: bool = _opt_bool(
+        "COPY_PAPER_CATEGORY_EVIDENCE_ERA_ONLY", False)
+    # Modeled real-money costs (ROADMAP P1-7): stamp every opened paper row with
+    # gas (flat per trade) + trading fee (bps of spend) charged against realized
+    # pnl, plus the category's full spread charged against the at-their-price
+    # column (which otherwise assumes free fills). Fill mechanics untouched, so
+    # the A-vs-B race variable stays lagged-vs-instant. Polymarket fees are ~0
+    # and Polygon gas is cents — the spread is the honest cost.
+    copy_paper_costs_enabled: bool = _opt_bool("COPY_PAPER_COSTS_ENABLED", True)
+    copy_paper_gas_usd: float = _opt_float("COPY_PAPER_GAS_USD", 0.02)
+    copy_paper_trade_fee_bps: float = _opt_float("COPY_PAPER_TRADE_FEE_BPS", 0.0)
 
     # --- Strategy B: the borrowed-clock (instant-copy) paper book ---
     # A SECOND paper book racing the one above (the 2026-07 A-vs-B experiment).
@@ -507,6 +533,10 @@ class Config:
     # it is deliberately admitting wallets the gate thinks are bad. Set frac 0 to stop.
     gate_holdout_frac: float = _opt_float("GATE_HOLDOUT_FRAC", 0.1)
     gate_holdout_max_per_sweep: int = _opt_int("GATE_HOLDOUT_MAX_PER_SWEEP", 2)
+    # P1-4: sweep-level fail-open alarm — WARNING + Telegram when the share of
+    # gate calls admitting a wallet UNVETTED (error fail-open or exhausted
+    # re-check) tops this fraction (with >= 3 calls that sweep). 0 disables.
+    gate_failopen_alert_frac: float = _opt_float("GATE_FAILOPEN_ALERT_FRAC", 0.2)
     # Independent strategy theories that may qualify a wallet (OR'd). All ten on
     # by default — discovery is paper-only, so each theory proves out on measured
     # paper PnL before any manual promotion. 1a/1e need market-resolution data,

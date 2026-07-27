@@ -359,6 +359,8 @@ def select_targets(
     top_k: int = 20,
     max_concentration: float = 0.6,
     require_recency: bool = True,
+    demote_hit_rate: float | None = None,
+    demote_min_closed: int = 0,
 ) -> list[RankedMetrics]:
     """Validated copy-target selection.
 
@@ -366,6 +368,14 @@ def select_targets(
     (if require_recency) recent-half profitability, then rank by t-stat.
     method="tstat"/"roi"/"median_roi": that metric with only the reliability
     filters (capital, closed count).
+
+    ``demote_hit_rate`` (opt-in; P1-2): wallets with >= demote_min_closed closed
+    positions AND a hit rate at/above this bar rank BELOW everyone else, keeping
+    their relative order. The bar signature is the settlement-lag scooper — a
+    near-perfect hit rate earned buying near-$1 outcomes, which the t-stat rank
+    otherwise selects FOR (§1.6: the screen manufactured scoopers, the LLM gate
+    paid $0.09 each to kill them). Demote, not exclude: the downstream curve /
+    copy-replay gates make the real call with richer data. None = legacy order.
     """
     rank_by = "tstat" if method == "robust" else method
     out = []
@@ -378,5 +388,13 @@ def select_targets(
             if require_recency and not m.recency_ok:
                 continue
         out.append(RankedMetrics(addr, m))
-    out.sort(key=lambda rm: rm.metrics.rank_score(rank_by), reverse=True)
+
+    def _key(rm: RankedMetrics):
+        m = rm.metrics
+        demoted = (demote_hit_rate is not None
+                   and m.n_closed >= demote_min_closed
+                   and m.hit_rate >= demote_hit_rate)
+        return (0 if demoted else 1, m.rank_score(rank_by))
+
+    out.sort(key=_key, reverse=True)
     return out[:top_k]

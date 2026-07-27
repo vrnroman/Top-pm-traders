@@ -142,6 +142,12 @@ class WalletPnl:
     # them cannot be inflated by the fill model (2026-07 artifact; P0-2).
     ideal_pnl: float = 0.0
     closed_cost: float = 0.0
+    # Modeled-cost pair (P1-7), summed over settled rows: gas+fee charged
+    # against realized, and gas+fee+full category spread charged against the
+    # at-their-price counterfactual. Rows opened before P1-7 carry 0, so their
+    # net == gross (stamped on the row at open).
+    cost_sum: float = 0.0
+    ideal_cost_sum: float = 0.0
 
     @property
     def net_pnl(self) -> float:
@@ -163,6 +169,22 @@ class WalletPnl:
         return (self.ideal_pnl / self.closed_cost) if self.closed_cost > 0 else None
 
     @property
+    def realized_net_roi(self) -> Optional[float]:
+        """Realized ROI over settled capital AFTER modeled gas+fees (P1-7)."""
+        if self.closed_cost <= 0:
+            return None
+        return (self.realized_pnl - self.cost_sum) / self.closed_cost
+
+    @property
+    def at_price_net_roi(self) -> Optional[float]:
+        """At-their-price ROI AFTER modeled gas+fees+category spread (P1-7) —
+        the number the §7 kill criterion actually means: edge a real copier
+        could have kept, not edge assuming free fills."""
+        if self.closed_cost <= 0:
+            return None
+        return (self.ideal_pnl - self.ideal_cost_sum) / self.closed_cost
+
+    @property
     def hit_rate(self) -> Optional[float]:
         n = self.wins + self.losses
         return (self.wins / n) if n else None
@@ -182,6 +204,8 @@ class StrategyPnl:
     losses: int = 0
     ideal_pnl: float = 0.0            # settled rows' drag-free PnL (paper books; see WalletPnl)
     closed_cost: float = 0.0          # settled rows' deployed capital
+    cost_sum: float = 0.0             # settled rows' modeled gas+fees (P1-7)
+    ideal_cost_sum: float = 0.0       # settled rows' modeled at-price cost (P1-7)
     wallets: list = field(default_factory=list)   # list[WalletPnl]
 
     @property
@@ -201,6 +225,18 @@ class StrategyPnl:
         return (self.ideal_pnl / self.closed_cost) if self.closed_cost > 0 else None
 
     @property
+    def realized_net_roi(self) -> Optional[float]:
+        if self.closed_cost <= 0:
+            return None
+        return (self.realized_pnl - self.cost_sum) / self.closed_cost
+
+    @property
+    def at_price_net_roi(self) -> Optional[float]:
+        if self.closed_cost <= 0:
+            return None
+        return (self.ideal_pnl - self.ideal_cost_sum) / self.closed_cost
+
+    @property
     def n_wallets(self) -> int:
         return len(self.wallets)
 
@@ -215,6 +251,8 @@ class StrategyPnl:
         self.losses += w.losses
         self.ideal_pnl += w.ideal_pnl
         self.closed_cost += w.closed_cost
+        self.cost_sum += w.cost_sum
+        self.ideal_cost_sum += w.ideal_cost_sum
         self.wallets.append(w)
 
 
@@ -396,6 +434,8 @@ def aggregate_system_b(
             wp.cost_basis += p.spent       # realized capital feeds ROI
             wp.ideal_pnl += p.ideal_pnl    # drag-free comparator (P0-2)
             wp.closed_cost += p.spent
+            wp.cost_sum += p.cost_usd          # modeled gas+fees (P1-7)
+            wp.ideal_cost_sum += p.ideal_cost_usd
             wp.n_closed += 1
             if p.won:
                 wp.wins += 1
@@ -445,6 +485,8 @@ def aggregate_strategy4(s4_positions: list[PaperPosition]) -> list[WalletPnl]:
             wp.cost_basis += p.spent       # realized capital feeds ROI
             wp.ideal_pnl += p.ideal_pnl    # drag-free comparator (P0-2)
             wp.closed_cost += p.spent
+            wp.cost_sum += p.cost_usd          # modeled gas+fees (P1-7)
+            wp.ideal_cost_sum += p.ideal_cost_usd
             wp.n_closed += 1
             if p.won:
                 wp.wins += 1
@@ -484,6 +526,8 @@ def aggregate_paper_b(b_positions: list[PaperPosition]) -> list[WalletPnl]:
             wp.cost_basis += p.spent       # realized capital feeds ROI
             wp.ideal_pnl += p.ideal_pnl    # drag-free comparator (P0-2)
             wp.closed_cost += p.spent
+            wp.cost_sum += p.cost_usd          # modeled gas+fees (P1-7)
+            wp.ideal_cost_sum += p.ideal_cost_usd
             wp.n_closed += 1
             if p.won:
                 wp.wins += 1
@@ -624,6 +668,8 @@ def _round(wps) -> None:
         wp.open_cost = round(wp.open_cost, 2)
         wp.ideal_pnl = round(wp.ideal_pnl, 2)
         wp.closed_cost = round(wp.closed_cost, 2)
+        wp.cost_sum = round(wp.cost_sum, 2)
+        wp.ideal_cost_sum = round(wp.ideal_cost_sum, 2)
 
 
 def _label_sort_key(label: str):

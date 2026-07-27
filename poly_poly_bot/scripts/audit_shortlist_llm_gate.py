@@ -41,6 +41,8 @@ _EVAL_DEFAULTS = dict(
     roi=0.0, tstat=0.0, n=0, capture_cents=0.0, lead_cents=0.0, hit_rate=0.0,
     copy_roi=0.0, copy_n=0, copy_hit=0.0, exit_roi=0.0, tail_ratio=0.0,
     copyable_ratio=None, net_pnl=None, curve_drawdown=None, curve_sharpe=None,
+    n_closed=None, closed_hit_rate=None, capital=None, concentration=None,
+    mean_entry=None, up_ratio=None,
     flagged_by=(), reason="",
 )
 

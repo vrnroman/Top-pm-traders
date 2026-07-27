@@ -31,14 +31,22 @@ def _closed_clean(positions, min_opened_ts: Optional[float]):
                  >= min_opened_ts)]
 
 
-def book_stats(positions, min_opened_ts: Optional[float] = None) -> dict:
-    """Realized vs at-their-price for one book (a ledger's worth of positions)."""
+def book_stats(positions, min_opened_ts: Optional[float] = None,
+               cost_model=None, gas_usd: float = 0.0,
+               fee_bps: float = 0.0) -> dict:
+    """Realized vs at-their-price for one book (a ledger's worth of positions).
+
+    With a ``cost_model`` (P1-7), also reports the NET ROIs computed ON THE FLY
+    from each row's category (uniform across eras — pre-P1-7 rows carry no cost
+    stamp, so the stamped fields would understate old rows; this derives every
+    row's modeled cost the same way): realized net of gas+fees, and at-price
+    net of gas+fees+the full category spread."""
     rows = _closed_clean(positions, min_opened_ts)
     spent = sum(p.spent for p in rows)
     pnl = sum(p.pnl for p in rows)
     ideal = sum(p.ideal_pnl for p in rows)
     wins = sum(1 for p in rows if p.won)
-    return {
+    out = {
         "n": len(rows),
         "spent": round(spent, 2),
         "pnl": round(pnl, 2),
@@ -50,6 +58,15 @@ def book_stats(positions, min_opened_ts: Optional[float] = None) -> dict:
         "hit_rate": (wins / len(rows)) if rows else None,
         "drag": drag_stats([int(p.drag_bps) for p in rows]),
     }
+    if cost_model is not None and spent:
+        cost = sum(gas_usd + p.spent * fee_bps / 10000.0 for p in rows)
+        icost = cost + sum(p.spent * cost_model.cost_of(p.category or "other")
+                           for p in rows)
+        out["cost_usd"] = round(cost, 2)
+        out["ideal_cost_usd"] = round(icost, 2)
+        out["roi_net"] = (pnl - cost) / spent
+        out["ideal_roi_net"] = (ideal - icost) / spent
+    return out
 
 
 def per_wallet(positions, min_opened_ts: Optional[float] = None) -> list:

@@ -143,58 +143,66 @@ def build_dossier(
     if why_flagged:
         d["why_flagged"] = why_flagged
     if metrics is not None:
-        d["skill"] = {
+        d["skill"] = _drop_nones({
             "roi": _round(g(metrics, "roi")),
             "tstat": _round(g(metrics, "tstat"), 2),
             "n_closed": g(metrics, "n_closed"),
             "capital": _round(g(metrics, "capital"), 0),
             "hit_rate": _round(g(metrics, "hit_rate")),
             "concentration": _round(g(metrics, "concentration")),
-        }
+        })
     if evaluation is not None:
-        d["copyability"] = {
+        d["copyability"] = _drop_nones({
             "capture_cents": _round(g(evaluation, "capture_cents"), 2),
             "lead_cents": _round(g(evaluation, "lead_cents"), 2),
             "hit_rate": _round(g(evaluation, "hit_rate")),
             "n_trades": g(evaluation, "n"),
-        }
+        })
     if copy_replay is not None and (g(copy_replay, "copy_n") or 0) > 0:
-        d["copy_replay"] = {
+        d["copy_replay"] = _drop_nones({
             "copy_and_hold_roi": _round(g(copy_replay, "copy_roi")),
             "n_resolved": g(copy_replay, "copy_n"),
             "hit_rate": _round(g(copy_replay, "copy_hit")),
             "exit_follow_roi": _round(g(copy_replay, "exit_roi")),
-        }
+        })
     if paper_record and (paper_record.get("n_closed") or 0) > 0:
         # REALIZED forward paper record — what actually happened when the live
         # harness copied this wallet (fill sim + slippage + resolution), as
         # opposed to the copy_replay backtest above. Present on paper-proven
         # re-entries so the gate weighs the measured outcome, not just the
         # own-history stats it may have already rejected once.
-        d["paper_record_realized"] = {
+        d["paper_record_realized"] = _drop_nones({
             "n_settled": paper_record.get("n_closed"),
             "roi": _round(paper_record.get("roi")),
             "net_pnl_usd": _round(paper_record.get("net_pnl"), 2),
             "wins": paper_record.get("wins"),
-        }
+        })
     if entry is not None:
-        d["entry_profile"] = {
+        d["entry_profile"] = _drop_nones({
             "mean_entry_price": _round(g(entry, "mean_entry")),
             "tail_ratio": _round(g(entry, "tail_ratio")),
             "copyable_ratio": _round(g(entry, "copyable_ratio")),
-        }
+        })
     if curve is not None:
-        d["pnl_curve"] = {
+        d["pnl_curve"] = _drop_nones({
             "net_pnl": _round(g(curve, "net_pnl"), 0),
             "max_drawdown_frac": _round(g(curve, "max_drawdown_frac")),
             "up_ratio": _round(g(curve, "up_ratio")),
             "sharpe": _round(g(curve, "sharpe"), 2),
-        }
+        })
     if portfolio_value is not None:
         d["portfolio_value"] = round(float(portfolio_value), 0)
     if recent_bets:
         d["recent_bets"] = recent_bets[:15]
     return d
+
+
+def _drop_nones(block: dict) -> dict:
+    """Drop None-valued keys from a dossier block (P1-3): a field whose source
+    data genuinely doesn't exist must be ABSENT, not an explicit null — the gate
+    used to receive rows of nulls (n_closed, capital, up_ratio…) and read them
+    as measured zeros or contradictions."""
+    return {k: v for k, v in block.items() if v is not None}
 
 
 def _round(v, ndigits: int = 4):

@@ -50,7 +50,8 @@ def _log_copy_cycle_diagnostics(tag: str, summary) -> None:
     always report identically."""
     skips = (summary.skipped_fill_gate + summary.skipped_not_first_entry
              + summary.skipped_slate_cap + summary.skipped_category_gate
-             + summary.skipped_event_cap)
+             + summary.skipped_event_cap + summary.skipped_category_evidence
+             + summary.skipped_price_bucket_evidence)
     if skips:
         logger.info(
             f"[{tag}] guardrail skips: fill-gate={summary.skipped_fill_gate} "
@@ -62,6 +63,13 @@ def _log_copy_cycle_diagnostics(tag: str, summary) -> None:
             f"event-cap={summary.skipped_event_cap} "
             f"already-copied={summary.skipped_already_copied}"
         )
+    # P1-6 book-evidence gates get their own line: a book that goes quiet
+    # because its own ledger proved a slice losing must say so loudly.
+    if summary.skipped_category_evidence or summary.skipped_price_bucket_evidence:
+        logger.info(
+            f"[{tag}] evidence gates: category={summary.skipped_category_evidence} "
+            f"price-bucket={summary.skipped_price_bucket_evidence} "
+            "(unstamped wallet, slice proven-losing in this book)")
     if summary.opened_unkeyed_event:
         # the event cap could not group these opens (feed row had no eventSlug)
         logger.info(f"[{tag}] event-cap: {summary.opened_unkeyed_event} open(s) "
@@ -331,6 +339,16 @@ def _copy_paper_loop():
                              if CONFIG.copy_paper_conviction_base_usd > 0 else None),
         conviction_min=CONFIG.copy_paper_conviction_min,
         conviction_max=CONFIG.copy_paper_conviction_max,
+        # P1-6 book-evidence gates (unstamped wallets blocked from slices this
+        # book proves losing) + P1-7 modeled costs (gas/fee vs realized, spread
+        # vs at-price). Identical across books so the race variable stays
+        # lagged-vs-instant.
+        category_evidence_min_n=_cap(CONFIG.copy_paper_category_evidence_min_n),
+        category_evidence_era_only=CONFIG.copy_paper_category_evidence_era_only,
+        era_state_path=os.path.join(CONFIG.data_dir, "ab_race_state.json"),
+        costs_enabled=CONFIG.copy_paper_costs_enabled,
+        gas_usd_per_trade=CONFIG.copy_paper_gas_usd,
+        trade_fee_bps=CONFIG.copy_paper_trade_fee_bps,
         # When Strategy 4 is on, this near-term book stops short-copying far-future
         # bets — they would lock paper capital for months and belong to the S4
         # book instead. Off => horizon-blind, so behaviour is unchanged.
@@ -679,6 +697,16 @@ def _copy_paper_b_loop():
         relief_evidence_n=None,   # caps already sized for take-all; no relief lane
         relief_max_per_category_day=None,
         category_gate=CONFIG.copy_paper_category_gate,
+        # P1-6 book-evidence gates + P1-7 modeled costs — identical to A's, so
+        # the race variable stays lagged-vs-instant. B's own ledger feeds its
+        # evidence gates (its losing slices are its own: §1.5's −8.8% sports
+        # and −61.5% 0.2-0.4 bucket are B-book records).
+        category_evidence_min_n=_cap(CONFIG.copy_paper_category_evidence_min_n),
+        category_evidence_era_only=CONFIG.copy_paper_category_evidence_era_only,
+        era_state_path=os.path.join(CONFIG.data_dir, "ab_race_state.json"),
+        costs_enabled=CONFIG.copy_paper_costs_enabled,
+        gas_usd_per_trade=CONFIG.copy_paper_gas_usd,
+        trade_fee_bps=CONFIG.copy_paper_trade_fee_bps,
         conviction_base_usd=(CONFIG.copy_paper_conviction_base_usd
                              if CONFIG.copy_paper_conviction_base_usd > 0 else None),
         conviction_min=CONFIG.copy_paper_conviction_min,
@@ -828,6 +856,7 @@ def _discovery_loop():
         llm_model=CONFIG.wallet_discovery_llm_model,
         holdout_frac=CONFIG.gate_holdout_frac,
         holdout_max_per_sweep=CONFIG.gate_holdout_max_per_sweep,
+        failopen_alert_frac=CONFIG.gate_failopen_alert_frac,
         # Paper-evidence retention override (starvation RCA): None disables.
         paper_ledger_path=(CONFIG.copy_paper_ledger
                            if CONFIG.paper_proven_retention_enabled else None),

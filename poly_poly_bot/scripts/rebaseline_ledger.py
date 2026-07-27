@@ -48,12 +48,23 @@ def _corr_line(positions, since) -> str:
     return f"split-half corr {_fmt(r)} · @price {_fmt(i)}"
 
 
-def _book_block(name: str, positions: list, since) -> list[str]:
-    s = rebaseline.book_stats(positions, min_opened_ts=since)
+def _book_block(name: str, positions: list, since, cost_model=None,
+                gas_usd: float = 0.0, fee_bps: float = 0.0) -> list[str]:
+    s = rebaseline.book_stats(positions, min_opened_ts=since,
+                              cost_model=cost_model, gas_usd=gas_usd,
+                              fee_bps=fee_bps)
     d = s["drag"]
     lines = [f"BOOK {name}: {s['n']} settled · ${s['spent']:,.0f} deployed"]
     lines.append(f"  realized        {_usd(s['pnl']):>10}   ROI {_pct(s['roi'])}")
     lines.append(f"  at-their-price  {_usd(s['ideal_pnl']):>10}   ROI {_pct(s['ideal_roi'])}")
+    if "roi_net" in s:
+        # P1-7: the same two ROIs after modeled gas+fees (realized) and the
+        # full category spread (at-price) — computed on the fly, so pre-P1-7
+        # rows are costed uniformly too.
+        lines.append(f"  net of costs    {_usd(s['pnl'] - s['cost_usd']):>10}   ROI {_pct(s['roi_net'])}"
+                     f"   (gas+fees {_usd(-s['cost_usd'])})")
+        lines.append(f"  @price net      {_usd(s['ideal_pnl'] - s['ideal_cost_usd']):>10}   "
+                     f"ROI {_pct(s['ideal_roi_net'])}   (+spread {_usd(s['cost_usd'] - s['ideal_cost_usd'])})")
     lines.append(f"  fill gift       {_usd(s['gifted']):>10}   "
                  f"(what the fills added; + = flattered)")
     lines.append(
@@ -94,19 +105,32 @@ def main(argv: list[str] | None = None) -> int:
         positions = list(PaperCopyLedger(path).positions.values())
         books.append((label, positions))
 
+    # P1-7: cost every row on the fly (uniform across eras) so the net columns
+    # answer "what would a real copier have kept" for ALL history, not just
+    # rows opened since the cost stamps shipped.
+    from src.copy_trading.copy_cost import CostModel
+    cost_model = CostModel.from_env()
+    gas_usd = CONFIG.copy_paper_gas_usd
+    fee_bps = CONFIG.copy_paper_trade_fee_bps
+
     print("=" * 72)
     print("REBASELINE — realized vs at-their-price (settled rows, dust-quarantine applied)")
     print("scope: " + ("all-time" if since is None else f"opened >= {since:.0f}"))
     print("=" * 72)
-    tot = {"spent": 0.0, "pnl": 0.0, "ideal": 0.0}
+    tot = {"spent": 0.0, "pnl": 0.0, "ideal": 0.0, "cost": 0.0, "icost": 0.0}
     for label, positions in books:
         print()
-        for line in _book_block(label, positions, since):
+        for line in _book_block(label, positions, since, cost_model=cost_model,
+                                gas_usd=gas_usd, fee_bps=fee_bps):
             print(line)
-        s = rebaseline.book_stats(positions, min_opened_ts=since)
+        s = rebaseline.book_stats(positions, min_opened_ts=since,
+                                  cost_model=cost_model, gas_usd=gas_usd,
+                                  fee_bps=fee_bps)
         tot["spent"] += s["spent"]
         tot["pnl"] += s["pnl"]
         tot["ideal"] += s["ideal_pnl"]
+        tot["cost"] += s.get("cost_usd", 0.0)
+        tot["icost"] += s.get("ideal_cost_usd", 0.0)
 
     print()
     if tot["spent"] > 0:
@@ -116,6 +140,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"COMBINED (A+B): realized {_usd(tot['pnl'])} ({_pct(tot['pnl'] / tot['spent'])})"
               f" · at-their-price {_usd(tot['ideal'])} ({_pct(tot['ideal'] / tot['spent'])})"
               f" on ${tot['spent']:,.0f} deployed")
+        print(f"COMBINED net of modeled costs: realized {_usd(tot['pnl'] - tot['cost'])} "
+              f"({_pct((tot['pnl'] - tot['cost']) / tot['spent'])})"
+              f" · @price net {_usd(tot['ideal'] - tot['icost'])} "
+              f"({_pct((tot['ideal'] - tot['icost']) / tot['spent'])})")
     print(f"kill bar (ROADMAP §7): clean-era at-price ROI < 0 AND split-half corr <= 0 "
           f"across >= {FALSIFY_MIN_WALLETS} wallets (n>={FALSIFY_MIN_N}) "
           f"=> wallet-copying falsified")

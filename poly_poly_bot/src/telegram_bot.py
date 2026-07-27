@@ -462,7 +462,7 @@ def _handle_pnl():
         lines.append(f"  ⚠ {n_unpriced} System-A position(s) unpriced (no live quote)")
 
     lines.append("")
-    lines.append("<b>By strategy</b>  <i>(🧊/🌱/✅ settled | net | r/u | ROI · @price | wallets | closed/open | hit lo)</i>")
+    lines.append("<b>By strategy</b>  <i>(🧊/🌱/✅ settled | net | r/u | ROI · @price · @net | wallets | closed/open | hit lo)</i>")
     if not unified.strategies:
         lines.append("  (no positions yet)")
     for sp in unified.strategies:
@@ -472,6 +472,11 @@ def _handle_pnl():
         # target's own price — the number the fill model cannot inflate.
         if sp.at_price_roi is not None:
             roi_str += f" · @price {sp.at_price_roi:+.0%}"
+        # …and its net-of-costs twin (P1-7): @price after modeled gas + fees +
+        # the category spread — what a real copier could have kept. Shown once
+        # cost-stamped rows exist (pre-P1-7 rows carry cost 0 → net == gross).
+        if sp.ideal_cost_sum > 0 and sp.at_price_net_roi is not None:
+            roi_str += f" · @net {sp.at_price_net_roi:+.0%}"
         # Divergence tripwire: realized sitting far from @price means the
         # result is coming from the fill model, not the wallets (2026-07).
         if u.divergence_suspect(sp):
@@ -568,6 +573,79 @@ def _trust_lines(paper_books: dict) -> list:
     lines.append(
         f"   kill bar: clean-era corr ≤ 0 across ≥{FALSIFY_MIN_WALLETS}w "
         f"(n≥{FALSIFY_MIN_N}) → wallet-copying falsified (ROADMAP §7)")
+
+    lines.extend(_cost_lines(paper_books, floor))
+    return lines
+
+
+def _cost_lines(paper_books: dict, floor) -> list:
+    """The P1-7 costs block: realized + at-price ROI net of modeled costs per
+    book (from the row stamps), plus the combined at-price ROI under several
+    cost multipliers computed ON THE FLY over all settled rows (I8) — so the
+    08-22 kill verdict reads as "edge a real copier keeps", not "edge assuming
+    free fills", and the owner can see whether ANY fee assumption rescues the
+    combined number."""
+    from src.copy_trading.copy_cost import CostModel
+
+    near = paper_books.get("near") or []
+    b = paper_books.get("b") or []
+    lines: list = []
+
+    def _stamped(positions):
+        closed = [p for p in positions if p.closed and (p.spent or 0) > 0]
+        spent = sum(p.spent for p in closed)
+        stamped = sum(1 for p in closed if (p.ideal_cost_usd or 0) > 0)
+        return closed, spent, stamped
+
+    seg_book = []
+    total_closed = total_stamped = 0
+    for label, positions in (("A", near), ("B", b)):
+        closed, spent, stamped_n = _stamped(positions)
+        total_closed += len(closed)
+        total_stamped += stamped_n
+        if not closed or spent <= 0:
+            continue
+        realized = sum(p.pnl for p in closed) / spent
+        ideal = sum(p.ideal_pnl for p in closed) / spent
+        cost = sum(p.cost_usd for p in closed)
+        icost = sum(p.ideal_cost_usd for p in closed)
+        seg = (f"   {label}: realized {realized:+.1%} → net {(sum(p.pnl for p in closed) - cost) / spent:+.1%}"
+               f" · @price {ideal:+.1%} → net {(sum(p.ideal_pnl for p in closed) - icost) / spent:+.1%}")
+        seg_book.append(seg)
+    if seg_book:
+        lines.append(f"💸 Net of modeled costs (P1-7; stamped on {total_stamped}/"
+                     f"{total_closed} settled rows — pre-P1-7 rows net==gross):")
+        lines.extend(seg_book)
+
+    # Sensitivity (I8): combined at-price ROI under cost multipliers, costs
+    # derived on the fly from each row's category (uniform across eras — this
+    # is the all-history read, not just stamped rows).
+    cm = CostModel.from_env()
+    gas = CONFIG.copy_paper_gas_usd
+    fee_bps = CONFIG.copy_paper_trade_fee_bps
+
+    def _sensitivity(positions, since):
+        rows = [p for p in positions if p.closed and (p.spent or 0) > 0
+                and (since is None or (p.opened_ts or 0) >= since)]
+        spent = sum(p.spent for p in rows)
+        if not rows or spent <= 0:
+            return None
+        ideal = sum(p.ideal_pnl for p in rows)
+        full_cost = sum(gas + p.spent * (cm.cost_of(p.category or "other")
+                                         + fee_bps / 10000.0) for p in rows)
+        return [(ideal - m * full_cost) / spent for m in (0.0, 0.5, 1.0, 2.0)]
+
+    both = list(near) + list(b)
+    sens_all = _sensitivity(both, None)
+    if sens_all is not None:
+        line = ("   sensitivity (combined @price ROI, modeled costs ×0/×0.5/×1/×2): "
+                + " · ".join(f"{v:+.1%}" for v in sens_all))
+        if floor is not None:
+            sens_era = _sensitivity(both, floor)
+            if sens_era is not None:
+                line += ("  |  post-fix: "
+                         + " · ".join(f"{v:+.1%}" for v in sens_era))
+        lines.append(line)
     return lines
 
 
@@ -699,6 +777,19 @@ def _handle_gate():
     lines = ["\U0001f6aa <b>LLM Gate</b>", ""]
     lines.append(f"Decisions: <b>{total}</b>   admitted <b>{adm}</b> ({adm_pct:.0%})   "
                  f"rejected <b>{rej}</b>")
+
+    # P1-4: the unvetted split — "admitted" conflates a real Claude verdict with
+    # fail-open / over-cap / recheck-unavailable admits nothing judged. This is
+    # the line that makes a broken gate visible from Telegram (§1.7a).
+    unv = s.get("admitted_unvetted", 0)
+    if unv:
+        by_reason = s.get("unvetted_by_reason") or {}
+        detail = ", ".join(f"{_esc(k)}={v}" for k, v in
+                           sorted(by_reason.items(), key=lambda kv: -kv[1]))
+        lines.append(f"⚠️ Admitted <b>unvetted</b>: <b>{unv}</b> "
+                     f"({unv / total:.0%} of decisions) — {detail}")
+        lines.append(f"<i>vetted admits: {s.get('admitted_vetted', 0)} · "
+                     f"deferred (rate-limited, parked): {s.get('deferred', 0)}</i>")
 
     if s["per_theory"]:
         lines.append("")

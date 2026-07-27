@@ -66,6 +66,9 @@ def _book_stats(rows: list[dict]) -> dict:
     # target's price — avg must be >= 0 and no fill below -300bps in the clean
     # era; the deep-gift count is impossible by construction post-fix.
     drag = drag_stats([int(r.get("drag_bps") or 0) for r in closed])
+    # Modeled-cost pair (P1-7), from the row stamps (0 on pre-P1-7 rows).
+    cost = sum(float(r.get("cost_usd") or 0.0) for r in closed)
+    icost = sum(float(r.get("ideal_cost_usd") or 0.0) for r in closed)
     # Divergence tripwire: realized vs at-their-price disagreeing past the bar
     # means the result is coming from the fill model, not the wallets.
     suspect = (len(closed) >= DIVERGENCE_MIN_CLOSED and spent > 0
@@ -79,6 +82,9 @@ def _book_stats(rows: list[dict]) -> dict:
         "roi": round(roi, 4),
         "ideal_pnl": round(ideal, 2),
         "ideal_roi": round(ideal_roi, 4),
+        "roi_net": round((pnl - cost) / spent, 4) if spent else 0.0,
+        "ideal_roi_net": round((ideal - icost) / spent, 4) if spent else 0.0,
+        "cost_stamped": sum(1 for r in closed if float(r.get("ideal_cost_usd") or 0.0) > 0),
         "gifted": round(pnl - ideal, 2),
         "win_rate": round(wins / len(closed), 4) if closed else 0.0,
         "drag": drag,
@@ -251,9 +257,13 @@ def compare(
 
 def _fmt_book(name: str, s: dict) -> str:
     line = (f"{name}: {s['n_settled']} settled, ${s['pnl']:+.0f} "
-            f"({s['roi'] * 100:+.1f}%/copy · @price {s['ideal_roi'] * 100:+.1f}%, "
-            f"win {s['win_rate'] * 100:.0f}%, ${s['spent']:.0f} cycled) · "
-            f"{s['n_open']} open (${s['open_usd']:.0f})")
+            f"({s['roi'] * 100:+.1f}%/copy · @price {s['ideal_roi'] * 100:+.1f}%")
+    # P1-7 net twin, shown once cost-stamped rows exist: @price after modeled
+    # gas + fees + the category spread — the race read in real-money terms.
+    if s.get("cost_stamped"):
+        line += f" · @net {s['ideal_roi_net'] * 100:+.1f}%"
+    line += (f", win {s['win_rate'] * 100:.0f}%, ${s['spent']:.0f} cycled) · "
+             f"{s['n_open']} open (${s['open_usd']:.0f})")
     if s.get("fill_suspect"):
         line += " ⚠SUSPECT-fills"
     return line

@@ -25,6 +25,7 @@ import requests
 from src.copy_trading.copy_cost import CostModel
 from src.copy_trading.copy_replay import (
     approved_category_set,
+    proven_negative,
     score_copy_replay,
     select_copyable_categories,
 )
@@ -373,19 +374,58 @@ def lead_lag_wallet(buys, delay_s, horizon_s, price_cache) -> WalletLeadLag:
 
 
 # ─── full sweep: universe -> skill -> copyability -> Eval rows ────────────────
-def _merge_topk(pool: list, chunk_scored: dict, cfg: DiscoveryConfig) -> list:
+# P1-2: a wallet whose copy-replay was proven negative on a recent sweep is
+# excluded from the skill pool for this long before it may be re-evaluated —
+# new resolutions can overturn the verdict, but re-judging every sweep just
+# re-selects the same losers (they ace the own-history t-stat screen) and
+# re-culls them downstream, which is exactly the loop that kept the cull
+# histogram dominated by replay-proven-negative (§1.6).
+COPY_STAT_REEVAL_S = 7 * 86400.0
+
+
+def _screen_excluded(wallet: str, prior_copy_stats: dict, cfg: DiscoveryConfig,
+                     now: float) -> bool:
+    """True if the skill screen should skip this wallet this sweep: its persisted
+    copy-replay from a RECENT deep-eval is already proven-negative under our
+    copy action. must_include wallets bypass this entirely (retention/blacklist
+    logic owns them)."""
+    if not prior_copy_stats or not cfg.copy_replay_gate:
+        return False
+    rec = prior_copy_stats.get(wallet.lower())
+    if not rec:
+        return False
+    if (now - float(rec.get("ts") or 0.0)) > COPY_STAT_REEVAL_S:
+        return False  # stale evidence — re-evaluate, don't keep punishing
+    return proven_negative(
+        int(rec.get("copy_n") or 0), float(rec.get("copy_roi") or 0.0),
+        min_n=cfg.min_copy_replay_n, min_roi=cfg.min_copy_replay_roi)
+
+
+def _merge_topk(pool: list, chunk_scored: dict, cfg: DiscoveryConfig,
+                prior_copy_stats: dict | None = None, now: float | None = None) -> list:
     """Fold a chunk's scored wallets into the running top-K skill pool.
 
     ``pool`` is the prior winners (RankedMetrics). We re-run the same
     filter+rank over the union of the pool and the chunk, capped at
     ``skill_pool``. Because each input already holds at least the global top-K
     it can contribute, the top-K of the union is exact — so this streams 200k
-    wallets through fixed memory without changing which wallets are selected."""
+    wallets through fixed memory without changing which wallets are selected.
+
+    P1-2: wallets whose persisted copy-replay is already proven-negative are
+    excluded before ranking, and the hit-rate-scooper signature is demoted to
+    the bottom of the pool (wired from the same config the curve gates use, so
+    it is ON in prod where WALLET_DISCOVERY_MAX_HIT_RATE < 1.0)."""
     combined = {rm.address: rm.metrics for rm in pool}
     combined.update(chunk_scored)
+    if prior_copy_stats:
+        now = time.time() if now is None else now
+        combined = {w: m for w, m in combined.items()
+                    if not _screen_excluded(w, prior_copy_stats, cfg, now)}
     return select_targets(
         combined, method=cfg.method, min_capital=cfg.min_capital,
         min_closed=cfg.min_closed, top_k=cfg.skill_pool,
+        demote_hit_rate=(cfg.max_hit_rate if cfg.max_hit_rate < 1.0 else None),
+        demote_min_closed=cfg.min_curve_n,
     )
 
 
@@ -396,12 +436,16 @@ def evaluate_sweep(
     cache_dir: str | None = None,
     activity_ttl_s: float = 86400.0,
     stop: threading.Event | None = None,
+    prior_copy_stats: dict | None = None,
 ) -> dict[str, Eval]:
     """Run the funnel and return wallet -> Eval.
 
     ``must_include`` wallets (e.g. those already on the watchlist) are always
     lead-lag evaluated so decay can be measured even if they fall out of the
-    fresh skill pool.
+    fresh skill pool. ``prior_copy_stats`` (wallet(lower) -> last sweep's copy
+    stats) feeds the P1-2 screen: wallets already proven-negative under our
+    copy action are excluded from the pool instead of re-selected and re-culled
+    every sweep.
     """
     must_include = must_include or set()
 
@@ -465,7 +509,8 @@ def evaluate_sweep(
             if w in must_include:
                 must_metrics[w] = m
         del activity  # release this chunk's raw activity before the next fetch
-        pool = _merge_topk(pool, chunk_scored, cfg)
+        pool = _merge_topk(pool, chunk_scored, cfg,
+                           prior_copy_stats=prior_copy_stats)
         del chunk_scored
         # Pause between batches so a wide sweep paces its /activity calls under
         # the data-API 429 ceiling (skip after the last chunk).
@@ -611,5 +656,10 @@ def evaluate_sweep(
             long_horizon=long_horizon,
             long_horizon_ratio=hp.long_ratio,
             horizon_days=hp.mean_horizon_days,
+            # P1-3 dossier fields (computed above, previously dropped)
+            capital=(getattr(m, "capital", 0.0) if m else 0.0),
+            concentration=(getattr(m, "concentration", 0.0) if m else 0.0),
+            mean_entry=ep.mean_entry,
+            up_ratio=cm.up_ratio,
         )
     return evaluated
