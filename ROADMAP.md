@@ -305,6 +305,18 @@ thresholds, promote wallets, or judge strategies before then.**
 > `split_half_corr` can never fabricate a correlation from float noise.
 > Deferred to the owner (see the end-of-run desk): whether `/golive` +
 > `golive_watch` should also floor on at-their-price ROI + persistence.
+> **RESOLVED same day (owner: option A): shipped `80e6dc4`, review-hardened
+> `2668a81`** — the go-live gate now requires at-price ROI ≥ 0 on ≥5 clean
+> settles and book split-half corr ≥ 0, clean-era data only, fail-closed while
+> the era is young (`COPY_GOLIVE_HONEST_METRICS=false` restores the legacy
+> gate; recalibrate floor values at the 08-22 verdict).
+>
+> **48H ACCEPTANCE READ (2026-07-27, prod):** deep-gift 0 on both books (the
+> artifact channel is closed). A: 4 clean settles, avg drag −11bps (under the
+> ≥0 criterion on tiny n; the two-sided gate makes small negative averages
+> possible by design — keep reading as clean n accrues). A realized ≈
+> at-price (−22.9% vs −23.1%): realized is an honest number again. The 07-26
+> and 07-27 daily snapshots both went out era-floored.
 
 ### P0-1 · Stop the fill simulator gifting price — **SHIPPED `ec84422`**
 - **Why:** §1.1 — 39% of A-copies filled better than the target; that alone is
