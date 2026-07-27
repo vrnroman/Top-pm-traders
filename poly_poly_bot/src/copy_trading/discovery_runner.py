@@ -259,10 +259,12 @@ class DiscoveryRunner:
         self.holdout_frac = holdout_frac
         self.holdout_max_per_sweep = holdout_max_per_sweep
         self.failopen_alert_frac = failopen_alert_frac
-        # Per-sweep gate accounting (P1-4), reset in run_once: LLM calls made and
-        # how many admitted a wallet UNVETTED (fail-open / recheck-exhausted).
+        # Per-sweep gate accounting (P1-4), reset in run_once: LLM calls made,
+        # how many admitted a wallet UNVETTED (fail-open / recheck-exhausted),
+        # and how many were admitted over the per-sweep cap without a call.
         self._sweep_gate_calls = 0
         self._sweep_gate_failopen = 0
+        self._sweep_gate_admitcap = 0
         self.paper_ledger_path = paper_ledger_path
         self.paper_proven_min_n = paper_proven_min_n
         self.paper_proven_min_roi = paper_proven_min_roi
@@ -373,7 +375,7 @@ class DiscoveryRunner:
         stats = dict(prior or {})
         for w, e in evaluated.items():
             old = stats.get(w.lower())
-            if old is not None and e.copy_n < int(old.get("copy_n") or 0):
+            if isinstance(old, dict) and e.copy_n < int(old.get("copy_n") or 0):
                 continue
             stats[w.lower()] = {
                 "copy_roi": e.copy_roi, "copy_n": e.copy_n,
@@ -381,8 +383,12 @@ class DiscoveryRunner:
                 "closed_hit_rate": e.closed_hit_rate, "n_closed": e.n_closed,
                 "ts": now,
             }
+        # A non-dict record (a hand-edited/corrupt row that slipped past the
+        # from_json shape-check) is DROPPED here, not read — the prune must
+        # never be the thing that kills the sweep (review finding, 2026-07-28).
         return {w: r for w, r in stats.items()
-                if now - float(r.get("ts") or 0.0) <= COPY_STATS_TTL_S}
+                if isinstance(r, dict)
+                and now - float(r.get("ts") or 0.0) <= COPY_STATS_TTL_S}
 
     # ── one sweep ──
     def run_once(self, stop: Optional[threading.Event] = None) -> "CycleResultLike":
@@ -435,6 +441,8 @@ class DiscoveryRunner:
 
         self._sweep_gate_calls = 0
         self._sweep_gate_failopen = 0
+        self._sweep_gate_admitcap = 0
+        new_before_gate = len(result.newly_qualified)
         verdicts, holdouts, gate_calls = (({}, set(), 0) if result.first_init
                                           else self._llm_gate(result, proven))
 
@@ -532,14 +540,17 @@ class DiscoveryRunner:
         )
         # I2 funnel telemetry: one structured line per sweep with counts at
         # every stage, so "where do candidates die?" never needs a log trawl.
-        # (gate_in = wallets sent to the Claude gate this sweep.)
-        gated_n = sum(1 for e in result.newly_qualified
-                      if e.wallet in verdicts) + self._sweep_gate_failopen
+        # gate_in = every wallet the gate disposed this sweep (LLM calls made +
+        # over-cap ungated admits); new = pre-gate qualifiers; admitted = what
+        # survived onto the watchlist. (The first cut of this line undercounted
+        # gate_in — rejected/requeued/admit-cap wallets were invisible, exactly
+        # the throughput number the vetting-backlog watch reads.)
+        gate_in = self._sweep_gate_calls + self._sweep_gate_admitcap
         logger.info(
             "[DISCOVERY] funnel: pool=%d qualified=%d new=%d gate_in=%d "
             "gate_failopen=%d holdout=%d admitted=%d removed=%d",
-            len(evaluated), len(result.watchlist), len(result.newly_qualified),
-            gated_n, self._sweep_gate_failopen, len(holdouts),
+            len(evaluated), len(result.watchlist), new_before_gate,
+            gate_in, self._sweep_gate_failopen, len(holdouts),
             len(result.newly_qualified), len(result.removed))
         if result.paper_proven:
             logger.info("[DISCOVERY] paper-proven (realized-ledger override): %s",
@@ -766,6 +777,7 @@ class DiscoveryRunner:
             if i >= self.llm_review_top_n:
                 logger.warning("[DISCOVERY] LLM gate cap (%d) reached — admitting %s ungated",
                                self.llm_review_top_n, e.wallet)
+                self._sweep_gate_admitcap += 1
                 self._record_gate(e, "admit-cap", admitted=True, paper_record=paper_rec)
                 continue
             dossier = _dossier_from_eval(e, paper_record=paper_rec)

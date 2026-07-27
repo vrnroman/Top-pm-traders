@@ -212,11 +212,20 @@ class DiscoveryState:
     @classmethod
     def from_json(cls, d: dict | None) -> "DiscoveryState":
         d = d or {}
+        # Shape-check copy_stats at the boundary: a corrupted state file (a
+        # bare string, or a non-dict record) must not load — the readers
+        # downstream call .get() on every record, and an AttributeError there
+        # would kill EVERY sweep at the same spot with no self-heal (the prune
+        # that would drop the bad row is itself what raises). Bad entries are
+        # dropped here; the next sweep rewrites the file clean.
+        raw_stats = d.get("copy_stats")
+        if not isinstance(raw_stats, dict):
+            raw_stats = {}
         return cls(
             on_watchlist=dict(d.get("on_watchlist") or {}),
             last_run=float(d.get("last_run") or 0.0),
             initialized=bool(d.get("initialized") or False),
-            copy_stats=dict(d.get("copy_stats") or {}),
+            copy_stats={w: r for w, r in raw_stats.items() if isinstance(r, dict)},
         )
 
     def to_json(self) -> dict:

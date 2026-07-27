@@ -177,6 +177,31 @@ def test_discovery_state_copy_stats_roundtrip():
     assert DiscoveryState.from_json({"on_watchlist": {}}).copy_stats == {}
 
 
+def test_discovery_state_copy_stats_shape_checked():
+    """Review finding (MEDIUM): a corrupt copy_stats row must be dropped at the
+    boundary — the readers call .get() on every record, and an AttributeError
+    there killed EVERY sweep at the same spot with no self-heal."""
+    st = DiscoveryState.from_json({
+        "copy_stats": {"0xbad": "junk", "0xok": {"copy_n": 15, "ts": 1.0}}})
+    assert st.copy_stats == {"0xok": {"copy_n": 15, "ts": 1.0}}
+    # copy_stats itself being a bare string must not raise either
+    assert DiscoveryState.from_json({"copy_stats": "junk"}).copy_stats == {}
+
+
+def test_screen_excluded_tolerates_garbage_rows():
+    cfg = DiscoveryConfig(min_copy_replay_n=12, min_copy_replay_roi=0.02)
+    assert dd._screen_excluded("0xW", {"0xw": "junk"}, cfg, 1e12) is False
+    assert dd._screen_excluded("0xW", {"0xw": None}, cfg, 1e12) is False
+
+
+def test_updated_copy_stats_drops_garbage_rows(tmp_path):
+    r = _runner(tmp_path, seq=[{}])
+    r._now = lambda: 1_000_000.0
+    prior = {"0xjunk": "not-a-dict", "0xok": {"copy_n": 15, "ts": 1_000_000.0}}
+    out = r._updated_copy_stats(prior, {})
+    assert out == {"0xok": {"copy_n": 15, "ts": 1_000_000.0}}  # junk dropped, no raise
+
+
 def test_updated_copy_stats_merges_keeps_max_n_and_prunes(tmp_path):
     r = _runner(tmp_path, seq=[{}])
     r._now = lambda: 1_000_000.0
@@ -529,3 +554,69 @@ def test_cull_histogram_persisted_and_funnel_logged(tmp_path, caplog):
     assert rows[0]["histogram"] == {"replay-proven-negative": 1}
     assert rows[0]["swept"] == 1
     assert any("funnel:" in rec.message for rec in caplog.records)
+
+
+def test_funnel_line_counts_every_gate_disposition(tmp_path, caplog):
+    """Review finding: gate_in must count every wallet the gate disposed (LLM
+    calls + over-cap ungated), new= pre-gate, admitted= post-gate — the first
+    cut undercounted exactly the wallets the vetting-backlog watch reads."""
+    seq = [{"0xk": _ev("0xk", "1b")},
+           {"0xk": _ev("0xk", "1b"), "0xA": _ev("0xA"), "0xB": _ev("0xB"),
+            "0xC": _ev("0xC")}]
+    calls = {"i": 0}
+
+    def fake_eval(config, **kw):
+        d = seq[min(calls["i"], len(seq) - 1)]
+        calls["i"] += 1
+        return d
+
+    def verdict_fn(dossier, model=None):
+        if dossier.get("wallet") == "0xA":
+            return LLMVerdict("skip", "high", False, 0.9, "artifact")
+        return LLMVerdict("follow", "low", True, 0.8, "ok")
+
+    r = DiscoveryRunner(config=CFG, watchlist_path=str(tmp_path / "wl.json"),
+                        state_path=str(tmp_path / "state.json"),
+                        evaluate=fake_eval, llm_review=verdict_fn,
+                        llm_review_enabled=True, llm_review_top_n=2,
+                        now=lambda: 100.0)
+    with caplog.at_level(logging.INFO, logger="poly_poly_bot"):
+        r.run_once()
+        r.run_once()
+    line = [rec.message for rec in caplog.records if "funnel:" in rec.message][-1]
+    # 3 new: 2 called (0xA skip, 0xB follow) + 0xC over the top_n=2 cap.
+    assert "new=3" in line
+    assert "gate_in=3" in line          # 2 calls + 1 admit-cap, not just verdicts
+    assert "admitted=2" in line         # 0xB (follow) + 0xC (cap); 0xA dropped
+
+
+def test_price_cache_bounded_during_deep_eval(monkeypatch):
+    """Review finding: the shared per-token price cache must not grow without
+    bound across a 400-wallet deep-eval loop — clear past PRICE_CACHE_MAX."""
+    universe = ["0xw1", "0xw2", "0xw3"]
+    monkeypatch.setattr(dd, "build_universe", lambda target, **kw: list(universe))
+    monkeypatch.setattr(dd, "fetch_all_activity",
+                        lambda wallets, *a, **k: {w: [] for w in wallets})
+    monkeypatch.setattr(dd, "compute_wallet_metrics",
+                        lambda a, **kw: SimpleNamespace(tstat=5.0, roi=0.1))
+    monkeypatch.setattr(dd, "select_targets",
+                        lambda scored, **kw: [SimpleNamespace(address=w, metrics=m)
+                                              for w, m in scored.items()])
+    # every wallet has enough buys on the SAME 3 tokens (dedup-friendly)
+    buys = [{"token": t, "ts": 1, "price": 0.5, "usd": 600.0} for t in "ABC" * 2]
+    monkeypatch.setattr(dd, "fetch_recent_buys", lambda *a, **k: list(buys))
+    monkeypatch.setattr(dd, "wallet_curve_metrics", lambda *a, **k: dd.CurveMetrics())
+    monkeypatch.setattr(dd, "build_wallet_context",
+                        lambda w, *a, **k: dd.WalletContext(wallet=w, now=0.0))
+    monkeypatch.setattr(dd, "fetch_resolutions", lambda cids, cache_dir=None, **k: {})
+    fetches = []
+    monkeypatch.setattr(dd, "fetch_price_series",
+                        lambda token, cache: fetches.append(token) or [(1, 0.5)])
+    monkeypatch.setattr(dd, "PRICE_CACHE_MAX", 2)
+    monkeypatch.setenv("WALLET_DISCOVERY_BATCH_PAUSE_S", "0")
+
+    dd.evaluate_sweep(DiscoveryConfig(min_ll_trades=4))
+
+    # unbounded: 3 fetches total (shared tokens served from cache for w2/w3).
+    # bounded at 2: each wallet's loop-top clear forces a refetch -> 9.
+    assert len(fetches) == 9

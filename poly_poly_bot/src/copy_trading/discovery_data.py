@@ -382,6 +382,13 @@ def lead_lag_wallet(buys, delay_s, horizon_s, price_cache) -> WalletLeadLag:
 # histogram dominated by replay-proven-negative (§1.6).
 COPY_STAT_REEVAL_S = 7 * 86400.0
 
+# Hard bound on the shared per-token price-series cache used across the
+# deep-eval loop. It exists to dedupe fetches when wallets share tokens, but
+# at a 400-wallet pool it is the largest surviving per-sweep structure
+# (per-token interval="max" series, thousands of points each). Full-clear
+# past the cap — a few re-fetches are cheaper than an unbounded sweep peak.
+PRICE_CACHE_MAX = 5000
+
 
 def _screen_excluded(wallet: str, prior_copy_stats: dict, cfg: DiscoveryConfig,
                      now: float) -> bool:
@@ -392,8 +399,8 @@ def _screen_excluded(wallet: str, prior_copy_stats: dict, cfg: DiscoveryConfig,
     if not prior_copy_stats or not cfg.copy_replay_gate:
         return False
     rec = prior_copy_stats.get(wallet.lower())
-    if not rec:
-        return False
+    if not isinstance(rec, dict):
+        return False  # absent — or a corrupt hand-edited row; never block on it
     if (now - float(rec.get("ts") or 0.0)) > COPY_STAT_REEVAL_S:
         return False  # stale evidence — re-evaluate, don't keep punishing
     return proven_negative(
@@ -593,6 +600,10 @@ def evaluate_sweep(
         n_cap = 0
         buys = fetch_recent_buys(w, since, cfg.min_usd)
         if len(buys) >= cfg.min_ll_trades:
+            # Bound the shared price-series cache (the biggest per-sweep
+            # structure at the 400-pool) before this wallet adds up to 60 more.
+            if len(price_cache) > PRICE_CACHE_MAX:
+                price_cache.clear()
             agg = lead_lag_wallet(buys[:60], delay_s, horizon_s, price_cache)
             capture, lead = agg.avg_capture * 100, agg.avg_lead * 100
             hit, n_cap = agg.capture_hit_rate, agg.n
