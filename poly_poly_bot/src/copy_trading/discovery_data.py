@@ -44,6 +44,12 @@ from src.copy_trading.wallet_context import WalletContext, build_context
 
 logger = logging.getLogger("poly_poly_bot")
 
+# Activity-cache write failures already warned about this sweep, keyed by cache
+# dir — the WARNING fires once per sweep per dir (first-failure style), never
+# per failed row (a 400-wallet sweep of failures would bury the signal).
+# Reset at the top of every evaluate_sweep.
+_cache_write_warned_dirs: set = set()
+
 DATA_API = os.environ.get("DATA_API_URL", "https://data-api.polymarket.com")
 CLOB = "https://clob.polymarket.com"
 HISTORY_RETENTION_DAYS = 31  # CLOB price-history rolling window
@@ -242,8 +248,14 @@ def fetch_activity(wallet: str, cache_dir: str | None, ttl_s: float, cap: int = 
             tmp = path + ".tmp"
             json.dump(acts, open(tmp, "w"))
             os.replace(tmp, path)
-        except OSError:
-            pass
+        except OSError as e:
+            # A dead cache must be LOUD once, not silently off for weeks: prod
+            # ran with wcache never created (2026-07-27 finding), so every sweep
+            # re-fetched everything and the 10x pool (P1-1) would not have fit.
+            if cache_dir not in _cache_write_warned_dirs:
+                _cache_write_warned_dirs.add(cache_dir)
+                logger.warning("[DISCOVERY] activity cache write failed (%s: %s) — "
+                               "disk cache OFF, every sweep re-fetches", path, e)
     return acts
 
 
@@ -393,6 +405,21 @@ def evaluate_sweep(
     """
     must_include = must_include or set()
 
+    # Fresh sweep: re-arm the once-per-sweep cache-write warnings.
+    _cache_write_warned_dirs.clear()
+
+    # The disk caches only work if the directories exist. Nothing created them
+    # until now (prod ran 2026-06..07 with both silently dead: every sweep
+    # re-fetched all activity and re-resolved ~40k markets). Create them here,
+    # once per sweep, so a fresh deploy self-heals instead of needing a manual
+    # mkdir on the VM.
+    for d in (cache_dir, cfg.res_cache_dir):
+        if d:
+            try:
+                os.makedirs(d, exist_ok=True)
+            except OSError:
+                logger.warning("[DISCOVERY] cannot create cache dir %s — caching off", d)
+
     # Keep the on-disk activity cache bounded before we add this sweep's files.
     if cache_dir:
         prune_cache(cache_dir, activity_ttl_s,
@@ -474,12 +501,25 @@ def evaluate_sweep(
         t in REGISTRY and REGISTRY[t].needs_resolution for t in cfg.enabled_theories)
     resolutions: dict = {}
     if to_eval and (needs_res or cfg.s4_enabled):
-        res_acts = fetch_all_activity(to_eval, cache_dir, activity_ttl_s, stop=stop)
-        cids = {ev.get("conditionId")
-                for acts in res_acts.values() for ev in acts
-                if ev.get("type") == "TRADE" and ev.get("side") == "BUY"
-                and ev.get("conditionId")}
-        del res_acts  # only the cid set is needed downstream — free the raw activity
+        # Collect the deep-eval wallets' BUY conditionIds in CHUNKS, keeping only
+        # the cid set: holding every wallet's full /activity at once (the old
+        # fetch_all_activity(to_eval) call) peaks at ~1-2MB x pool size — fine at
+        # a 40-wallet pool, an OOM risk at the P1-1 400-wallet pool on the 2GB
+        # VM. Chunking keeps the parallelism for cache misses while bounding
+        # peak RSS to ~50 wallets' activity at a time.
+        cids: set = set()
+        cid_chunk = 50
+        for i in range(0, len(to_eval), cid_chunk):
+            if _stopping(stop):
+                break
+            res_acts = fetch_all_activity(to_eval[i:i + cid_chunk], cache_dir,
+                                          activity_ttl_s, stop=stop)
+            for acts in res_acts.values():
+                for ev in acts:
+                    if (ev.get("type") == "TRADE" and ev.get("side") == "BUY"
+                            and ev.get("conditionId")):
+                        cids.add(ev.get("conditionId"))
+            del res_acts  # only the cid set is needed downstream — free the chunk
         if cids and needs_res and not _stopping(stop):
             resolutions = fetch_resolutions(cids, cfg.res_cache_dir)
             logger.info("[DISCOVERY] resolutions: %d/%d markets settled "
