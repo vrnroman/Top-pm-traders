@@ -396,7 +396,13 @@ thresholds, promote wallets, or judge strategies before then.**
 > acceptance, readable from cull-histogram.jsonl); (3) first wide sweep's
 > duration + VM RAM; (4) 5 Langfuse traces show no >2-null dossiers (P1-3
 > acceptance); (5) P1-6 shrinks the copied universe the 08-22 verdict
-> measures — a still-negative verdict then is *more* damning, not less.
+> measures — a still-negative verdict then is *more* damning, not less; (6)
+> vetting throughput vs influx — first wide sweep: new=72, gate_in=17 (the
+> 20-call cap). Fail-safe (above-cap = admit-cap, paper-only) and mostly the
+> cold-start flood, but if the admit-cap backlog is still growing when the
+> 7-day new= watch reads (~08-04), revisit: raise the cap (cost exits the
+> blessed $5–9/day band — surface with numbers) or triage gate-call order by
+> P1-2 replay rank.
 
 ### P1-1 · Widen the funnel 10× — **SHIPPED** (config flip + `6bc4837` prereq)
 - **Why:** §1.6 — `new=0..3`/day on a fixed 43-wallet pool is not a search.
