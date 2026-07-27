@@ -11,9 +11,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ && rm -
 # (CLAUDE_CODE_OAUTH_TOKEN — from `claude setup-token`) rather than an
 # ANTHROPIC_API_KEY. The gate is fail-open, so if the token is unset the bot
 # still runs (new wallets are admitted ungated).
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+# Node comes from the official pinned tarball, NOT the nodesource setup script:
+# deb.nodesource.com/setup_22.x started returning 403 on 2026-07-27, and the
+# old pipe (`curl | bash`, no pipefail) turned that into a silent no-op — apt
+# then installed the distro nodejs, which splits npm out, and the build died at
+# `npm: not found`. Pinned v22 LTS; bump deliberately.
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates xz-utils \
+    && curl -fsSL https://nodejs.org/dist/v22.17.0/node-v22.17.0-linux-x64.tar.xz -o /tmp/node.tar.xz \
+    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+    && rm /tmp/node.tar.xz \
     && npm install -g @anthropic-ai/claude-code \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
