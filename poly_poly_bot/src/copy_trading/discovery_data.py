@@ -473,8 +473,12 @@ def evaluate_sweep(
 
     # Keep the on-disk activity cache bounded before we add this sweep's files.
     if cache_dir:
+        # max_files sized for the e2-small's 20G disk: ~2.5MB/file at the
+        # 4000-record cap → 4000 files ≈ 10GB worst case (15k ≈ 37GB was a
+        # bound that could only fire after the disk was already full — P2,
+        # 2026-07-28). Re-derive if the funnel widens or the disk grows.
         prune_cache(cache_dir, activity_ttl_s,
-                    max_files=int(os.environ.get("WALLET_DISCOVERY_CACHE_MAX_FILES", "15000")))
+                    max_files=int(os.environ.get("WALLET_DISCOVERY_CACHE_MAX_FILES", "4000")))
 
     universe = build_universe(cfg.universe)
     for w in must_include:
