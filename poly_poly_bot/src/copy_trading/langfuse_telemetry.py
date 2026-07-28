@@ -121,15 +121,27 @@ def record_generation(
     pub, sec, host = cfg
     try:
         u = usage or {}
-        in_base = int(u.get("input_tokens") or 0)
-        cache_read = int(u.get("cache_read_input_tokens") or 0)
-        cache_creation = int(u.get("cache_creation_input_tokens") or 0)
-        out_tok = int(u.get("output_tokens") or 0)
+        try:
+            in_base = int(u.get("input_tokens") or 0)
+            cache_read = int(u.get("cache_read_input_tokens") or 0)
+            cache_creation = int(u.get("cache_creation_input_tokens") or 0)
+            out_tok = int(u.get("output_tokens") or 0)
+            split = u.get("cache_creation") or {}
+            w1h = int(split.get("ephemeral_1h_input_tokens") or 0)
+            w5m = int(split.get("ephemeral_5m_input_tokens") or 0)
+        except (TypeError, ValueError, AttributeError) as e:
+            # Unparseable usage shape: drop the row, but LOUDLY — the
+            # 2026-07-11 regression was a silent envelope shape change, and a
+            # wholesale provider-side change SHOULD flood WARNINGs. (Still
+            # never raises: telemetry must not break a sweep.)
+            desc = ({k: type(v).__name__ for k, v in u.items()}
+                    if isinstance(u, dict) else type(u).__name__)
+            logger.warning(
+                "[LANGFUSE] dropping %s generation: unparseable usage block "
+                "(%r); keys/types: %s", name, e, desc)
+            return
         prompt_tok = in_base + cache_read + cache_creation
         has_usage = prompt_tok > 0 or out_tok > 0
-        split = u.get("cache_creation") or {}
-        w1h = int(split.get("ephemeral_1h_input_tokens") or 0)
-        w5m = int(split.get("ephemeral_5m_input_tokens") or 0)
 
         # Cost: the envelope's own figure wins; when it's absent/0 but tokens
         # were burned, compute from the price table so cost never lands as a

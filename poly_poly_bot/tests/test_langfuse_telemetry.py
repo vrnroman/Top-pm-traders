@@ -163,6 +163,29 @@ def test_watchdog_silent_on_failed_calls(monkeypatch, caplog):
     assert not any("zero usage" in r.message for r in caplog.records)
 
 
+def test_unparseable_usage_drops_row_with_warning(monkeypatch, caplog):
+    _enable(monkeypatch)
+    posted = []
+    monkeypatch.setattr(lt.requests, "post", lambda *a, **k: posted.append((a, k)))
+    lt.record_generation(name="wallet-gate", input="p", output="o",
+                         model="m", start=1.0, end=2.0,
+                         usage={"input_tokens": "lots"})
+    assert posted == []                       # row dropped, never raised
+    assert any("unparseable usage" in r.message for r in caplog.records
+               if r.levelname == "WARNING")
+
+
+def test_non_dict_usage_drops_row_with_warning(monkeypatch, caplog):
+    _enable(monkeypatch)
+    posted = []
+    monkeypatch.setattr(lt.requests, "post", lambda *a, **k: posted.append((a, k)))
+    lt.record_generation(name="wallet-gate", input="p", output="o",
+                         model="m", start=1.0, end=2.0, usage="garbage")
+    assert posted == []
+    assert any("unparseable usage" in r.message for r in caplog.records
+               if r.levelname == "WARNING")
+
+
 def test_record_generation_marks_error_level(monkeypatch):
     _enable(monkeypatch)
     captured = {}
