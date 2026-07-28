@@ -17,11 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ && rm -
 # then installed the distro nodejs, which splits npm out, and the build died at
 # `npm: not found`. Pinned v22 LTS; bump deliberately.
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates xz-utils \
-    && curl -fsSL https://nodejs.org/dist/v22.17.0/node-v22.17.0-linux-x64.tar.xz -o /tmp/node.tar.xz \
+    && curl -fsSL https://nodejs.org/dist/v22.17.0/node-v22.17.0-linux-x64.tar.xz -o /tmp/node-v22.17.0-linux-x64.tar.xz \
     && curl -fsSL https://nodejs.org/dist/v22.17.0/SHASUMS256.txt -o /tmp/SHASUMS256.txt \
     && (cd /tmp && grep "node-v22.17.0-linux-x64.tar.xz$" SHASUMS256.txt | sha256sum -c -) \
-    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
-    && rm /tmp/node.tar.xz /tmp/SHASUMS256.txt \
+    && tar -xJf /tmp/node-v22.17.0-linux-x64.tar.xz -C /usr/local --strip-components=1 \
+    && rm /tmp/node-v22.17.0-linux-x64.tar.xz /tmp/SHASUMS256.txt \
     && npm install -g @anthropic-ai/claude-code \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
