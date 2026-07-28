@@ -945,12 +945,18 @@ def _consume_claude_drift_marker() -> None:
         telegram_bot.send_message(
             "⚠️ <b>claude-code CLI changed on this deploy</b>\n"
             f"<code>{d.get('old', '?')}</code> → <code>{d.get('new', '?')}</code>\n"
-            "Gate prompt/cost behavior may drift — watch the next gate traces "
+            "Gate prompt/cost behavior may drift. Watch the next gate traces "
             "(the telemetry-suspect tag guards usage shape).")
         logger.warning(f"[BOOT] claude-code CLI changed on this deploy: "
                        f"{d.get('old', '?')} -> {d.get('new', '?')}")
     except Exception:
         logger.exception("[BOOT] claude-drift marker consume failed")
+        try:
+            # Quarantine instead of leaving it: an unreadable marker must not
+            # re-raise on every boot forever (evidence kept as .bad).
+            os.replace(path, path + ".bad")
+        except OSError:
+            pass
 
 
 async def main():

@@ -44,10 +44,13 @@ else
   echo "P2-3: archiving ${#present[@]} files -> $bundle"
   (cd "$DATA" && sha256sum "${present[@]}") | tee "$manifest"
   (cd "$DATA" && tar czf "$bundle" "${present[@]}")
-  # Verify the bundle reads back and holds every file before deleting anything.
-  for f in "${present[@]}"; do
-    tar tzf "$bundle" "$f" >/dev/null
-  done
+  # Verify before deleting anything: extract to scratch and check member
+  # CONTENT against the manifest (a bare `tar tzf` only proves the gzip
+  # stream reads, not that the bytes are the ones we checksummed).
+  scratch="$(mktemp -d)"
+  tar xzf "$bundle" -C "$scratch"
+  (cd "$scratch" && sha256sum -c "$manifest")
+  rm -rf "$scratch"
   (cd "$DATA" && rm -v "${present[@]}")
   echo "P2-3: deleted ${#present[@]} files (manifest: $manifest)"
 fi

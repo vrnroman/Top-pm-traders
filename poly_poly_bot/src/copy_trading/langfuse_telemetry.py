@@ -40,9 +40,18 @@ _TIMEOUT_S = 8
 
 
 def _price_per_mtok(name: str, fallback: float) -> float:
-    """USD per million tokens, env-overridable; read at call time (test-friendly)."""
+    """USD per million tokens, env-overridable; read at call time (test-friendly).
+    A malformed override falls back LOUDLY — env drift must not drop rows at
+    DEBUG the way envelope drift used to."""
     v = (os.getenv(name) or "").strip()
-    return float(v) if v else fallback
+    if not v:
+        return fallback
+    try:
+        return float(v)
+    except ValueError:
+        logger.warning("[LANGFUSE] ignoring malformed %s=%r (using %.4g)",
+                       name, v, fallback)
+        return fallback
 
 
 def _computed_cost_usd(u: dict) -> float:
@@ -228,7 +237,11 @@ def record_generation(
                 details["cache_creation_5m"] = w5m
                 details["cache_creation_1h"] = w1h
             gen_body["usageDetails"] = details
-        if cost:
+        if cost is not None:
+            # `is not None`, not truthiness: an operator zeroing every
+            # LANGFUSE_PRICE_* override yields computed cost 0.0, and omitting
+            # costDetails then would let Langfuse's own calc price the
+            # full-prompt input AND the cache keys twice.
             gen_body["costDetails"] = {"total": cost}
         if error:
             gen_body["statusMessage"] = error

@@ -185,8 +185,9 @@ def prune_cache(cache_dir: str | None, ttl_s: float, max_files: int | None = Non
 
     The universe churns every sweep, so wallets that drop out leave their
     ``{wallet}.json`` behind. Without pruning these orphans accumulate forever
-    (~1 MB each at the 4000-record cap → tens of GB), eventually filling a small
-    VM's disk. We delete anything older than ``ttl_s`` (it would be re-fetched on
+    (measured ~2.5MB each at the 4000-record cap — 6.7GB in the first day after
+    the 2026-07 cache resurrection), eventually filling a small VM's disk. We
+    delete anything older than ``ttl_s`` (it would be re-fetched on
     use anyway), then, if the directory is still over ``max_files``, drop the
     oldest by mtime as a hard backstop. RAM is unaffected — this is purely a disk
     guard.
