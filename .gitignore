@@ -22,3 +22,8 @@ credentials/
 # Personal notes / audits — this repo is PUBLIC, keep these local only
 .claude/
 SECURITY_AUDIT.md
+
+# Local agent/run scratch — never commit (this repo is PUBLIC)
+.backself/
+.1shot/
+/logs/

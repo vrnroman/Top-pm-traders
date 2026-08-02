@@ -702,11 +702,13 @@ or made unreadable, and arrive on 08-22 with the pivot's evidence in hand.
   `copy_cost.py` assumes "sell or redeem at the bid", but `copy_paper.realize()`
   sets `payout = shares` — a winning share settles at $1.00, no spread. The
   exit half is only actually paid on `realize_exit` rows, yet `ideal_cost_usd`
-  charges the full round trip on **every** row at open. The `@net` numbers the
-  08-22 verdict quotes are biased negative by ~4–6pp; combined **@net −13.3%
-  would be roughly −8%** under entry-only cost. Direction of the verdict does
-  not flip, but the magnitude will be quoted. **Interim: read the existing
-  ×0.5 sensitivity column as the primary, not ×1.**
+  charges the full round trip on **every** row at open, so every `@net` figure
+  is biased negative. **Do not quote a number for this from here** — it moves
+  daily and this file has already carried a stale one; read it live from
+  `/pnl`'s cost-sensitivity panel or `scripts/rebaseline_ledger.py --era`.
+  **Interim: read the ×0.5 sensitivity column as the primary, not ×1.**
+  This is not a cosmetic correction — see §9.8, where it decides whether the
+  §7 ROI leg is met at all.
 - **`at-their-price` ROI is not fill-model-independent.** `ideal_pnl` uses
   `their_price` but every consumer divides by `spent = shares·entry_price`, so
   `reported = true × (their_price/entry_price)`. Clean era is bounded by the
@@ -777,8 +779,9 @@ until today only two had content.
   or ROI negative but within one standard error). Concretely it means: extend
   the era by a *relative* 30 days (see the bug in §9.2 — the current knob adds
   3), and apply the cut that was deliberately **not** made mid-experiment:
-  drop sports pool-wide. Sports loses in both books and is **~62% of settled
-  A+B copies, ~55% in the clean era** (live ledgers, 2026-08-02; the ledgers
+  drop sports pool-wide — but **re-derive the premise first** (`/slice B`):
+  as of 2026-08-02 sports does NOT lose in both books at their own price. It
+  is **~62% of settled A+B copies, ~55% in the clean era** (live ledgers, 2026-08-02; the ledgers
   append continuously, so treat the share as approximate and re-derive rather
   than quoting a row count. §1.5's 333-of-415 is the 2026-07-25 snapshot and
   is NOT current).
@@ -823,9 +826,10 @@ this as an edge yet**, for two reasons that must be settled first:
    evidence against it. It needs a null model (shuffle the halves, or bootstrap
    the wallet assignment) before it means anything.
 2. **The magnitude does not clear modeled costs.** Cold-wallet second halves are
-   +0.79% (A) and +6.70% (B) at-their-price gross. Modeled round-trip cost is
-   ~13% (~6–8% if the entry-only correction in §9.2 is right). Only book B is
-   even in the conversation, on $3.2k of capital and 9 wallets.
+   +0.79% (A) and +6.70% (B) at-their-price gross, against a modeled
+   round-trip cost of roughly 10% (materially less if the entry-only
+   correction in §9.2 is right — read it live rather than from here). Only
+   book B is even in the conversation, on $3.2k of capital and 9 wallets.
 
 It is also **not independent evidence** — it is a re-read of the same rows §1.3
 already reported. Treat it as a pre-registered hypothesis for after 08-22, with
@@ -901,3 +905,51 @@ finding this section. If you edit them here, edit `_handle_golive` too.
    PnL one); only `COPY_GOLIVE_MIN_CLEAN_SETTLED` and the two honest checks are
    era-scoped. If the wallet's all-time record is much better than its clean-era
    record, the difference is the fill artifact, not skill.
+
+### 9.8 The §7 ROI leg is live — re-derived 2026-08-02, and it is not what §9.4 assumed
+
+Round-7 verification forced a re-derivation of the category and combined ROIs
+instead of carrying figures forward. Two of this section's own prose claims were
+false, and correcting them changes the picture the 08-22 verdict will present.
+
+Live ledgers, dust excluded, clean era (`opened_ts >= era_floor`), derived twice
+independently:
+
+```
+book B clean era   sports   n=455  realized +7.22%  @price +8.21%  @net -3.16%
+                   crypto   n=184  realized +8.22%  @price +9.21%  @net +4.27%
+                   other    n=184  realized +4.84%  @price +5.83%  @net -4.16%
+book A clean era   sports   n=149  realized -1.47%  @price -1.51%  @net -13.26%
+COMBINED  all-time  n=1524  realized +3.42%  @price +2.63%  @net -4.13%
+COMBINED  clean era n=1104  realized +4.68%  @price +5.44%  @net -4.47%
+```
+
+Three things follow, and none of them were true in this file before:
+
+1. **"Sports loses in both books" is false.** In book B, clean era, sports is
+   **+8.21% at their own price** and is *not* the worst slice — `other` is worse
+   at `@net`. It loses only after modeled costs. §1.5's finding was real on
+   2026-07-25 data; it does not hold today. The recalibrate arm's sports cut
+   must be re-derived before it is applied, not applied on this premise.
+2. **Combined at-their-price ROI is POSITIVE** (+5.44% clean era, +2.63%
+   all-time). §7's kill criterion requires at-price ROI negative **and**
+   persistence ≤ 0. On today's data the ROI leg is **not met**, and §9.4's
+   RETIRE arm assumed it would be.
+3. **So the verdict now hinges on the cost model** (§9.2). At-price is positive;
+   `@net` is negative; and `@net` is computed with a round-trip spread charged
+   against rows that redeem at par. Whether the honest cost-adjusted number is
+   above or below zero is genuinely undetermined until that is fixed — which
+   promotes the §9.2 cost fix from "queued tidy-up" to **the** thing that
+   decides how 08-22 reads.
+
+**This does not mean the thesis is winning.** Persistence is the leg to trust
+(§1.3, §9.5) and it remains the weaker one; a positive at-price ROI on a book
+whose wallet selection has no persistence is consistent with beta, not edge. But
+"negative and therefore falsified" is no longer the expected outcome, and
+anybody planning the 08-22 read off §9.4 alone would have been planning for the
+wrong result.
+
+**Standing rule for this file, learned the hard way over seven verification
+rounds:** do not write a derived ROI into this document. Point at `/pnl`,
+`/slice`, or `scripts/rebaseline_ledger.py --era`. Every hand-copied number in
+§9 went stale or was wrong at birth; the machine-derived wallet counts did not.
