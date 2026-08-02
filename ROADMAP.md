@@ -810,17 +810,10 @@ The most-trusted finding (§1.3) is that a wallet looking good is slightly
 the live ledgers, at-their-price (fill-model independent), dust excluded,
 wallets with n≥10 settled, split chronologically in half:
 
-```
-Book A (11 wallets)   follow-HOT (1st half +): 6 wal, $1,996 -> 2nd half  -7.03%
-                      follow-COLD (1st half -): 5 wal, $1,026 -> 2nd half  +0.79%
-                      fade edge (cold - hot) = +7.82 pp
-Book B (33 wallets)   follow-HOT: 24 wal, $6,402 -> 2nd half  -2.05%
-                      follow-COLD: 9 wal, $3,211 -> 2nd half  +6.70%
-                      fade edge (cold - hot) = +8.75 pp
-```
 
-Directionally consistent across both books and both signs. **But do not read
-this as an edge yet**, for two reasons that must be settled first:
+The result at the time of writing: following COLD wallets beat following HOT
+ones by roughly 8 percentage points, in BOTH books and on both signs.
+**But do not read this as an edge yet**, for two reasons that must be settled first:
 
 1. **This is exactly what regression to the mean produces under a ZERO-signal
    null.** Selecting on "first half was positive" selects partly on noise, and
@@ -828,20 +821,20 @@ this as an edge yet**, for two reasons that must be settled first:
    evidence against it. It needs a null model (shuffle the halves, or bootstrap
    the wallet assignment) before it means anything.
 2. **The magnitude does not clear modeled costs.** Cold-wallet second halves are
-   +0.79% (A) and +6.70% (B) at-their-price gross, against a modeled
-   round-trip cost of roughly 10% (materially less if the entry-only
-   correction in §9.2 is right — read it live rather than from here). Only
-   book B is even in the conversation, on $3.2k of capital and 9 wallets.
+   low-single-digit (A) and mid-single-digit (B) at-their-price gross, against
+   a modeled round-trip cost around 10% — materially less if the entry-only
+   correction in §9.2 is right. Only book B is even in the conversation, and on
+   a small slice of capital and wallets. Re-derive before acting.
 
 It is also **not independent evidence** — it is a re-read of the same rows §1.3
 already reported. Treat it as a pre-registered hypothesis for after 08-22, with
 its own kill bar written before it is tested, not as a reason to soften the §7
 verdict.
 
-**One useful side-fact:** book B has **33 wallets at n≥10 all-time**, comfortably
-over the §7 bar of 15 — but §7 counts *clean-era* wallets, and the clean era is
-8 days old. That gap is precisely what the new readability witness (§9.1) now
-reports every morning.
+**One useful side-fact:** book B clears the §7 15-wallet bar comfortably on the
+all-time sample — but §7 counts *clean-era* wallets, which is a smaller number.
+That gap is exactly what the readability witness (§9.1) now reports every
+morning.
 
 ### 9.6 Verifier round 1 — one defect in this session's own fix
 
@@ -912,8 +905,7 @@ finding this section. If you edit them here, edit `_handle_golive` too.
 
 Round-7/8 verification forced a re-derivation instead of carrying figures
 forward. Two prose claims in §9 were false, and correcting them changes what
-the 08-22 verdict is expected to say. **Per the standing rule at the end of
-this section, no ROI figures are reproduced here** — run
+the 08-22 verdict is expected to say. **No ROI figures are reproduced here** — run
 `docker exec poly-poly-bot python scripts/rebaseline_ledger.py --era`, or
 `/pnl` and `/slice B`. That command prints both books, the combined figures,
 the persistence pair and the §7 bar in one screen.
@@ -969,3 +961,15 @@ write a derived ROI into this document. Point at `/pnl`, `/slice`, or
 `scripts/rebaseline_ledger.py --era`. Every hand-copied ROI in §9 went stale or
 was wrong at birth — including two written in the commit that first added this
 very rule. The machine-derived wallet counts held.
+
+---
+
+**Why this section carries almost no numbers.** §9 was written in one session
+and then failed eight consecutive verification rounds on the same defect: a
+hand-copied figure that was stale, mis-tallied, or wrong at birth — including
+two written into the very commit that added a rule against them. Every
+machine-derived figure held; every hand-copied one rotted, some within the
+hour. So the numbers live in the surfaces that compute them
+(`/pnl`, `/slice`, `/verdict`, `scripts/rebaseline_ledger.py --era`) and this
+file carries the reasoning, the decisions, and the commands. **If you are
+tempted to paste a number in here, paste the command instead.**

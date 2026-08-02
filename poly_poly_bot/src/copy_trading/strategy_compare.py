@@ -104,9 +104,9 @@ def _book_stats(rows: list[dict]) -> dict:
         "ideal_roi": round(ideal_roi, 4),
         "roi_net": round((pnl - cost) / spent, 4) if spent else 0.0,
         "ideal_roi_net": round((ideal - icost) / spent, 4) if spent else 0.0,
-        # Kept as a diagnostic only (how many rows carry a P1-7 stamp); the
-        # @net render no longer gates on it, because cost is now derived for
-        # every row including unstamped ones.
+        # INTENTIONALLY reads the raw stamp: a COUNT of stamped rows, kept as
+        # a diagnostic. Never summed into a rendered figure — the @net render
+        # no longer even gates on it, because cost derives for every row now.
         "cost_stamped": sum(1 for r in closed if float(r.get("ideal_cost_usd") or 0.0) > 0),
         "gifted": round(pnl - ideal, 2),
         "win_rate": round(wins / len(closed), 4) if closed else 0.0,

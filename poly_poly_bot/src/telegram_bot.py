@@ -632,6 +632,9 @@ def _cost_lines(paper_books: dict, floor) -> list:
     def _stamped(positions):
         closed = [p for p in positions if p.closed and (p.spent or 0) > 0]
         spent = sum(p.spent for p in closed)
+        # INTENTIONALLY reads the raw stamp: this COUNTS how many rows carry
+        # one, for the disclosure line. It is not summed into any rendered
+        # figure — every cost number derives on the fly (s-r7m3qk class fix).
         stamped = sum(1 for p in closed if (p.ideal_cost_usd or 0) > 0)
         return closed, spent, stamped
 
