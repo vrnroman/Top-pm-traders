@@ -919,11 +919,14 @@ def _setup_logging():
     "lived in" the 07-10 file (2026-07-16 RCA). Reuse the same rolling
     handler the BotLogger files use.
     """
-    from src.logger import _DailyRotatingFileHandler
+    from src.logger import _DailyRotatingFileHandler, SecretScrubFormatter
 
     os.makedirs(CONFIG.logs_dir, exist_ok=True)
 
-    fmt = logging.Formatter(
+    # Scrubs the COMPLETE rendered record, traceback included — a
+    # logger.exception around a Telegram-API failure renders the bot-token URL
+    # in the traceback tail, and filter-level scrubs never see exc_info.
+    fmt = SecretScrubFormatter(
         "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )

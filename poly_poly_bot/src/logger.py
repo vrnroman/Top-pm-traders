@@ -116,7 +116,8 @@ class ColorFormatter(logging.Formatter):
         color = COLORS.get(record.levelname, "")
         reset = COLORS["RESET"]
         gray = COLORS["GRAY"]
-        return f"{gray}{ts}{reset} {color}{level}{reset} {record.getMessage()}"
+        return scrub_secrets(
+            f"{gray}{ts}{reset} {color}{level}{reset} {record.getMessage()}")
 
 
 class PlainFormatter(logging.Formatter):
@@ -125,7 +126,7 @@ class PlainFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         level = record.levelname.ljust(5)
-        return f"{ts} {level} {record.getMessage()}"
+        return scrub_secrets(f"{ts} {level} {record.getMessage()}")
 
 
 class JsonFormatter(logging.Formatter):
@@ -138,7 +139,23 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname.lower(),
             "msg": record.getMessage(),
         }
-        return json.dumps(entry)
+        return scrub_secrets(json.dumps(entry))
+
+
+class SecretScrubFormatter(logging.Formatter):
+    """A stdlib Formatter that scrubs credentials from the COMPLETE rendered
+    record — message AND traceback.
+
+    ``record.exc_info`` is rendered by the Formatter *after* filters run, so a
+    filter-level scrub can never see it: a ``logger.exception`` around a failed
+    Telegram-API call renders the token URL in the traceback tail (the
+    command-dispatch ``logger.exception`` wraps ``_send`` → ``requests.post(
+    .../bot<TOKEN>/...)`` — manager DONE-gate r4). This class closes every
+    traceback path in one point; the filter stays as the early first layer.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        return scrub_secrets(super().format(record))
 
 
 _BOT_LOG_RE = re.compile(r"bot-(\d{4}-\d{2}-\d{2})\.log$")

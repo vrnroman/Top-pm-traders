@@ -60,6 +60,27 @@ def test_secret_scrub_filter_survives_broken_format():
     assert bot_logger.SecretScrubFilter().filter(rec) is True
 
 
+def test_formatters_scrub_traceback_tail_token():
+    """A logger.exception whose traceback carries the token URL (the
+    Telegram-API failure shape) must be redacted in the RENDERED output —
+    exc_info is rendered after filters, so only a Formatter-level scrub sees it."""
+    fake = "bot8725093690:" + "A" * 35
+    try:
+        raise ConnectionError(
+            f"Max retries exceeded with url: /{fake}/sendMessage")
+    except ConnectionError:
+        import sys
+        exc_info = sys.exc_info()
+    rec = logging.LogRecord(
+        "telegram", logging.ERROR, __file__, 1,
+        "poll error", (), exc_info)
+    out = bot_logger.SecretScrubFormatter(
+        "%(asctime)s [%(name)s] %(levelname)s: %(message)s").format(rec)
+    assert "AAAA" not in out
+    assert "bot***REDACTED" in out
+    assert "ConnectionError" in out  # traceback still renders, just redacted
+
+
 # --------------------------------------------------------------------------- #
 # Realized-pnl dedup guard (the 2026-07-30 double-write class)
 # --------------------------------------------------------------------------- #
