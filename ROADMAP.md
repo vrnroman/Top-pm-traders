@@ -680,8 +680,8 @@ or made unreadable, and arrive on 08-22 with the pivot's evidence in hand.
   WARNING+ now goes to both. *(If you grep prod logs, know that `bot-*.log` was
   blind to warnings before 2026-08-02.)*
 - **The go-live gate could bless real money on artifact-era evidence.**
-  `compute_stats` has no era parameter, so every blocking bar NOT labelled
-  "clean era" is all-time realized — the number P0-1 voided — while the honest
+  `compute_stats` has no era parameter, so every *realized* bar not labelled
+  "clean era" is all-time — the number P0-1 voided — while the honest
   checks need only a handful of clean settles and a 3-wallet correlation. New blocking bar:
   `COPY_GOLIVE_MIN_CLEAN_SETTLED` (default 30).
 - **The P1-6 evidence gate read dust fills** — the only aggregation in the repo
@@ -854,9 +854,12 @@ they already fail on paper-ROI, at-price-ROI and the promotion floor — so the
 Zero secrets in prod logs (no bot-token pattern, no 64-hex key, no setkey echo).
 
 **Still open from that pass, queued (not fixed):** the go-live
-`min_split_half_corr` bar has no min-wallets floor and is currently *passing* at
-`+0.45 (4w)` — the settled-count half of that hole was closed, this half was
-not. Direction is safe (the gate is strictly stricter and PREVIEW_MODE is on).
+`min_split_half_corr` bar's wallet floor is only 3 (`split_half_corr` defaults
+`min_wallets=3`, and `/golive` uses the default) — it is not unguarded, but 3-4
+wallets clears a `>= 0` bar about half the time under the null, and it has been
+seen *passing* at `+0.45 (4w)`. The settled-count half of that hole was closed,
+this half was not. Direction is safe (the gate is strictly stricter and
+PREVIEW_MODE is on). Same item as §9.7.1 — keep the two in step.
 
 ### 9.7 Go-live preconditions — check these before flipping PREVIEW_MODE=false
 
@@ -882,7 +885,8 @@ finding this section. If you edit them here, edit `_handle_golive` too.
 3. **The cost model bias (§9.2).** Modeled cost currently charges a round-trip
    spread against a book that redeems at par. Any go-live sizing computed off
    `@net` is using a number biased ~4-6pp too negative.
-4. **All-time vs clean-era.** Every bar NOT labelled "clean era" is all-time
-   realized; only `COPY_GOLIVE_MIN_CLEAN_SETTLED` and the two honest checks are
+4. **All-time vs clean-era.** Every *realized* bar not labelled "clean era" is
+   all-time (the unlabelled `active within Nd` bar is a recency check, not a
+   PnL one); only `COPY_GOLIVE_MIN_CLEAN_SETTLED` and the two honest checks are
    era-scoped. If the wallet's all-time record is much better than its clean-era
    record, the difference is the fill artifact, not skill.
