@@ -25,7 +25,8 @@ from typing import Optional
 
 from src.copy_trading import promotion_state
 from src.copy_trading.copy_cost import CostModel
-from src.copy_trading.copy_paper import drag_stats, fill_health_suspect
+from src.copy_trading.copy_paper import (
+    DUST_FILL_FRAC, drag_stats, fill_health_suspect)
 from src.copy_trading.pnl_unified import (
     DIVERGENCE_MIN_CLOSED, DIVERGENCE_SUSPECT_BPS)
 from src.copy_trading.promotion_gate import (
@@ -54,8 +55,21 @@ def _load_rows(path: str) -> list[dict]:
     return rows
 
 
+def _is_dust_row(r: dict) -> bool:
+    """Dict-shaped mirror of copy_paper.is_dust_fill (this module reads raw
+    JSONL rows, not PaperPosition objects)."""
+    tp = float(r.get("their_price") or 0.0)
+    ep = float(r.get("entry_price") or 0.0)
+    return tp > 0 and ep > 0 and ep < DUST_FILL_FRAC * tp
+
+
 def _book_stats(rows: list[dict]) -> dict:
-    closed = [r for r in rows if r.get("closed")]
+    # Dust-quarantined, like every other trust surface (report, pnl_unified,
+    # split_half_corr, ideal_roi_for, rebaseline._closed_clean). This was the
+    # last aggregation that did not exclude them, and it is the one whose
+    # ideal_roi_net section7_reading turns into a zero-crossing recommendation
+    # — so a single unbounded dust win could move the memo's own advice.
+    closed = [r for r in rows if r.get("closed") and not _is_dust_row(r)]
     open_rows = [r for r in rows if not r.get("closed")]
     pnl = sum(float(r.get("pnl") or 0.0) for r in closed)
     spent = sum(float(r.get("spent") or 0.0) for r in closed)

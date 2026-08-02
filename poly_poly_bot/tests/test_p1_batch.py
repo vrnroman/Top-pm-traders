@@ -630,3 +630,27 @@ def test_price_cache_bounded_during_deep_eval(monkeypatch):
     # unbounded: 3 fetches total (shared tokens served from cache for w2/w3).
     # bounded at 2: each wallet's loop-top clear forces a refetch -> 9.
     assert len(fetches) == 9
+
+
+def test_book_stats_quarantines_dust_fills():
+    """_book_stats was the last aggregation reading dust rows, and its
+    ideal_roi_net is what section7_reading turns into a zero-crossing
+    recommendation. A dust LOSS is capped at -1/row but a dust WIN is
+    unbounded, so one gifted row could flip the memo's own advice
+    (verifier r9, s-r7m3qk)."""
+    from src.copy_trading.strategy_compare import _book_stats
+
+    real = [{"closed": True, "won": False, "pnl": -10.0, "spent": 50.0,
+             "ideal_pnl": -10.0, "drag_bps": 0, "category": "sports",
+             "their_price": 0.60, "entry_price": 0.60} for _ in range(20)]
+    clean = _book_stats(list(real))
+    assert clean["ideal_roi"] < 0
+
+    # one pre-fix row that swept a stale 0.001 ask against their_price 0.62
+    dust = {"closed": True, "won": True, "pnl": 49_950.0, "spent": 50.0,
+            "ideal_pnl": 49_950.0, "drag_bps": -5000, "category": "sports",
+            "their_price": 0.62, "entry_price": 0.001}
+    with_dust = _book_stats(real + [dust])
+    assert with_dust["n_settled"] == 20, "dust row must not be counted"
+    assert with_dust["ideal_roi"] == clean["ideal_roi"]
+    assert with_dust["ideal_roi_net"] == clean["ideal_roi_net"]
