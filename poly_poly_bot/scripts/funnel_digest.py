@@ -90,7 +90,11 @@ def _extract_metrics(reason: str) -> dict:
     m = (re.search(r"net[ _]?pnl[^0-9+\-]*([+\-]?\$?[0-9,]+)", rl)
          or re.search(r"net\s+([+\-]\$?[0-9,]+)", rl))
     if m:
-        out["net_pnl"] = float(m.group(1).replace("$", "").replace(",", ""))
+        raw = m.group(1).replace("$", "").replace(",", "")
+        # reject prose sometimes carries an empty/currency-only amount
+        # ("net pnl -$,") — without a digit there is nothing to parse
+        if any(ch.isdigit() for ch in raw):
+            out["net_pnl"] = float(raw)
     return out
 
 

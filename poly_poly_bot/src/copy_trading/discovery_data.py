@@ -481,6 +481,21 @@ def evaluate_sweep(
         prune_cache(cache_dir, activity_ttl_s,
                     max_files=int(os.environ.get("WALLET_DISCOVERY_CACHE_MAX_FILES", "4000")))
 
+    # Bound the resolution cache the same way (s-log7q, 2026-08-02): rescache
+    # files are tiny (~4KB) and immutable, but unbounded — it doubled
+    # 578MB → 1.1GB in five days (~260k files, ~23k/day) on an 84%-full disk.
+    # Resolutions are facts, so a pruned file is never *wrong* to lose: if the
+    # market is ever queried again it costs one batched Gamma call to refetch.
+    # TTL drops files no sweep has touched in 7 days; the count cap is the hard
+    # backstop (120k ≈ ~0.5GB).
+    if cfg.res_cache_dir:
+        removed = prune_cache(
+            cfg.res_cache_dir,
+            ttl_s=float(os.environ.get("WALLET_DISCOVERY_RES_CACHE_TTL_DAYS", "7")) * 86400.0,
+            max_files=int(os.environ.get("WALLET_DISCOVERY_RES_CACHE_MAX_FILES", "120000")))
+        if removed:
+            logger.info("[DISCOVERY] rescache pruned: %d file(s) removed", removed)
+
     universe = build_universe(cfg.universe)
     for w in must_include:
         if w not in universe:

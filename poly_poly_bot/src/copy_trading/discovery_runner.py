@@ -1053,6 +1053,19 @@ class DiscoveryRunner:
                 self.run_once(stop=shutdown_event)
             except Exception:  # pragma: no cover - loop must survive any failure
                 logger.warning("[DISCOVERY] sweep failed; continuing", exc_info=True)
+            # Disk trajectory watch (s-log7q): once per sweep, edge-triggered.
+            # Lazily imported so a Telegram hiccup can never break the sweep.
+            try:
+                from src.copy_trading import disk_watch
+
+                def _tg(text: str) -> None:
+                    from src import telegram_bot
+                    telegram_bot.send_message(text)
+
+                disk_watch.check(os.path.dirname(self.state_path) or ".",
+                                 sender=_tg)
+            except Exception:  # pragma: no cover - watchdog must not break sweeps
+                logger.warning("[DISCOVERY] disk-watch failed; continuing")
             # Release the sweep's large transient heap before the multi-day
             # sleep, so RSS doesn't stay pinned at the peak the whole idle window.
             _release_freed_memory()

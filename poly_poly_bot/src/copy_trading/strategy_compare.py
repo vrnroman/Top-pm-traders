@@ -136,6 +136,123 @@ def _largest_gap_hours(rows: list[dict], era_start: float, now: float) -> float:
     return max((b - a) for a, b in zip(points, points[1:])) / 3600.0
 
 
+# --------------------------------------------------------------------------- #
+# Cost-slice decomposition (s-log7q, I4) — read-only, verdict-memo only
+# --------------------------------------------------------------------------- #
+
+_SLICE_MIN_N = 10          # thinner than this a slice is noise, not evidence
+
+
+def cost_slices(rows: list[dict]) -> dict:
+    """Where does the net cost drag live? Group closed rows by category and by
+    copy-size bucket, and for each slice compute the same trio the headline
+    carries: gross realized ROI, @price ROI, and @net (after the per-row modeled
+    gas + fee + category-spread stamps). The verdict memo needs this because a
+    book-level @net of −3% can hide slices that clear costs and slices that
+    never can — the post-verdict gate wiring (deferred to the new era) reads
+    exactly this table.
+    """
+    closed = [r for r in rows if r.get("closed")
+              and float(r.get("spent") or 0.0) > 0]
+
+    def _agg(group_rows: list[dict]) -> dict:
+        spent = sum(float(r.get("spent") or 0.0) for r in group_rows)
+        pnl = sum(float(r.get("pnl") or 0.0) for r in group_rows)
+        ideal = sum(float(r.get("ideal_pnl") or 0.0) for r in group_rows)
+        icost = sum(float(r.get("ideal_cost_usd") or 0.0) for r in group_rows)
+        return {"n": len(group_rows), "spent": round(spent, 2),
+                "roi": round(pnl / spent, 4) if spent else 0.0,
+                "ideal_roi": round(ideal / spent, 4) if spent else 0.0,
+                "ideal_roi_net": round((ideal - icost) / spent, 4) if spent else 0.0}
+
+    def _bucket(spent: float) -> str:
+        for hi in (10.0, 25.0, 50.0):
+            if spent < hi:
+                return f"<${hi:.0f}"
+        return "$50+"
+
+    by_cat: dict[str, list[dict]] = {}
+    by_size: dict[str, list[dict]] = {}
+    for r in closed:
+        by_cat.setdefault(str(r.get("category") or "?"), []).append(r)
+        by_size.setdefault(_bucket(float(r.get("spent") or 0.0)), []).append(r)
+    return {
+        "by_category": {k: _agg(v) for k, v in by_cat.items()
+                        if len(v) >= _SLICE_MIN_N},
+        "by_size": {k: _agg(v) for k, v in by_size.items()
+                    if len(v) >= _SLICE_MIN_N},
+    }
+
+
+def section7_reading(cmp: dict) -> dict:
+    """The mechanical ROADMAP §7 reading, posted with the verdict memo: is the
+    copy-thesis falsified, and what does that imply. NO auto-execution — the
+    memo recommends, the owner acts.
+
+    Kill bar (§7): clean-era split-half wallet corr ≤ 0 across
+    ≥FALSIFY_MIN_WALLETS wallets (each n≥FALSIFY_MIN_N) → falsified. Below the
+    wallet bar the era is simply too young to kill anything.
+    """
+    out = {}
+    for key in ("a", "b"):
+        era = cmp["persistence"][key].get("era")
+        if not era or era.get("n") is None:
+            out[key] = {"status": "no-era-data", "corr": None, "wallets": 0}
+            continue
+        corr = era.get("realized")
+        wallets = era.get("n") or 0
+        if corr is None:
+            status = "inconclusive (corr undefined)"
+        elif wallets < FALSIFY_MIN_WALLETS:
+            status = f"inconclusive ({wallets}w < {FALSIFY_MIN_WALLETS}w bar)"
+        elif corr <= 0:
+            status = "FALSIFIED"
+        else:
+            status = "alive"
+        out[key] = {"status": status, "corr": corr, "wallets": wallets}
+    b = cmp["b"]
+    rec_bits = []
+    if out["b"]["status"] == "FALSIFIED":
+        rec_bits.append("B fails the §7 bar → retire the copy-thesis books")
+    if b.get("ideal_roi_net") is not None and b.get("n_settled"):
+        if b["ideal_roi_net"] <= 0:
+            rec_bits.append(
+                f"B @net {b['ideal_roi_net'] * 100:+.1f}% does not clear modeled "
+                "costs → hold PREVIEW; go-live floor stays shut")
+        else:
+            rec_bits.append(
+                f"B @net {b['ideal_roi_net'] * 100:+.1f}% clears modeled costs "
+                "→ go-live floor recalibration is on the table")
+    if not rec_bits:
+        rec_bits.append("evidence incomplete — extend the era before deciding")
+    out["recommendation"] = "; ".join(rec_bits)
+    return out
+
+
+def _fmt_reading(reading: dict) -> list:
+    lines = ["§7 READING (mechanical, no auto-execution):"]
+    for key, label in (("a", "A"), ("b", "B")):
+        r = reading[key]
+        corr = f"{r['corr']:+.2f}" if r.get("corr") is not None else "n/a"
+        lines.append(f"  {label}: {r['status']} (corr {corr}, {r['wallets']}w)")
+    lines.append(f"  → {reading['recommendation']}")
+    return lines
+
+
+def _fmt_slices(title: str, slices: dict) -> list:
+    lines = []
+    if not slices:
+        return lines
+    lines.append(title)
+    for name, s in sorted(slices.items(),
+                          key=lambda kv: kv[1]["ideal_roi_net"]):
+        lines.append(
+            f"  {name:<14} n={s['n']:>3}  realized {s['roi'] * 100:+.1f}%  "
+            f"@price {s['ideal_roi'] * 100:+.1f}%  "
+            f"@net {s['ideal_roi_net'] * 100:+.1f}%")
+    return lines
+
+
 def compare(
     a_ledger_path: str,
     b_ledger_path: str,
@@ -240,7 +357,7 @@ def compare(
               "era": (_persist_corr(b_rows) if era_floor else None)},
     }
 
-    return {
+    result = {
         "now": now,
         "era_start": era_start,
         "era_floor": era_floor,
@@ -252,7 +369,11 @@ def compare(
         "persistence": persistence,
         "gov_a": _gov(""), "gov_b": _gov("b"),
         "daily_a": _daily(a_rows_era), "daily_b": _daily(b_rows),
+        "b_cost_slices": cost_slices(b_rows),
     }
+    # The §7 reading reads the finished comparison (persistence + B stats).
+    result["section7"] = section7_reading(result)
+    return result
 
 
 def _fmt_book(name: str, s: dict) -> str:
@@ -358,6 +479,19 @@ def format_verdict(cmp: dict) -> str:
     out.append("  " + _fmt_book("A all-time", cmp["a_all_time"]) + "  [witness]")
     out.append("")
     out.extend(_persistence_lines(cmp))
+    if cmp.get("section7"):
+        out.append("")
+        out.extend(_fmt_reading(cmp["section7"]))
+    slices = cmp.get("b_cost_slices") or {}
+    slice_lines = (_fmt_slices("B cost slices — by category (net drag first):",
+                               slices.get("by_category") or {})
+                   + _fmt_slices("B cost slices — by copy size:",
+                                 slices.get("by_size") or {}))
+    if slice_lines:
+        out.append("")
+        out.append("WHERE THE COST DRAG LIVES (read-only; post-era gate wiring "
+                   "reads this table):")
+        out.extend(slice_lines)
     out.append("")
     out.append(f"ROUTING TABLE (per-wallet, n>={MIN_WALLET_N} to route):")
     for r in cmp["routing"]:

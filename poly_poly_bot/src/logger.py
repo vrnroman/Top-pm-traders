@@ -61,6 +61,40 @@ class _SignalFilter(logging.Filter):
         return any(msg.startswith(p) for p in _SIGNAL_PREFIXES)
 
 
+# Credentials that must never reach a log file, scrubbed from every record
+# before any handler writes it. The 2026-07-16→25 incident: urllib3 DEBUG was
+# on for a week and every Telegram long-poll request line carried the live bot
+# token (".../bot<digits>:<secret>/getUpdates") into bot-*.log — ~55k copies.
+_TELEGRAM_TOKEN_RE = re.compile(r"bot\d{6,12}:[A-Za-z0-9_-]{30,}")
+
+
+def scrub_secrets(text: str) -> str:
+    """Replace credential-shaped substrings with a redaction marker."""
+    return _TELEGRAM_TOKEN_RE.sub("bot***REDACTED", text)
+
+
+class SecretScrubFilter(logging.Filter):
+    """Rewrite credentials out of a record before handlers format it.
+
+    Attach to HANDLERS, not loggers: logger filters never see propagated
+    records, so a third-party library (urllib3) logging through the root
+    handlers would bypass a logger-level scrub. Renders the message once and
+    pins the scrubbed form (``args=()``) so downstream formatters can't
+    re-interpolate the original arguments.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:  # a broken format must not silence the record
+            return True
+        scrubbed = scrub_secrets(msg)
+        if scrubbed != msg:
+            record.msg = scrubbed
+            record.args = ()
+        return True
+
+
 class _OperationalFilter(logging.Filter):
     """Pass only non-signal records to the operational (debug) file."""
 
@@ -232,6 +266,7 @@ class BotLogger:
             console.setFormatter(JsonFormatter())
         else:
             console.setFormatter(ColorFormatter())
+        console.addFilter(SecretScrubFilter())
         self._logger.addHandler(console)
 
         # -- Signals file: deal/alert events only, kept forever --
@@ -241,6 +276,7 @@ class BotLogger:
         sig_handler.setLevel(logging.DEBUG)
         sig_handler.setFormatter(formatter)
         sig_handler.addFilter(_SignalFilter())
+        sig_handler.addFilter(SecretScrubFilter())
         self._logger.addHandler(sig_handler)
 
         # -- Operational file: everything else, auto-purged --
@@ -253,6 +289,7 @@ class BotLogger:
         ops_handler.setLevel(logging.INFO)
         ops_handler.setFormatter(formatter)
         ops_handler.addFilter(_OperationalFilter())
+        ops_handler.addFilter(SecretScrubFilter())
         self._logger.addHandler(ops_handler)
 
         # Purge old operational logs on startup, then on every midnight rollover.

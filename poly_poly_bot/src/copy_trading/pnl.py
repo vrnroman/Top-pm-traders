@@ -38,8 +38,31 @@ def realized_pnl_path() -> str:
     return os.path.join(CONFIG.data_dir, "realized-pnl.jsonl")
 
 
+def _settled_resolution_keys(rows: list[dict]) -> set[tuple[str, str]]:
+    """(condition_id, token_id) of every resolution exit already in the ledger."""
+    return {(str(r.get("condition_id") or ""), str(r.get("token_id") or ""))
+            for r in rows if r.get("exit") == "resolution"}
+
+
 def append_realized(entry: dict) -> None:
-    """Append a realized-P&L row. Best-effort: never raises into the caller."""
+    """Append a realized-P&L row. Best-effort: never raises into the caller.
+
+    A resolution exit is a one-per-position fact: a resolved market can never
+    be re-bought, so (condition_id, token_id) + ``exit=resolution`` is a unique
+    settled identity. The 2026-07-30 incident: inventory was re-populated with
+    61 already-realized legacy positions and the preview resolver re-booked the
+    whole batch — every all-time sum over the file double-counted −$575 until
+    scrubbed. Guard here (the single funnel every writer goes through) rather
+    than in each caller. Non-resolution exits (live sells) may legitimately
+    repeat a token, so they are never deduped.
+    """
+    if entry.get("exit") == "resolution":
+        key = (str(entry.get("condition_id") or ""), str(entry.get("token_id") or ""))
+        if key in _settled_resolution_keys(load_realized()):
+            logger.warning(
+                f"[pnl] dedup: resolution exit already booked for "
+                f"{key[0][:12]}…/{key[1][:12]}… — skipping duplicate append")
+            return
     path = realized_pnl_path()
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

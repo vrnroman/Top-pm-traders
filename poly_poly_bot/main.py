@@ -774,7 +774,21 @@ def _ab_race_reporter_loop():
             cmp_ = compare(CONFIG.copy_paper_ledger, CONFIG.copy_paper_b_ledger,
                            b_slippage_bps=CONFIG.copy_paper_b_slippage_bps,
                            era_floor=era_floor)
-            sent_snap = telegram_bot.send_message(format_snapshot(cmp_))
+            # Ledger-integrity witness (s-log7q): the snapshot renders sums of
+            # these files — say on the watched channel if they carry duplicate
+            # settled rows (the 2026-07-30 double-write class). Silent when clean.
+            from src.copy_trading import ledger_integrity
+            findings = ledger_integrity.scan(
+                realized_path=os.path.join(CONFIG.data_dir, "realized-pnl.jsonl"),
+                a_ledger=CONFIG.copy_paper_ledger,
+                b_ledger=CONFIG.copy_paper_b_ledger)
+            integrity_line = ledger_integrity.format_findings(findings)
+            if integrity_line:
+                logger.warning(f"[AB-RACE] {integrity_line}")
+            snapshot_msg = format_snapshot(cmp_)
+            if integrity_line:
+                snapshot_msg += "\n" + integrity_line
+            sent_snap = telegram_bot.send_message(snapshot_msg)
             # Log every reporter post — Telegram is the only other trace, and an
             # unauditable daily job reads as "never ran" from the logs.
             logger.info(
@@ -912,6 +926,12 @@ def _setup_logging():
     fh.setLevel(logging.DEBUG)
     fh.addFilter(lambda rec: not (rec.name == "poly_poly_bot"
                                   or rec.name.startswith("poly_poly_bot.")))
+    # Third-party records (urllib3 request lines) can carry credentials in
+    # URLs — the 2026-07-16→25 Telegram-token leak walked in through exactly
+    # this handler. Scrub before anything is written.
+    from src.logger import SecretScrubFilter
+    fh.addFilter(SecretScrubFilter())
+    ch.addFilter(SecretScrubFilter())
 
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)

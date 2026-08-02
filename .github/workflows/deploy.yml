@@ -114,6 +114,10 @@ jobs:
           # LLM wallet gate (Strategy 1c) — activate it + its Langfuse tracing.
           ensure_env WALLET_DISCOVERY_LLM_REVIEW_ENABLED true
           ensure_env LANGFUSE_HOST https://jp.cloud.langfuse.com
+          # Clean-era §7 verdict clock aligned to the owner's ~08-22 plan
+          # (s-log7q, 2026-08-02; default 7d would have fired the one-shot memo
+          # 20 days early). Inert once the memo fires — verdict_sent flips.
+          ensure_env AB_RACE_VERDICT_DAYS 27
           secret_env CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
           secret_env LANGFUSE_PUBLIC_KEY "$LANGFUSE_PUBLIC_KEY"
           secret_env LANGFUSE_SECRET_KEY "$LANGFUSE_SECRET_KEY"
