@@ -260,7 +260,10 @@ def prune_cache(cache_dir: str | None, ttl_s: float, max_files: int | None = Non
             pass
 
     fresh.sort()  # oldest first — evicted first by both bounds
-    over_count = (len(fresh) - max_files) if max_files else 0
+    # `is not None` here too: this was the surviving half of the same bug class
+    # the byte budget just had — with truthiness, `max_files=0` would mean "no
+    # cap" instead of "keep nothing".
+    over_count = (len(fresh) - max_files) if max_files is not None else 0
     idx = 0
     for mtime, path, size in fresh:
         # `is not None`, NOT truthiness: a computed budget of 0 means "evict
@@ -545,8 +548,8 @@ def _report_incomplete_fetches() -> None:
     A throttled sweep silently scores wallets on partial history; that is a
     data-quality fact the funnel line should carry, not something to discover
     later from an empty cache file. WARNING (not INFO) because it degrades the
-    inputs the LLM gate and the skill ranking read — note WARNING+ lands in
-    ``signals-*.log``, not ``bot-*.log`` (src/logger.py:104)."""
+    inputs the LLM gate and the skill ranking read. WARNING+ lands in BOTH
+    ``bot-*.log`` and ``signals-*.log`` (src/logger.py ``_OperationalFilter``)."""
     try:
         n = len(_activity_fetch_failures)
         if n:

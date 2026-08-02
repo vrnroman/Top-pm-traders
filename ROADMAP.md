@@ -825,7 +825,7 @@ free space reaches the reserve; `0` is falsy, and the eviction test read that as
 `min(ceiling, 0)` discarded the explicit 5G/1.5G ceilings too. It was ~0.64G of
 free space from firing in prod. Compounding it, the same commit raised the
 rescache count cap 120k → 400k, which is +1.1G of growth headroom in precisely
-the OFF state. Fixed in `9e4f2b7`: the test is `max_bytes is not None`, and the
+the OFF state. Fixed in `d39440d`: the test is `max_bytes is not None`, and the
 allowance carries a floor (default 0.5G, injectable) so real pressure shrinks
 the cache to a working set instead of either ignoring the budget or emptying it
 and forcing a full refetch into an already-429-ing API.
@@ -847,3 +847,28 @@ Zero secrets in prod logs (no bot-token pattern, no 64-hex key, no setkey echo).
 `min_split_half_corr` bar has no min-wallets floor and is currently *passing* at
 `+0.45 (4w)` — the settled-count half of that hole was closed, this half was
 not. Direction is safe (the gate is strictly stricter and PREVIEW_MODE is on).
+
+### 9.7 Go-live preconditions — check these before flipping PREVIEW_MODE=false
+
+The manual flip is the one true one-way door. `/golive` renders the mechanical
+gate; this list is what the gate does **not** yet check and a human must.
+
+1. **`min_split_half_corr` has no minimum-wallet floor.** It is currently
+   *passing* at `+0.45 (4w)`. A Pearson correlation over 4 points clears a
+   `>= 0` bar about half the time under the null, so this check contributes
+   almost no discrimination at the present book size. Read the wallet count
+   next to it, not just the sign. (Round-1 verifier finding, s-r7m3qk;
+   deliberately not code-fixed because the gate is strictly stricter with it
+   than without and PREVIEW_MODE is on.)
+2. **The clob credential path.** `py_clob_client` logs
+   `request error status=400 url=/auth/api-key` a few times a day. Benign in
+   PREVIEW (known create-or-derive fallback, self-heals), but it is the
+   credential derivation a real order depends on. Confirm a successful API-key
+   derivation in the logs before the flip, not after.
+3. **The cost model bias (§9.2).** Modeled cost currently charges a round-trip
+   spread against a book that redeems at par. Any go-live sizing computed off
+   `@net` is using a number biased ~4-6pp too negative.
+4. **All-time vs clean-era.** Three of the six mechanical bars are all-time
+   realized; only `COPY_GOLIVE_MIN_CLEAN_SETTLED` and the two honest checks are
+   era-scoped. If the wallet's all-time record is much better than its clean-era
+   record, the difference is the fill artifact, not skill.
