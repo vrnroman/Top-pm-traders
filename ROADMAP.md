@@ -591,7 +591,7 @@ cycle repeats with the next small sample.
 - **It has gone network-dead before** (metadata server unreachable → SSH fails
   with "failed to connect to port 22"). `gcloud compute instances reset` recovers
   it; the container auto-restarts (`--restart unless-stopped`).
-- **Ship workflow** (see `CLAUDE.md`): full test suite must pass (363 tests,
+- **Ship workflow** (see `CLAUDE.md`): full test suite must pass (1021 tests,
   `cd poly_poly_bot && .venv/bin/python -m pytest tests/ -q`) → commit → push to
   `main` → GitHub Actions builds amd64 and pushes to Artifact Registry, VM pulls.
   Watch with `gh run watch <id>`. **Never** run `bash deploy.sh` on the Mac — it
@@ -622,3 +622,157 @@ Production env overrides (`docker exec poly-poly-bot env`): `PREVIEW_MODE=true`,
 `WALLET_DISCOVERY_ENABLED=true`, `COPY_PAPER_ENABLED=true`,
 `WALLET_DISCOVERY_LLM_REVIEW_ENABLED=true`, `BOT_LOG_RETENTION_DAYS=20`,
 `LANGFUSE_*`. Everything else runs on `config.py` defaults.
+
+---
+
+## 9. Inspection s-r7m3qk — 2026-08-02 (second pass over the health batch)
+
+A full re-read of the four `feat/fix(health)` commits plus the money path,
+against the **live VM**, not just the code. Twelve findings confirmed; six
+shipped the same day (`7f5feb6`, `5e7f18b`, `41810a1`; 1021 tests). The rest
+are queued below with evidence so nobody re-derives them.
+
+**Framing for the next session:** protect the 08-22 verdict from being voided
+or made unreadable, and arrive on 08-22 with the pivot's evidence in hand.
+
+### 9.1 SHIPPED
+
+- **The §7 verdict memo could never have been delivered.** `_bucket` renders a
+  literal `<$25`; the memo is `parse_mode="HTML"`. Verified against the live
+  Telegram API: `400 can't parse entities: Unsupported start tag "$25"`, and
+  `<pre>` does not protect it. `main.py` only sets `verdict_sent` when
+  `_send_chunked` returns True, so on 2026-08-22 the memo would have failed,
+  re-fired every morning forever, and `/verdict` would never have armed.
+  Labels are now `under $25`; a test asserts no Telegram-bound line contains
+  `<`; and `send_message` retries once as plain text on a parse error so no
+  future market-derived string can cost a message.
+- **`/setkey` echoed the private key** for every input shape except the one the
+  redaction regex matched (bare key with no `0x` — which `config_validators`
+  accepts; `/setkey@botname`; a typo'd `CONFIRM`). Arguments are now dropped
+  wholesale. **No key or token was found in any current log or data file.**
+- **Disk ~1 day from full.** disk-watch TRIPPED 11:41 UTC: `free 4.1G shrinking
+  1521MB/day`. `prune_cache` bounded wcache by FILE COUNT; entry size is the
+  wallet's history length, so 4000 files had grown to **8.2G of a 20G disk**.
+  Now budgeted in bytes and *derived from free space* via a reserve, rather
+  than another hand-picked constant (that has gone stale twice: 37GB in P2,
+  8.2GB now). Also pruned at sweep END. rescache count cap 120k → 400k: at
+  ~90k writes/sweep an entry survived ~1.3 sweeps, so it was mostly paying to
+  write files it deleted before reuse.
+- **A failed `/activity` fetch was cached as truth.** `_get` returns `None`
+  after four attempts; the caller could not tell that from "no more trades" and
+  wrote the empty/truncated list to cache for the full 24h TTL. 18 wallets held
+  a cached `[]`. A genuine `[]` is still cached; an incomplete fetch never is,
+  and the sweep now WARNs with a count (the discovery path previously logged
+  **nothing at all** on a failed fetch).
+- **`bot-*.log` could not report a problem.** `_OperationalFilter` sent WARNING+
+  *exclusively* to `signals-*.log`. Grepping the operational log returned a
+  clean sheet while 261 warnings/day and a tripped disk alarm sat elsewhere.
+  WARNING+ now goes to both. *(If you grep prod logs, know that `bot-*.log` was
+  blind to warnings before 2026-08-02.)*
+- **The go-live gate could bless real money on artifact-era evidence.**
+  `compute_stats` has no era parameter, so 3 of 6 blocking bars are all-time
+  realized — the number P0-1 voided — while the two honest checks need only 5
+  clean settles and a 3-wallet correlation. New blocking bar:
+  `COPY_GOLIVE_MIN_CLEAN_SETTLED` (default 30).
+- **The P1-6 evidence gate read dust fills** — the only aggregation in the repo
+  that didn't. A dust loss is capped at −1/row but a dust **win is unbounded**:
+  one row that swept a stale 0.001 ask returns +$49,950 on $50 and can drag a
+  whole losing category positive, so the block never fires. One-directional:
+  it can only push toward admitting.
+- **§7 readability witness.** Nothing watched whether ≥15 wallets at n≥10 would
+  actually exist on 08-22. A pre-registered falsification that quietly never
+  resolves is worse than either outcome. Now on the daily snapshot.
+
+### 9.2 QUEUED — verdict-integrity, do before 08-22
+
+- **P1-7 charges a ROUND-TRIP spread against a book that redeems at par.**
+  `copy_cost.py` assumes "sell or redeem at the bid", but `copy_paper.realize()`
+  sets `payout = shares` — a winning share settles at $1.00, no spread. The
+  exit half is only actually paid on `realize_exit` rows, yet `ideal_cost_usd`
+  charges the full round trip on **every** row at open. The `@net` numbers the
+  08-22 verdict quotes are biased negative by ~4–6pp; combined **@net −13.3%
+  would be roughly −8%** under entry-only cost. Direction of the verdict does
+  not flip, but the magnitude will be quoted. **Interim: read the existing
+  ×0.5 sensitivity column as the primary, not ×1.**
+- **`at-their-price` ROI is not fill-model-independent.** `ideal_pnl` uses
+  `their_price` but every consumer divides by `spent = shares·entry_price`, so
+  `reported = true × (their_price/entry_price)`. Clean era is bounded by the
+  fill gate (±1.5%) so the §7 sign is safe; **all-time** figures are not — a
+  0.5× legacy fill doubles the reported number, and those rows were kept
+  deliberately "to show their honest economics". Fix: accumulate
+  `ideal_cost_basis = Σ shares·their_price` and divide by that.
+- **`/verdict recalibrate` does not do what it says.** It writes an *absolute*
+  `AB_RACE_VERDICT_DAYS=30` against a fixed `era_start`, so 27→30 is **+3 days,
+  not +30** (the UI says "extend era 30d"). A second recalibrate is a no-op
+  that also clears `verdict_sent`, so the memo re-posts the next morning — the
+  "extend" knob becomes a daily-memo loop. It also immediately re-disarms
+  `/verdict` itself, with no way back.
+- **Autopsy fingerprints never expire.** `seen_fps[fp] = now` is never pruned,
+  so a fixed-then-recurring anomaly is silent **forever** — precisely the
+  −$575 double-write class the module exists to catch. Also `_save_state` sits
+  inside the broad `except Exception: pass`, so one raise re-alerts everything
+  daily and records no size baseline.
+- **Admit-cap wallets are admitted permanently unvetted.** Past
+  `llm_review_top_n` (20) a wallet is recorded `admit-cap, admitted=True` with
+  **no queue entry**; next sweep it is in `prev_on` and never gated again. Cap
+  is 500, so up to 480 unvetted admits in one sweep. `_maybe_alert_gate_failopen`
+  excludes admit-cap from both terms, so a sweep that gates 20 and admits 52
+  ungated raises **no alert**. Note: the P1 watch item "if the admit-cap
+  backlog is still growing" **cannot be satisfied — there is no backlog.**
+- **`paper_proven_wallets` is all-time realized**, so artifact-era gift fills
+  grant the highest-privilege discovery path (force-include, bypasses tail-ratio
+  / drawdown / scooper / category gates, ranks first under cap pressure). Five
+  pre-fix gifted settles at any positive ROI is enough.
+
+### 9.3 QUEUED — lower
+
+- `disk_watch.check` skips `_save_state` when the Telegram send raises, so a
+  persistently broken Telegram degrades the trajectory alarm to floor-only.
+- `simulate_copy_fill` **breaks** the book walk on a zero-size level instead of
+  **continuing**, truncating the fill (the sub-floor case correctly continues).
+- `won` means "the outcome settled true" in `realize()` but "we made money" in
+  `realize_exit()`; consumers (hit_rate, Wilson LB, the demote hold) cannot tell
+  them apart, so many small profitable exits plus a few large resolution losses
+  can dodge the blacklist.
+- `outcome_index` defaults to 0 with no cross-check against `token_id`; a feed
+  row missing `outcomeIndex` on a NO-side buy books an inverted result.
+- `telegram_bot._stamped` / `_sensitivity` and `strategy_compare._book_stats`
+  (all-time path) skip the dust quarantine.
+- `split_half_corr` rounds before the floor comparison: a true `-5e-5` becomes
+  `-0.0`, and `-0.0 >= 0.0` is True. **Deliberately not fixed** — every
+  sign-preserving fix distorts the displayed magnitude by more than the 1e-5 it
+  corrects. Revisit only if the floor moves off zero.
+- P1-6's "can never deadlock" guarantee is silently coupled to
+  `COPY_PAPER_CATEGORY_GATE`: with the gate off, `stamped` is permanently
+  False, removing the sole re-admission channel. The price-bucket map is also
+  built book-wide across all categories, so once each of the 5 buckets clears
+  n=15 an unstamped wallet is blocked in every price band.
+
+### 9.4 The §7 decision, written before the number exists
+
+Agreed now so the result cannot pick the rule. `/verdict` offers three arms;
+until today only two had content.
+
+- **RETIRE** — B's clean-era split-half corr ≤ 0 with ≥15 wallets at n≥10,
+  **and** combined at-their-price ROI < 0. This is §7 met. Stop tuning
+  wallet-copying. The P0–P2 harness (honest measurement, cost model, paper
+  books, era scoping) is generic and is what a rules-based strategy would
+  reuse — retiring the thesis is not discarding the work.
+- **HOLD** — corr > 0 **and** at-price ROI ≥ 0. The thesis survives; nothing
+  changes; re-read at the next boundary.
+- **RECALIBRATE** — the mixed case (a marginal miss: corr within ±0.05 of zero,
+  or ROI negative but within one standard error). Concretely it means: extend
+  the era by a *relative* 30 days (see the bug in §9.2 — the current knob adds
+  3), and apply the cut that was deliberately **not** made mid-experiment:
+  drop sports pool-wide. Sports is ~333 of 415 copies and loses in both books;
+  cutting it *before* 08-22 would remove ~80% of copy volume and near-guarantee
+  missing the ≥15-wallet floor, i.e. an unreadable verdict — strictly worse
+  than either outcome. So it is the content of the recalibrate arm, not a
+  change to make now.
+
+**Frozen until 08-22** (anything that changes what the verdict measures): the
+sports cut, any new live book, any promotion or copy-gate threshold change, any
+ranking change that alters which trades enter the sample. Plumbing fixes
+(§9.1/§9.2) are not in this category — a silently truncating fetch is a defect,
+not a design parameter, and leaving it running would hand the negative result
+an obvious alternative explanation.
