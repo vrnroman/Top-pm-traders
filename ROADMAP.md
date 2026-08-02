@@ -776,3 +776,42 @@ ranking change that alters which trades enter the sample. Plumbing fixes
 (§9.1/§9.2) are not in this category — a silently truncating fetch is a defect,
 not a design parameter, and leaving it running would hand the negative result
 an obvious alternative explanation.
+
+### 9.5 Fade-the-hot-wallet — first read (2026-08-02, read-only)
+
+The most-trusted finding (§1.3) is that a wallet looking good is slightly
+*negative* information. Nobody had tried inverting it on purpose. Computed on
+the live ledgers, at-their-price (fill-model independent), dust excluded,
+wallets with n≥10 settled, split chronologically in half:
+
+```
+Book A (11 wallets)   follow-HOT (1st half +): 6 wal, $1,996 -> 2nd half  -7.03%
+                      follow-COLD (1st half -): 5 wal, $1,026 -> 2nd half  +0.79%
+                      fade edge (cold - hot) = +7.82 pp
+Book B (33 wallets)   follow-HOT: 24 wal, $6,402 -> 2nd half  -2.05%
+                      follow-COLD: 9 wal, $3,211 -> 2nd half  +6.70%
+                      fade edge (cold - hot) = +8.75 pp
+```
+
+Directionally consistent across both books and both signs. **But do not read
+this as an edge yet**, for two reasons that must be settled first:
+
+1. **This is exactly what regression to the mean produces under a ZERO-signal
+   null.** Selecting on "first half was positive" selects partly on noise, and
+   noise regresses. A fade edge of this shape is the *expected* artifact, not
+   evidence against it. It needs a null model (shuffle the halves, or bootstrap
+   the wallet assignment) before it means anything.
+2. **The magnitude does not clear modeled costs.** Cold-wallet second halves are
+   +0.79% (A) and +6.70% (B) at-their-price gross. Modeled round-trip cost is
+   ~13% (~6–8% if the entry-only correction in §9.2 is right). Only book B is
+   even in the conversation, on $3.2k of capital and 9 wallets.
+
+It is also **not independent evidence** — it is a re-read of the same rows §1.3
+already reported. Treat it as a pre-registered hypothesis for after 08-22, with
+its own kill bar written before it is tested, not as a reason to soften the §7
+verdict.
+
+**One useful side-fact:** book B has **33 wallets at n≥10 all-time**, comfortably
+over the §7 bar of 15 — but §7 counts *clean-era* wallets, and the clean era is
+8 days old. That gap is precisely what the new readability witness (§9.1) now
+reports every morning.
