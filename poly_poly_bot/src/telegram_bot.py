@@ -1477,9 +1477,9 @@ def _handle_golive(text: str) -> None:
     # list nobody reads at the one-way door (verifier r3, s-r7m3qk).
     lines.append(
         "\n<b>Before flipping PREVIEW_MODE=false — the gate does NOT check these:</b>\n"
-        "• book persistence has <b>no minimum-wallet floor</b>; read the (Nw) "
-        "count next to it — a correlation over 3–4 wallets clears ≥0 about half "
-        "the time by chance\n"
+        "• book persistence's wallet floor is only <b>3</b>; read the (Nw) count "
+        "next to it — a correlation over 3–4 wallets clears ≥0 about half the "
+        "time by chance\n"
         "• confirm a successful CLOB api-key derivation in the logs first (the "
         "400s are benign in PREVIEW, but that is the path a real order needs)\n"
         "• modeled @net cost is biased ~4–6pp too negative (round-trip spread "

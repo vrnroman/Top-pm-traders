@@ -597,18 +597,20 @@ cycle repeats with the next small sample.
   `main` → GitHub Actions builds amd64 and pushes to Artifact Registry, VM pulls.
   Watch with `gh run watch <id>`. **Never** run `bash deploy.sh` on the Mac — it
   is arm64 and has no Docker.
-- **Report test counts as numbers** ("363 passed"), never "all tests pass".
+- **Report the test count the run printed**, never "all tests pass" without a
+  number — and never copy that count into this file (see `CLAUDE.md`).
 
 ### Key config anchors
 
-> **STALE — verified 2026-08-02 (s-r7m3qk):** 11 of the 12 line references
-> below were already wrong before this session (they predate several
-> refactors). Treat the *setting names* as real and the `file:line` column as
-> a hint only; `grep` the name rather than trusting the line number.
+> **STALE — verified 2026-08-02 (s-r7m3qk):** most of the `file:line`
+> references below no longer resolve (they predate several refactors), and at
+> least one `Current` value is also out of date. Treat only the *setting
+> names* as reliable: `grep` the name. Do not read a value out of this table
+> without checking it in the code.
 
 | Setting | Location | Current |
 |---|---|---|
-| `MIN_FILL_FRAC` | `copy_paper.py:37` | `0.5` ← **P0-1** |
+| `MIN_FILL_FRAC` | `copy_paper.py` | `0.97` (was `0.5`; P0-1 shipped) |
 | fill gate (one-sided) | `copy_paper.py:586` | `> fill_gate_bps` ← **P0-1** |
 | `ideal_pnl` computation | `copy_paper.py:153` | — |
 | `COPY_PAPER_FILL_GATE_BPS` | `config.py:217` | `150` |
@@ -678,9 +680,9 @@ or made unreadable, and arrive on 08-22 with the pivot's evidence in hand.
   WARNING+ now goes to both. *(If you grep prod logs, know that `bot-*.log` was
   blind to warnings before 2026-08-02.)*
 - **The go-live gate could bless real money on artifact-era evidence.**
-  `compute_stats` has no era parameter, so 3 of 6 blocking bars are all-time
-  realized — the number P0-1 voided — while the two honest checks need only 5
-  clean settles and a 3-wallet correlation. New blocking bar:
+  `compute_stats` has no era parameter, so every blocking bar NOT labelled
+  "clean era" is all-time realized — the number P0-1 voided — while the honest
+  checks need only a handful of clean settles and a 3-wallet correlation. New blocking bar:
   `COPY_GOLIVE_MIN_CLEAN_SETTLED` (default 30).
 - **The P1-6 evidence gate read dust fills** — the only aggregation in the repo
   that didn't. A dust loss is capped at −1/row but a dust **win is unbounded**:
@@ -865,11 +867,11 @@ gate; this list is what the gate does **not** yet check and a human must.
 decision carries them at the point it is made rather than depending on anyone
 finding this section. If you edit them here, edit `_handle_golive` too.
 
-1. **`min_split_half_corr` has no minimum-wallet floor.** It is currently
-   *passing* at `+0.45 (4w)`. A Pearson correlation over 4 points clears a
-   `>= 0` bar about half the time under the null, so this check contributes
-   almost no discrimination at the present book size. Read the wallet count
-   next to it, not just the sign. (Round-1 verifier finding, s-r7m3qk;
+1. **`min_split_half_corr`'s wallet floor is only 3.** `split_half_corr`
+   enforces `min_wallets=3`, so the check is not unguarded — but a Pearson
+   correlation over 3-4 points clears a `>= 0` bar about half the time under
+   the null, so it contributes almost no discrimination at the present book
+   size. Read the `(Nw)` count next to it, not just the sign. (Round-1 verifier finding, s-r7m3qk;
    deliberately not code-fixed because the gate is strictly stricter with it
    than without and PREVIEW_MODE is on.)
 2. **The clob credential path.** `py_clob_client` logs
@@ -880,7 +882,7 @@ finding this section. If you edit them here, edit `_handle_golive` too.
 3. **The cost model bias (§9.2).** Modeled cost currently charges a round-trip
    spread against a book that redeems at par. Any go-live sizing computed off
    `@net` is using a number biased ~4-6pp too negative.
-4. **All-time vs clean-era.** Three of the six mechanical bars are all-time
+4. **All-time vs clean-era.** Every bar NOT labelled "clean era" is all-time
    realized; only `COPY_GOLIVE_MIN_CLEAN_SETTLED` and the two honest checks are
    era-scoped. If the wallet's all-time record is much better than its clean-era
    record, the difference is the fill artifact, not skill.

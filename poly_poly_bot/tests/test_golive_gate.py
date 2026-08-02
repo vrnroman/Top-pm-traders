@@ -316,8 +316,13 @@ def test_golive_renders_the_manual_preconditions(stores, tmp_path, monkeypatch):
     monkeypatch.setattr(telegram_bot, "_send_chunked", lambda t, **k: sent.append(t))
     telegram_bot._handle_golive(f"/golive {wallet}")
     body = sent[0]
-    assert "minimum-wallet floor" in body
+    assert "wallet floor is only" in body
     assert "api-key derivation" in body
     assert "ROADMAP §9.7" in body
+    # the floor exists (split_half_corr min_wallets=3) — the render must not
+    # claim otherwise; an inaccurate warning at the money door is still
+    # inaccurate.
+    assert "no minimum-wallet floor" not in body
+    assert pg.split_half_corr([], min_wallets=3) == (None, 0)
     # and it must not overstate: no unqualified "safe to flip"
     assert "Safe to flip" not in body
