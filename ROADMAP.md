@@ -687,8 +687,7 @@ or made unreadable, and arrive on 08-22 with the pivot's evidence in hand.
   "clean era" is all-time — the number P0-1 voided — while the honest
   checks need only a handful of clean settles and a 3-wallet correlation. New blocking bar:
   `COPY_GOLIVE_MIN_CLEAN_SETTLED` (default 30).
-- **The P1-6 evidence gate read dust fills** — the only aggregation in the repo
-  that didn't. A dust loss is capped at −1/row but a dust **win is unbounded**:
+- **The P1-6 evidence gate read dust fills.** A dust loss is capped at −1/row but a dust **win is unbounded**:
   one row that swept a stale 0.001 ask returns +$49,950 on $50 and can drag a
   whole losing category positive, so the block never fires. One-directional:
   it can only push toward admitting.
@@ -811,7 +810,7 @@ an obvious alternative explanation.
 The most-trusted finding (§1.3) is that a wallet looking good is slightly
 *negative* information. Nobody had tried inverting it on purpose. Computed on
 the live ledgers, at-their-price (fill-model independent), dust excluded,
-wallets with n≥10 settled, split chronologically in half:
+wallets with n≥10 settled, split chronologically in half.
 
 
 The result at the time of writing: following COLD wallets beat following HOT
@@ -932,8 +931,9 @@ the persistence pair and the §7 bar in one screen.
    this section said it did; that was wrong. §7 and §9.4's arms are defined on
    **gross** at-price ROI and split-half correlation, and neither is a function
    of modeled cost. What the §9.2 cost bug decides is the **economic** read —
-   whether there is money in this after costs — because `@net` is the only
-   figure that is currently negative. Both questions matter; they are not the
+   whether there is money in this after costs — because among the COMBINED figures the §7 arms read, `@net` is the one that
+   is negative. (Book A is negative at at-their-price too, on both windows —
+   this is a statement about the combined arms, not a universal.) Both questions matter; they are not the
    same question, and only the second one turns on §9.2.
 
 **This is not "the thesis is winning", and the caveats are load-bearing:**

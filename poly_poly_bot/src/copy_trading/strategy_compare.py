@@ -65,8 +65,9 @@ def _is_dust_row(r: dict) -> bool:
 
 def _book_stats(rows: list[dict]) -> dict:
     # Dust-quarantined, like every other trust surface (report, pnl_unified,
-    # split_half_corr, ideal_roi_for, rebaseline._closed_clean). This was the
-    # last aggregation that did not exclude them, and it is the one whose
+    # split_half_corr, ideal_roi_for, rebaseline._closed_clean). telegram_bot's
+    # _stamped / _sensitivity still do not (ROADMAP §9.3); this one is the one
+    # whose
     # ideal_roi_net section7_reading turns into a zero-crossing recommendation
     # — so a single unbounded dust win could move the memo's own advice.
     closed = [r for r in rows if r.get("closed") and not _is_dust_row(r)]
