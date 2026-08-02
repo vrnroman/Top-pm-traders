@@ -645,14 +645,23 @@ def _cost_lines(paper_books: dict, floor) -> list:
             continue
         realized = sum(p.pnl for p in closed) / spent
         ideal = sum(p.ideal_pnl for p in closed) / spent
-        cost = sum(p.cost_usd for p in closed)
-        icost = sum(p.ideal_cost_usd for p in closed)
+        # Derived per row, not the stamps: pre-P1-7 rows carry no stamp and
+        # would read cost-free, which is why this used to disagree with
+        # rebaseline and with the verdict memo's own slice table. One method
+        # across every surface (verifier r9, s-r7m3qk).
+        from src.copy_trading import strategy_compare as _sc
+        _ce = _sc._cost_env()
+        _pairs = [_sc._row_costs(p.__dict__ if hasattr(p, "__dict__") else p, *_ce)
+                  for p in closed]
+        cost = sum(c for c, _ in _pairs)
+        icost = sum(ic for _, ic in _pairs)
         seg = (f"   {label}: realized {realized:+.1%} → net {(sum(p.pnl for p in closed) - cost) / spent:+.1%}"
                f" · @price {ideal:+.1%} → net {(sum(p.ideal_pnl for p in closed) - icost) / spent:+.1%}")
         seg_book.append(seg)
     if seg_book:
-        lines.append(f"💸 Net of modeled costs (P1-7; stamped on {total_stamped}/"
-                     f"{total_closed} settled rows — pre-P1-7 rows net==gross):")
+        lines.append("💸 Net of modeled costs (P1-7; derived per row for ALL "
+                     f"{total_closed} settled rows, stamps ignored — "
+                     f"{total_stamped} carry a stamp):")
         lines.extend(seg_book)
 
     # Sensitivity (I8): combined at-price ROI under cost multipliers, costs

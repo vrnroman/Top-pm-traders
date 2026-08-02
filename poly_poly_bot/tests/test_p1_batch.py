@@ -509,18 +509,28 @@ def test_pnl_unified_net_roi_aggregates_costs():
 def test_strategy_compare_book_stats_carries_net():
     from src.copy_trading.strategy_compare import _book_stats
 
+    from src.copy_trading.strategy_compare import _cost_env, _row_costs
+
     rows = [{"closed": True, "won": True, "pnl": 50.0, "spent": 50.0,
-             "ideal_pnl": 50.0, "drag_bps": 0,
+             "ideal_pnl": 50.0, "drag_bps": 0, "category": "sports",
              "cost_usd": 0.02, "ideal_cost_usd": 6.02}]
+    cm, gas, fee = _cost_env()
+    exp_cost, exp_icost = _row_costs(rows[0], cm, gas, fee)
     s = _book_stats(rows)
-    assert s["roi_net"] == pytest.approx((50 - 0.02) / 50)
-    assert s["ideal_roi_net"] == pytest.approx((50 - 6.02) / 50)
-    assert s["cost_stamped"] == 1
-    # pre-P1-7 rows (no cost keys) net == gross and aren't counted stamped
+    # DERIVED, not the stamps: section7_reading turns ideal_roi_net into a
+    # zero-crossing recommendation, and it has to match rebaseline and the
+    # cost-slice table printed beside it (verifier r9, s-r7m3qk).
+    assert s["roi_net"] == pytest.approx((50 - exp_cost) / 50)
+    assert s["ideal_roi_net"] == pytest.approx((50 - exp_icost) / 50)
+    assert s["cost_stamped"] == 1          # diagnostic only, no longer a gate
+    # A pre-P1-7 row carries NO cost stamp — it must still be charged, or the
+    # book's @net reads flattered exactly where the money decision is made.
     s2 = _book_stats([{"closed": True, "won": True, "pnl": 50.0, "spent": 50.0,
-                       "ideal_pnl": 50.0, "drag_bps": 0}])
-    assert s2["roi_net"] == pytest.approx(1.0)
+                       "ideal_pnl": 50.0, "drag_bps": 0, "category": "sports"}])
     assert s2["cost_stamped"] == 0
+    assert s2["roi_net"] < 1.0
+    assert s2["ideal_roi_net"] < s2["ideal_roi"]
+    assert s2["ideal_roi_net"] == pytest.approx((50 - exp_icost) / 50)
 
 
 def test_rebaseline_book_stats_net_on_the_fly():

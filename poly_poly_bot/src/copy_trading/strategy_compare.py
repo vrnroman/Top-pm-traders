@@ -67,9 +67,14 @@ def _book_stats(rows: list[dict]) -> dict:
     # target's price — avg must be >= 0 and no fill below -300bps in the clean
     # era; the deep-gift count is impossible by construction post-fix.
     drag = drag_stats([int(r.get("drag_bps") or 0) for r in closed])
-    # Modeled-cost pair (P1-7), from the row stamps (0 on pre-P1-7 rows).
-    cost = sum(float(r.get("cost_usd") or 0.0) for r in closed)
-    icost = sum(float(r.get("ideal_cost_usd") or 0.0) for r in closed)
+    # Modeled-cost pair (P1-7), DERIVED per row — never the stamps, which are
+    # absent on pre-P1-7 rows and would flatter this book's @net (see
+    # _row_costs). This is the number section7_reading turns into a
+    # recommendation, so it must match rebaseline and the slice table.
+    _cm, _gas, _fee = _cost_env()
+    _pairs = [_row_costs(r, _cm, _gas, _fee) for r in closed]
+    cost = sum(c for c, _ in _pairs)
+    icost = sum(ic for _, ic in _pairs)
     # Divergence tripwire: realized vs at-their-price disagreeing past the bar
     # means the result is coming from the fill model, not the wallets.
     suspect = (len(closed) >= DIVERGENCE_MIN_CLOSED and spent > 0
@@ -85,6 +90,9 @@ def _book_stats(rows: list[dict]) -> dict:
         "ideal_roi": round(ideal_roi, 4),
         "roi_net": round((pnl - cost) / spent, 4) if spent else 0.0,
         "ideal_roi_net": round((ideal - icost) / spent, 4) if spent else 0.0,
+        # Kept as a diagnostic only (how many rows carry a P1-7 stamp); the
+        # @net render no longer gates on it, because cost is now derived for
+        # every row including unstamped ones.
         "cost_stamped": sum(1 for r in closed if float(r.get("ideal_cost_usd") or 0.0) > 0),
         "gifted": round(pnl - ideal, 2),
         "win_rate": round(wins / len(closed), 4) if closed else 0.0,
@@ -144,25 +152,39 @@ def _largest_gap_hours(rows: list[dict], era_start: float, now: float) -> float:
 _SLICE_MIN_N = 10          # thinner than this a slice is noise, not evidence
 
 
-def _row_modeled_cost(r: dict) -> float:
-    """Modeled cost for one settled row, derived ON THE FLY.
+def _row_costs(r: dict, cm, gas: float, fee_bps: float) -> tuple[float, float]:
+    """(realized cost, at-price cost) for one settled row, derived ON THE FLY.
 
-    NOT the row-stamped ``ideal_cost_usd``. The stamp only exists on rows
-    opened after P1-7 shipped, so pre-P1-7 rows carry ``0`` and read as
-    cost-free — 461 of 1526 all-time rows and 41 of 1102 clean-era rows as of
-    2026-08-02. Summing the stamp therefore UNDERSTATES drag, which is why
-    ``rebaseline.book_stats`` and ``/pnl``'s sensitivity panel both derive it
-    instead, and why this table disagreed with both by up to 0.7pp on a slice
-    and ~4pp on a combined figure (verifier r8, s-r7m3qk). The docstring below
-    says the post-verdict gate wiring reads exactly this table, so a flattered
-    cost here would flatter a gate.
+    NOT the row-stamped ``cost_usd`` / ``ideal_cost_usd``. Those stamps only
+    exist on rows opened after P1-7 shipped, so earlier rows carry ``0`` and
+    read as cost-free — a large minority of the ledger (re-derive the share
+    rather than trusting a number written here). Summing the stamps
+    therefore UNDERSTATES drag, which is why ``rebaseline.book_stats`` derives
+    every row the same way regardless of era, and why this module disagreed
+    with it (verifier r8/r9, s-r7m3qk): the verdict memo's headline ``@net``
+    and the cost-slice table printed six lines below it were on different cost
+    bases, and ``section7_reading`` renders the headline into a zero-crossing
+    recommendation ("go-live floor stays shut" vs "recalibration is on the
+    table"). Same split as rebaseline: realized pays gas+fees, at-price also
+    pays the full category spread.
     """
+    spent = float(r.get("spent") or 0.0)
+    cost = gas + spent * fee_bps / 10000.0
+    return cost, cost + spent * cm.cost_of(str(r.get("category") or "other"))
+
+
+def _cost_env():
+    """(cost model, gas, fee bps) from config — one place, so every surface in
+    this module charges identically."""
     from src.config import CONFIG
-    cm = CostModel.from_env()
-    return (float(CONFIG.copy_paper_gas_usd)
-            + float(r.get("spent") or 0.0)
-            * (cm.cost_of(str(r.get("category") or "other"))
-               + float(CONFIG.copy_paper_trade_fee_bps) / 10000.0))
+    return (CostModel.from_env(), float(CONFIG.copy_paper_gas_usd),
+            float(CONFIG.copy_paper_trade_fee_bps))
+
+
+def _row_modeled_cost(r: dict) -> float:
+    """At-price modeled cost for one row (gas + fees + category spread)."""
+    cm, gas, fee = _cost_env()
+    return _row_costs(r, cm, gas, fee)[1]
 
 
 def cost_slices(rows: list[dict]) -> dict:
@@ -181,7 +203,8 @@ def cost_slices(rows: list[dict]) -> dict:
         spent = sum(float(r.get("spent") or 0.0) for r in group_rows)
         pnl = sum(float(r.get("pnl") or 0.0) for r in group_rows)
         ideal = sum(float(r.get("ideal_pnl") or 0.0) for r in group_rows)
-        icost = sum(_row_modeled_cost(r) for r in group_rows)  # derived, not stamped
+        _cm, _gas, _fee = _cost_env()
+        icost = sum(_row_costs(r, _cm, _gas, _fee)[1] for r in group_rows)
         return {"n": len(group_rows), "spent": round(spent, 2),
                 "roi": round(pnl / spent, 4) if spent else 0.0,
                 "ideal_roi": round(ideal / spent, 4) if spent else 0.0,
@@ -456,9 +479,10 @@ def compare(
 def _fmt_book(name: str, s: dict) -> str:
     line = (f"{name}: {s['n_settled']} settled, ${s['pnl']:+.0f} "
             f"({s['roi'] * 100:+.1f}%/copy · @price {s['ideal_roi'] * 100:+.1f}%")
-    # P1-7 net twin, shown once cost-stamped rows exist: @price after modeled
-    # gas + fees + the category spread — the race read in real-money terms.
-    if s.get("cost_stamped"):
+    # P1-7 net twin: @price after modeled gas + fees + the category spread —
+    # the race read in real-money terms. Shown whenever the book has settled
+    # rows; cost is derived per row, so it no longer depends on stamps.
+    if s.get("n_settled"):
         line += f" · @net {s['ideal_roi_net'] * 100:+.1f}%"
     line += (f", win {s['win_rate'] * 100:.0f}%, ${s['spent']:.0f} cycled) · "
              f"{s['n_open']} open (${s['open_usd']:.0f})")

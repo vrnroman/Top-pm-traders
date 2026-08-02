@@ -707,8 +707,10 @@ or made unreadable, and arrive on 08-22 with the pivot's evidence in hand.
   daily and this file has already carried a stale one; read it live from
   `/pnl`'s cost-sensitivity panel or `scripts/rebaseline_ledger.py --era`.
   **Interim: read the ×0.5 sensitivity column as the primary, not ×1.**
-  This is not a cosmetic correction — see §9.8, where it decides whether the
-  §7 ROI leg is met at all.
+  This does NOT decide whether §7 fires — §7 and §9.4's arms are defined on
+  **gross** at-price ROI and correlation, neither of which is a function of
+  modeled cost (§9.8). It decides the separate ECONOMIC read: whether there is
+  money in this after costs, where `@net` is the only negative figure.
 - **`at-their-price` ROI is not fill-model-independent.** `ideal_pnl` uses
   `their_price` but every consumer divides by `spent = shares·entry_price`, so
   `reported = true × (their_price/entry_price)`. Clean era is bounded by the
