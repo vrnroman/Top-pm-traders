@@ -511,8 +511,9 @@ def _handle_pnl():
         if sp.at_price_roi is not None:
             roi_str += f" · @price {sp.at_price_roi:+.0%}"
         # …and its net-of-costs twin (P1-7): @price after modeled gas + fees +
-        # the category spread — what a real copier could have kept. Shown once
-        # cost-stamped rows exist (pre-P1-7 rows carry cost 0 → net == gross).
+        # the category spread — what a real copier could have kept. Cost is
+        # derived for every settled row now, stamped or not, so this renders
+        # for any book with settled rows.
         if sp.ideal_cost_sum > 0 and sp.at_price_net_roi is not None:
             roi_str += f" · @net {sp.at_price_net_roi:+.0%}"
         # Divergence tripwire: realized sitting far from @price means the

@@ -710,7 +710,10 @@ or made unreadable, and arrive on 08-22 with the pivot's evidence in hand.
   This does NOT decide whether §7 fires — §7 and §9.4's arms are defined on
   **gross** at-price ROI and correlation, neither of which is a function of
   modeled cost (§9.8). It decides the separate ECONOMIC read: whether there is
-  money in this after costs, where `@net` is the only negative figure.
+  money in this after costs. (Do not read that as "@net is the only negative
+  figure" — it is not: book A is negative at at-their-price too, on both
+  windows. The COMBINED figures the §7 arms read are the ones where @net is
+  the sole negative.)
 - **`at-their-price` ROI is not fill-model-independent.** `ideal_pnl` uses
   `their_price` but every consumer divides by `spent = shares·entry_price`, so
   `reported = true × (their_price/entry_price)`. Clean era is bounded by the
@@ -956,18 +959,12 @@ the persistence pair and the §7 bar in one screen.
   demonstrated persistence is consistent with beta — a rising market lifting
   everything copied — rather than with skill at picking wallets.
 
-**Standing rule for this file, learned over eight verification rounds:** do not
-write a derived ROI into this document. Point at `/pnl`, `/slice`, or
-`scripts/rebaseline_ledger.py --era`. Every hand-copied ROI in §9 went stale or
-was wrong at birth — including two written in the commit that first added this
-very rule. The machine-derived wallet counts held.
-
 ---
 
 **Why this section carries almost no numbers.** §9 was written in one session
-and then failed eight consecutive verification rounds on the same defect: a
-hand-copied figure that was stale, mis-tallied, or wrong at birth — including
-two written into the very commit that added a rule against them. Every
+and then failed round after round of verification on a single recurring defect:
+a hand-copied figure that was stale, mis-tallied, or wrong at birth — including
+some written into the very commits that added rules against them. Every
 machine-derived figure held; every hand-copied one rotted, some within the
 hour. So the numbers live in the surfaces that compute them
 (`/pnl`, `/slice`, `/verdict`, `scripts/rebaseline_ledger.py --era`) and this

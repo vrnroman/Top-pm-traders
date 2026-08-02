@@ -144,8 +144,9 @@ class WalletPnl:
     closed_cost: float = 0.0
     # Modeled-cost pair (P1-7), summed over settled rows: gas+fee charged
     # against realized, and gas+fee+full category spread charged against the
-    # at-their-price counterfactual. Rows opened before P1-7 carry 0, so their
-    # net == gross (stamped on the row at open).
+    # at-their-price counterfactual. DERIVED per row (see _modeled_costs), not
+    # read from the row stamps — pre-P1-7 rows carry no stamp and used to read
+    # cost-free, which made /pnl print two different @net for one book.
     cost_sum: float = 0.0
     ideal_cost_sum: float = 0.0
 
