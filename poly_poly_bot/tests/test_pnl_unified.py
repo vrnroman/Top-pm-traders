@@ -371,3 +371,32 @@ def test_strategy4_track_shows_separately_from_near_term_in_unified():
     labels = {sp.label for sp in unified.strategies}
     assert "B:1b" in labels and STRATEGY4_LABEL in labels
     assert unified.total_realized == 10.0             # 4 + 6, both tracks counted
+
+
+def test_paper_b_costs_are_derived_not_stamped():
+    """/pnl printed a book's @net twice in one message on two different bases:
+    the per-strategy line summed the P1-7 cost stamps (absent on pre-P1-7 rows,
+    so they read cost-free) while the cost block below it derived them. One
+    basis now, matching strategy_compare and rebaseline (verifier r10)."""
+    from src.copy_trading.copy_paper import PaperPosition
+    from src.copy_trading.pnl_unified import _modeled_costs, aggregate_paper_b
+
+    def _p(i, stamped):
+        return PaperPosition(
+            copy_id=f"c{i}", target="0xW", condition_id=f"0x{i}", token_id=f"T{i}",
+            outcome_index=0, category="sports", their_price=0.5, entry_price=0.5,
+            shares=100.0, spent=50.0, drag_bps=0, opened_ts=float(i),
+            closed=True, won=True, pnl=5.0, ideal_pnl=5.0, closed_ts=float(i),
+            cost_usd=(0.02 if stamped else 0.0),
+            ideal_cost_usd=(6.0 if stamped else 0.0))
+
+    # every row UNSTAMPED (pre-P1-7) — the case that used to read cost-free
+    rows = [_p(i, stamped=False) for i in range(10)]
+    out = aggregate_paper_b(rows)
+    wp = out[0]
+    exp = sum(_modeled_costs(p)[1] for p in rows)
+    assert wp.ideal_cost_sum == pytest.approx(exp)
+    assert wp.ideal_cost_sum > 0, "unstamped rows must still be charged"
+    # and a stamped row is charged the SAME derived amount, not its stamp
+    stamped = aggregate_paper_b([_p(i, stamped=True) for i in range(10)])[0]
+    assert stamped.ideal_cost_sum == pytest.approx(exp)

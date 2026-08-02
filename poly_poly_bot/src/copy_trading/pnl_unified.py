@@ -322,6 +322,19 @@ class UnifiedPnl:
 # System A aggregation
 # --------------------------------------------------------------------------- #
 
+def _modeled_costs(p) -> tuple[float, float]:
+    """(realized cost, at-price cost) for one settled position, derived on the
+    fly — the same split rebaseline.book_stats and strategy_compare._row_costs
+    use: realized pays gas+fees, at-price also pays the full category spread."""
+    from src.config import CONFIG
+    from src.copy_trading.copy_cost import CostModel
+    spent = float(getattr(p, "spent", 0.0) or 0.0)
+    cost = (float(CONFIG.copy_paper_gas_usd)
+            + spent * float(CONFIG.copy_paper_trade_fee_bps) / 10000.0)
+    cm = CostModel.from_env()
+    return cost, cost + spent * cm.cost_of(str(getattr(p, "category", "") or "other"))
+
+
 def aggregate_system_a(
     realized_rows: list[dict],
     open_positions: list[OpenPositionPnl],
@@ -434,8 +447,15 @@ def aggregate_system_b(
             wp.cost_basis += p.spent       # realized capital feeds ROI
             wp.ideal_pnl += p.ideal_pnl    # drag-free comparator (P0-2)
             wp.closed_cost += p.spent
-            wp.cost_sum += p.cost_usd          # modeled gas+fees (P1-7)
-            wp.ideal_cost_sum += p.ideal_cost_usd
+            # DERIVED, never the row stamps: the stamps only exist on rows
+            # opened after P1-7, so summing them reads earlier rows as
+            # cost-free and understates drag. /pnl printed this book's @net
+            # twice in one message on two different bases before this
+            # (verifier r10, s-r7m3qk). One derivation, shared with
+            # strategy_compare and rebaseline.
+            _c, _ic = _modeled_costs(p)
+            wp.cost_sum += _c
+            wp.ideal_cost_sum += _ic
             wp.n_closed += 1
             if p.won:
                 wp.wins += 1
@@ -485,8 +505,15 @@ def aggregate_strategy4(s4_positions: list[PaperPosition]) -> list[WalletPnl]:
             wp.cost_basis += p.spent       # realized capital feeds ROI
             wp.ideal_pnl += p.ideal_pnl    # drag-free comparator (P0-2)
             wp.closed_cost += p.spent
-            wp.cost_sum += p.cost_usd          # modeled gas+fees (P1-7)
-            wp.ideal_cost_sum += p.ideal_cost_usd
+            # DERIVED, never the row stamps: the stamps only exist on rows
+            # opened after P1-7, so summing them reads earlier rows as
+            # cost-free and understates drag. /pnl printed this book's @net
+            # twice in one message on two different bases before this
+            # (verifier r10, s-r7m3qk). One derivation, shared with
+            # strategy_compare and rebaseline.
+            _c, _ic = _modeled_costs(p)
+            wp.cost_sum += _c
+            wp.ideal_cost_sum += _ic
             wp.n_closed += 1
             if p.won:
                 wp.wins += 1
@@ -526,8 +553,15 @@ def aggregate_paper_b(b_positions: list[PaperPosition]) -> list[WalletPnl]:
             wp.cost_basis += p.spent       # realized capital feeds ROI
             wp.ideal_pnl += p.ideal_pnl    # drag-free comparator (P0-2)
             wp.closed_cost += p.spent
-            wp.cost_sum += p.cost_usd          # modeled gas+fees (P1-7)
-            wp.ideal_cost_sum += p.ideal_cost_usd
+            # DERIVED, never the row stamps: the stamps only exist on rows
+            # opened after P1-7, so summing them reads earlier rows as
+            # cost-free and understates drag. /pnl printed this book's @net
+            # twice in one message on two different bases before this
+            # (verifier r10, s-r7m3qk). One derivation, shared with
+            # strategy_compare and rebaseline.
+            _c, _ic = _modeled_costs(p)
+            wp.cost_sum += _c
+            wp.ideal_cost_sum += _ic
             wp.n_closed += 1
             if p.won:
                 wp.wins += 1

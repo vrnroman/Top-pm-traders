@@ -736,19 +736,6 @@ or made unreadable, and arrive on 08-22 with the pivot's evidence in hand.
   excludes admit-cap from both terms, so a sweep that gates 20 and admits 52
   ungated raises **no alert**. Note: the P1 watch item "if the admit-cap
   backlog is still growing" **cannot be satisfied — there is no backlog.**
-- **The verdict memo's headline book figures are ALL-TIME B, not clean-era.**
-  `compare()` scopes book A to the race era but takes book B whole (B predates
-  the clean-era floor: measured 2026-08-02, B's headline carries ~1070 settled
-  rows against ~851 in the clean era). `section7_reading`'s FALSIFIED/alive
-  status keys off the era-scoped persistence pair and is unaffected — but its
-  cost recommendation line ("does not clear modeled costs → hold PREVIEW" vs
-  "recalibration is on the table") reads the all-time `@net`, while §7 itself
-  is defined on CLEAN-ERA at-price ROI. Deliberately NOT changed here:
-  re-windowing the memo changes what the pre-registered experiment reports,
-  which the freeze forbids. Decide before 08-22 whether the memo should print
-  the era-scoped pair beside the all-time one (additive, safe) — and until
-  then read the ROI leg from `rebaseline_ledger.py --era`, not the memo
-  headline.
 - **`paper_proven_wallets` is all-time realized**, so artifact-era gift fills
   grant the highest-privilege discovery path (force-include, bypasses tail-ratio
   / drawdown / scooper / category gates, ranks first under cap pressure). Five
@@ -766,8 +753,8 @@ or made unreadable, and arrive on 08-22 with the pivot's evidence in hand.
   can dodge the blacklist.
 - `outcome_index` defaults to 0 with no cross-check against `token_id`; a feed
   row missing `outcomeIndex` on a NO-side buy books an inverted result.
-- `telegram_bot._stamped` / `_sensitivity` and `strategy_compare._book_stats`
-  (all-time path) skip the dust quarantine.
+- `telegram_bot._stamped` / `_sensitivity` skip the dust quarantine.
+  (`strategy_compare._book_stats` did too; fixed in `bab44f7`.)
 - `split_half_corr` rounds before the floor comparison: a true `-5e-5` becomes
   `-0.0`, and `-0.0 >= 0.0` is True. **Deliberately not fixed** — every
   sign-preserving fix distorts the displayed magnitude by more than the 1e-5 it

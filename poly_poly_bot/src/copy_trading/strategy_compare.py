@@ -205,7 +205,7 @@ def cost_slices(rows: list[dict]) -> dict:
     """Where does the net cost drag live? Group closed rows by category and by
     copy-size bucket, and for each slice compute the same trio the headline
     carries: gross realized ROI, @price ROI, and @net (after the per-row modeled
-    gas + fee + category-spread stamps). The verdict memo needs this because a
+    gas + fee + category spread, DERIVED per row (never the stamps)). The verdict memo needs this because a
     book-level @net of −3% can hide slices that clear costs and slices that
     never can — the post-verdict gate wiring (deferred to the new era) reads
     exactly this table.

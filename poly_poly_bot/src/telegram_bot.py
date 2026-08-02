@@ -618,7 +618,7 @@ def _trust_lines(paper_books: dict) -> list:
 
 def _cost_lines(paper_books: dict, floor) -> list:
     """The P1-7 costs block: realized + at-price ROI net of modeled costs per
-    book (from the row stamps), plus the combined at-price ROI under several
+    book (derived per row (never the P1-7 stamps, which pre-P1-7 rows lack)), plus the combined at-price ROI under several
     cost multipliers computed ON THE FLY over all settled rows (I8) — so the
     08-22 kill verdict reads as "edge a real copier keeps", not "edge assuming
     free fills", and the owner can see whether ANY fee assumption rescues the
