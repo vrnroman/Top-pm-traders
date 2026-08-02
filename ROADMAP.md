@@ -629,7 +629,10 @@ cycle repeats with the next small sample.
 Production env overrides (`docker exec poly-poly-bot env`): `PREVIEW_MODE=true`,
 `WALLET_DISCOVERY_ENABLED=true`, `COPY_PAPER_ENABLED=true`,
 `WALLET_DISCOVERY_LLM_REVIEW_ENABLED=true`, `BOT_LOG_RETENTION_DAYS=20`,
-`LANGFUSE_*`. Everything else runs on `config.py` defaults.
+`LANGFUSE_*`. The deploy workflow also pins `AB_RACE_VERDICT_DAYS=27` via
+`ensure_env` (`.github/workflows/deploy.yml`), which overrides the `config.py`
+default of `7.0` — that is what puts the verdict on 08-22, so do not read the
+clock off `config.py`. Anything not listed here runs on `config.py` defaults.
 
 ---
 
@@ -774,11 +777,19 @@ until today only two had content.
   or ROI negative but within one standard error). Concretely it means: extend
   the era by a *relative* 30 days (see the bug in §9.2 — the current knob adds
   3), and apply the cut that was deliberately **not** made mid-experiment:
-  drop sports pool-wide. Sports is ~333 of 415 copies and loses in both books;
-  cutting it *before* 08-22 would remove ~80% of copy volume and near-guarantee
-  missing the ≥15-wallet floor, i.e. an unreadable verdict — strictly worse
-  than either outcome. So it is the content of the recalibrate arm, not a
-  change to make now.
+  drop sports pool-wide. Sports loses in both books and is **~62% of settled
+  A+B copies, ~55% in the clean era** (live ledgers, 2026-08-02; the ledgers
+  append continuously, so treat the share as approximate and re-derive rather
+  than quoting a row count. §1.5's 333-of-415 is the 2026-07-25 snapshot and
+  is NOT current).
+  The reason to hold the cut until the boundary is not the share but the
+  **wallet count**: dropping sports takes book B's clean-era wallets at n≥10
+  from **27 to 11**, under the ≥15 bar — it would convert a readable verdict
+  into an undefined one, which is strictly worse than either outcome. Both
+  figures independently re-derived twice on 2026-08-02; the wallet counts
+  agreed exactly, the row counts drifted by one between runs minutes apart,
+  which is why the share is stated as a percentage and not a tally.
+  So it is the content of the recalibrate arm, not a change to make now.
 
 **Frozen until 08-22** (anything that changes what the verdict measures): the
 sports cut, any new live book, any promotion or copy-gate threshold change, any
