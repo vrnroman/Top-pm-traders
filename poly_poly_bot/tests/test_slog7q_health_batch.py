@@ -274,7 +274,13 @@ def test_cost_slices_groups_by_category_and_size():
              for _ in range(11)]
     out = cost_slices(rows)
     assert set(out["by_category"]) == {"sports", "crypto"}
-    assert "<$10" in out["by_size"] and "$50+" in out["by_size"]
+    assert "under $10" in out["by_size"] and "$50+" in out["by_size"]
+    # These labels are rendered into a parse_mode=HTML Telegram message. A bare
+    # "<" makes Telegram reject the WHOLE message with 400 "can't parse
+    # entities" (verified against the live API 2026-08-02; <pre> does not help),
+    # which would have left the 08-22 §7 verdict memo undeliverable and
+    # re-firing daily forever.
+    assert not any("<" in k for k in out["by_size"])
     s = out["by_category"]["sports"]
     assert s["n"] == 12
     assert s["ideal_roi_net"] == pytest.approx((12 * 1.1 - 12 * 0.4) / (12 * 5.0), abs=1e-4)

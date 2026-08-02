@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import statistics
 import threading
 import time
@@ -50,6 +51,14 @@ logger = logging.getLogger("poly_poly_bot")
 # per failed row (a 400-wallet sweep of failures would bury the signal).
 # Reset at the top of every evaluate_sweep.
 _cache_write_warned_dirs: set = set()
+
+# Wallets whose /activity fetch this sweep died mid-pagination (the API ran out
+# of retries). Their result is incomplete, so it is neither cached nor trusted.
+# Until now these were completely invisible: the discovery path logs nothing on
+# a failed _get, so the only trace of a throttled sweep was the poisoned cache
+# entry it left behind. list.append is atomic, which is all the thread-safety
+# the ThreadPoolExecutor in fetch_all_activity needs. Reset per sweep.
+_activity_fetch_failures: list = []
 
 DATA_API = os.environ.get("DATA_API_URL", "https://data-api.polymarket.com")
 CLOB = "https://clob.polymarket.com"
@@ -180,7 +189,8 @@ def build_universe(
     return list(seen)[:target]
 
 
-def prune_cache(cache_dir: str | None, ttl_s: float, max_files: int | None = None) -> int:
+def prune_cache(cache_dir: str | None, ttl_s: float, max_files: int | None = None,
+                max_bytes: int | None = None, reserve_bytes: int | None = None) -> int:
     """Bound the on-disk /activity cache; return how many files were removed.
 
     The universe churns every sweep, so wallets that drop out leave their
@@ -188,45 +198,88 @@ def prune_cache(cache_dir: str | None, ttl_s: float, max_files: int | None = Non
     (measured ~2.5MB each at the 4000-record cap — 6.7GB in the first day after
     the 2026-07 cache resurrection), eventually filling a small VM's disk. We
     delete anything older than ``ttl_s`` (it would be re-fetched on
-    use anyway), then, if the directory is still over ``max_files``, drop the
-    oldest by mtime as a hard backstop. RAM is unaffected — this is purely a disk
-    guard.
+    use anyway), then drop the oldest by mtime until the directory is under
+    BOTH ``max_files`` and ``max_bytes``. RAM is unaffected — this is purely a
+    disk guard.
+
+    ``max_bytes`` is the bound that actually holds. A file-count cap only
+    bounds the disk if the mean file size is stable, and it is not: entry size
+    is the wallet's activity length, so as the pool drifts toward whales the
+    same 4000 files grow without limit. Prod 2026-08-02 measured the count-only
+    cap at 4000 files / **8.2GB** of a 20G disk (mean 1.7MB, max 4.5MB, 2764
+    files over 1MB) with disk-watch tripping "free 4.1G shrinking 1521MB/day →
+    floor in ~1d". Bytes are what the disk runs out of, so bytes are what we
+    budget; the count cap stays as a cheap secondary bound.
     """
     if not cache_dir or not os.path.isdir(cache_dir):
         return 0
     now = time.time()
     removed = 0
-    fresh: list[tuple[float, str]] = []
+    fresh: list[tuple[float, str, int]] = []
+    total_bytes = 0
     for name in os.listdir(cache_dir):
         if not name.endswith(".json"):
             continue
         path = os.path.join(cache_dir, name)
         try:
-            mtime = os.path.getmtime(path)
+            st = os.stat(path)
         except OSError:
             continue
-        if ttl_s and (now - mtime) >= ttl_s:
+        if ttl_s and (now - st.st_mtime) >= ttl_s:
             try:
                 os.remove(path)
                 removed += 1
             except OSError:
                 pass
         else:
-            fresh.append((mtime, path))
-    if max_files and len(fresh) > max_files:
-        fresh.sort()  # oldest first
-        for _, path in fresh[: len(fresh) - max_files]:
-            try:
-                os.remove(path)
-                removed += 1
-            except OSError:
-                pass
+            fresh.append((st.st_mtime, path, st.st_size))
+            total_bytes += st.st_size
+    # ``reserve_bytes`` derives the real budget from the filesystem instead of
+    # a hand-picked constant: this cache may grow into whatever space exists
+    # beyond the reserve. A hand-derived GB number has now gone stale twice
+    # (15000 files ≈ 37GB in P2, 4000 files ≈ 8.2GB today) because it silently
+    # encodes a mean file size that drifts. Deriving it means the bound cannot
+    # rot when the funnel widens or the disk is resized.
+    if reserve_bytes:
+        try:
+            free = shutil.disk_usage(cache_dir).free
+            # Space this cache could occupy while still leaving the reserve free.
+            allowance = max(0, total_bytes + free - reserve_bytes)
+            max_bytes = min(max_bytes, allowance) if max_bytes else allowance
+        except OSError:
+            pass
+
+    fresh.sort()  # oldest first — evicted first by both bounds
+    over_count = (len(fresh) - max_files) if max_files else 0
+    idx = 0
+    for mtime, path, size in fresh:
+        if idx >= over_count and not (max_bytes and total_bytes > max_bytes):
+            break
+        try:
+            os.remove(path)
+            removed += 1
+            total_bytes -= size
+        except OSError:
+            pass
+        idx += 1
     return removed
 
 
 # ─── activity (TTL-cached) ───────────────────────────────────────────────────
 def fetch_activity(wallet: str, cache_dir: str | None, ttl_s: float, cap: int = 4000) -> list[dict]:
-    """Wallet activity, served from disk cache if younger than ``ttl_s``."""
+    """Wallet activity, served from disk cache if younger than ``ttl_s``.
+
+    A failed fetch is NEVER cached. ``_get`` returns ``None`` once a page has
+    exhausted its four attempts (429 / 5xx / timeout / connection error), which
+    is a different fact from "the wallet has no more trades" — but both used to
+    hit the same ``if not a: break`` and the truncated (often empty) result was
+    then written to disk and served as truth for the whole TTL, i.e. four
+    sweeps. A throttled wallet therefore scored as if it had no trade history,
+    and that same record is what the skill screen ranks on and what the LLM
+    gate's dossier is built from. Measured in prod 2026-08-02: 18 wallets held
+    a cached ``[]``. Truncation mid-pagination is the same bug and leaves no
+    trace at all, so we count both and let the sweep report them.
+    """
     path = os.path.join(cache_dir, f"{wallet}.json") if cache_dir else None
     if path and os.path.exists(path):
         try:
@@ -237,14 +290,21 @@ def fetch_activity(wallet: str, cache_dir: str | None, ttl_s: float, cap: int = 
     s = requests.Session()
     acts: list[dict] = []
     off = 0
+    incomplete = False
     while off < cap:
         a = _get(s, DATA_API, "/activity", user=wallet, limit=500, offset=off)
-        if not a:
+        if a is None:
+            incomplete = True  # the API failed — this result is not the truth
             break
+        if not a:
+            break              # genuine end of data
         acts += a
         off += 500
         if len(a) < 500:
             break
+    if incomplete:
+        _activity_fetch_failures.append(wallet)
+        return acts
     if path:
         try:
             tmp = path + ".tmp"
@@ -437,7 +497,120 @@ def _merge_topk(pool: list, chunk_scored: dict, cfg: DiscoveryConfig,
     )
 
 
+# Disk budgets for the two on-disk caches. BYTES, not file counts, are the
+# bound that holds — see prune_cache. Measured 2026-08-02: at the count-only
+# cap wcache held 8.2G of a 20G disk (mean 1.7MB/file, max 4.5MB, 2764 files
+# over 1MB) and disk-watch tripped at ~1 day to full.
+#
+# These ceilings are the *upper* bound; the operative budget is derived from
+# free space at prune time via ``reserve_bytes`` (whichever is smaller wins),
+# so the caches yield when something else on the disk grows and expand again
+# when it shrinks. RESERVE is what must stay free for everything else: a
+# ~1.5G image plus the same again for a pull, the ledgers/sqlite, and the
+# disk-watch floor (2.5G) with room to spare.
+_WCACHE_MAX_BYTES = 5.0 * 1024 ** 3
+_RESCACHE_MAX_BYTES = 1.5 * 1024 ** 3
+_DISK_RESERVE_BYTES = 7.0 * 1024 ** 3
+
+
+def _env_bytes(name: str, default: float) -> int:
+    """Read a GiB-valued env override; fall back to ``default`` bytes."""
+    try:
+        return int(float(os.environ[name]) * 1024 ** 3)
+    except (KeyError, ValueError):
+        return int(default)
+
+
+def _report_incomplete_fetches() -> None:
+    """Surface this sweep's incomplete /activity fetches. Never raises.
+
+    A throttled sweep silently scores wallets on partial history; that is a
+    data-quality fact the funnel line should carry, not something to discover
+    later from an empty cache file. WARNING (not INFO) because it degrades the
+    inputs the LLM gate and the skill ranking read — note WARNING+ lands in
+    ``signals-*.log``, not ``bot-*.log`` (src/logger.py:104)."""
+    try:
+        n = len(_activity_fetch_failures)
+        if n:
+            sample = ", ".join(_activity_fetch_failures[:3])
+            logger.warning("[DISCOVERY] %d wallet(s) had an INCOMPLETE /activity "
+                           "fetch this sweep — not cached, scored on partial "
+                           "history (e.g. %s)", n, sample)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _prune_disk_caches(cache_dir: str | None, cfg: DiscoveryConfig,
+                       activity_ttl_s: float, *, when: str) -> None:
+    """Bound both on-disk caches. Called at sweep START and sweep END.
+
+    Pruning only at the start bounded the *floor* and left the peak free: a
+    sweep writes its whole working set (~830 activity files, ~1.4GB, plus ~90k
+    resolution files) after the prune has already run, so the disk sat at peak
+    between sweeps — which is where prod was when disk-watch tripped. Running
+    it again on the way out means the idle-state disk is the pruned state.
+    Never raises: a cache guard must not break the sweep it rides.
+    """
+    try:
+        reserve = _env_bytes("DISK_CACHE_RESERVE_GB", _DISK_RESERVE_BYTES)
+        if cache_dir:
+            prune_cache(
+                cache_dir, activity_ttl_s,
+                max_files=int(os.environ.get("WALLET_DISCOVERY_CACHE_MAX_FILES", "4000")),
+                max_bytes=_env_bytes("WALLET_DISCOVERY_CACHE_MAX_GB", _WCACHE_MAX_BYTES),
+                reserve_bytes=reserve)
+        # Resolution cache: files are tiny (~4KB) and immutable, but there are
+        # ~90k written per sweep. Resolutions are facts, so a pruned file is
+        # never *wrong* to lose — re-querying costs one batched Gamma call. The
+        # prune is mtime-based (reads don't touch), so a still-hot file older
+        # than the TTL is deleted and refetched within the same sweep.
+        #
+        # The count cap was 120k against ~90k writes per sweep, so an entry
+        # survived ~1.3 sweeps and the cache thrashed: prod measured 139,878
+        # then 86,936 files evicted on consecutive sweeps, i.e. it was mostly
+        # paying to write files it deleted before reuse. At ~4KB the bytes are
+        # cheap, so the count cap is now well clear of one sweep's working set
+        # and the byte budget above is what actually bounds it.
+        if cfg.res_cache_dir:
+            removed = prune_cache(
+                cfg.res_cache_dir,
+                ttl_s=float(os.environ.get("WALLET_DISCOVERY_RES_CACHE_TTL_DAYS", "7")) * 86400.0,
+                max_files=int(os.environ.get("WALLET_DISCOVERY_RES_CACHE_MAX_FILES", "400000")),
+                max_bytes=_env_bytes("WALLET_DISCOVERY_RES_CACHE_MAX_GB", _RESCACHE_MAX_BYTES),
+                reserve_bytes=reserve)
+            if removed:
+                logger.info("[DISCOVERY] rescache pruned (%s-sweep): %d file(s) removed",
+                            when, removed)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[DISCOVERY] cache prune (%s-sweep) failed: %s", when, e)
+
+
 def evaluate_sweep(
+    cfg: DiscoveryConfig,
+    *,
+    must_include: set[str] | None = None,
+    cache_dir: str | None = None,
+    activity_ttl_s: float = 86400.0,
+    stop: threading.Event | None = None,
+    prior_copy_stats: dict | None = None,
+) -> dict[str, Eval]:
+    """Run the funnel, then re-bound the disk caches on the way out.
+
+    The sweep writes its entire working set *after* the entry prune, so without
+    this the disk idles at the sweep's peak. ``finally`` so an early
+    ``return {}`` (shutdown) or an exception still leaves the disk pruned.
+    """
+    try:
+        return _evaluate_sweep(
+            cfg, must_include=must_include, cache_dir=cache_dir,
+            activity_ttl_s=activity_ttl_s, stop=stop,
+            prior_copy_stats=prior_copy_stats)
+    finally:
+        _report_incomplete_fetches()
+        _prune_disk_caches(cache_dir, cfg, activity_ttl_s, when="post")
+
+
+def _evaluate_sweep(
     cfg: DiscoveryConfig,
     *,
     must_include: set[str] | None = None,
@@ -457,8 +630,10 @@ def evaluate_sweep(
     """
     must_include = must_include or set()
 
-    # Fresh sweep: re-arm the once-per-sweep cache-write warnings.
+    # Fresh sweep: re-arm the once-per-sweep cache-write warnings and the
+    # incomplete-fetch tally.
     _cache_write_warned_dirs.clear()
+    _activity_fetch_failures.clear()
 
     # The disk caches only work if the directories exist. Nothing created them
     # until now (prod ran 2026-06..07 with both silently dead: every sweep
@@ -472,30 +647,8 @@ def evaluate_sweep(
             except OSError:
                 logger.warning("[DISCOVERY] cannot create cache dir %s — caching off", d)
 
-    # Keep the on-disk activity cache bounded before we add this sweep's files.
-    if cache_dir:
-        # max_files sized for the e2-small's 20G disk: ~2.5MB/file at the
-        # 4000-record cap → 4000 files ≈ 10GB worst case (15k ≈ 37GB was a
-        # bound that could only fire after the disk was already full — P2,
-        # 2026-07-28). Re-derive if the funnel widens or the disk grows.
-        prune_cache(cache_dir, activity_ttl_s,
-                    max_files=int(os.environ.get("WALLET_DISCOVERY_CACHE_MAX_FILES", "4000")))
-
-    # Bound the resolution cache the same way (s-log7q, 2026-08-02): rescache
-    # files are tiny (~4KB) and immutable, but unbounded — it doubled
-    # 578MB → 1.1GB in five days (~260k files, ~23k/day) on an 84%-full disk.
-    # Resolutions are facts, so a pruned file is never *wrong* to lose: if the
-    # market is queried again it costs one batched Gamma call to refetch. The
-    # prune is mtime-based (reads don't touch), so a still-hot file older than
-    # the TTL is deleted and refetched within the same sweep — self-healing.
-    # The count cap is the hard backstop (120k ≈ ~0.5GB).
-    if cfg.res_cache_dir:
-        removed = prune_cache(
-            cfg.res_cache_dir,
-            ttl_s=float(os.environ.get("WALLET_DISCOVERY_RES_CACHE_TTL_DAYS", "7")) * 86400.0,
-            max_files=int(os.environ.get("WALLET_DISCOVERY_RES_CACHE_MAX_FILES", "120000")))
-        if removed:
-            logger.info("[DISCOVERY] rescache pruned: %d file(s) removed", removed)
+    # Keep the on-disk caches bounded before we add this sweep's files.
+    _prune_disk_caches(cache_dir, cfg, activity_ttl_s, when="pre")
 
     universe = build_universe(cfg.universe)
     for w in must_include:

@@ -96,13 +96,24 @@ class SecretScrubFilter(logging.Filter):
 
 
 class _OperationalFilter(logging.Filter):
-    """Pass only non-signal records to the operational (debug) file."""
+    """Pass non-signal records to the operational file — WARNING+ included.
+
+    WARNING/ERROR/CRITICAL used to be routed *exclusively* to the signals file,
+    which made `bot-*.log` a liar: grepping the operational log for problems
+    returned a clean sheet while 261 warnings/day (rate limits, activity
+    timeouts, the tripped disk alarm) sat in a file nobody greps for ops. That
+    false all-clear cost an hour of the 2026-08-02 inspection before the disk
+    alarm was found. Signals stays the durable record — it is kept forever
+    while bot logs age out — so problems are deliberately written to BOTH: the
+    operational log should never be able to say "nothing happened" when
+    something did.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.levelno in (TRADE, SKIP):
             return False
         if record.levelno >= logging.WARNING:
-            return False
+            return True
         msg = record.getMessage()
         return not any(msg.startswith(p) for p in _SIGNAL_PREFIXES)
 

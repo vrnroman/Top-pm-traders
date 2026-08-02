@@ -31,7 +31,11 @@ def test_cache_write_failure_warns_once_per_sweep_per_dir(monkeypatch, caplog, t
     """A dead cache must be LOUD once per sweep — not silent for weeks, and not
     one warning per failed row."""
     dd._cache_write_warned_dirs.clear()
-    monkeypatch.setattr(dd, "_get", lambda *a, **k: None)  # empty fetch -> still writes
+    # `[]` is a SUCCESSFUL fetch of a wallet with no activity — that result is
+    # cached, so the write is attempted and the dead-dir warning fires. (`None`
+    # would mean the API failed; since s-r7m3qk that is deliberately never
+    # cached, so it would never reach the write path at all.)
+    monkeypatch.setattr(dd, "_get", lambda *a, **k: [])
     bad_dir = str(tmp_path / "does-not-exist" / "wcache")
     with caplog.at_level(logging.WARNING, logger="poly_poly_bot"):
         dd.fetch_activity("0xA", bad_dir, 3600)

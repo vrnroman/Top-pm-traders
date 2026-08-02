@@ -70,6 +70,19 @@ def is_configured() -> bool:
     return bool(CONFIG.telegram_bot_token) and bool(CONFIG.telegram_chat_id)
 
 
+def _is_parse_error(resp) -> bool:
+    """True when Telegram rejected the message for its markup, not its content.
+
+    Telegram answers 400 with 'can't parse entities: ...' before it even
+    resolves the chat, so this is distinguishable from a real delivery
+    failure (chat not found, bot blocked) which a plain-text retry cannot fix.
+    """
+    try:
+        return resp.status_code == 400 and "parse entities" in (resp.text or "")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def send_message(text: str, parse_mode: str = "HTML", reply_markup: dict | None = None) -> bool:
     """Send a message to the configured Telegram chat.
 
@@ -91,6 +104,22 @@ def send_message(text: str, parse_mode: str = "HTML", reply_markup: dict | None 
         resp = requests.post(url, json=payload, timeout=10)
         if not resp.ok:
             logger.warning(f"Telegram send failed: {resp.status_code} {resp.text[:200]}")
+            # A message built from live market data can always contain a
+            # character Telegram's HTML parser chokes on ("<" opening a tag,
+            # a bare "&"). Losing the MESSAGE over its MARKUP is never the
+            # right trade: the 08-22 §7 verdict memo gates one-shot state on
+            # delivery, so a parse failure there would have left verdict_sent
+            # unset and re-fired the memo daily forever (2026-08-02, the
+            # "under $25" size bucket). Retry once as plain text so the
+            # content always lands, and keep the WARNING so the markup bug is
+            # still visible rather than silently papered over.
+            if parse_mode and _is_parse_error(resp):
+                payload.pop("parse_mode", None)
+                retry = requests.post(url, json=payload, timeout=10)
+                if retry.ok:
+                    logger.warning("Telegram: HTML parse failed, delivered as "
+                                   "plain text — fix the markup in this message")
+                return bool(retry.ok)
         return bool(resp.ok)
     except Exception as e:
         logger.warning(f"Telegram send error: {e}")
@@ -1516,11 +1545,25 @@ def _process_update(update: dict) -> None:
         return
 
     if text.startswith("/"):
-        # /setkey carries a raw private key — redact it at the echo site
-        # (surgical: a blanket 64-hex scrub would also eat condition_ids,
-        # which are legitimate log content).
-        echo = re.sub(r"^(/setkey\s+)0x[0-9a-fA-F]{64}(\s+CONFIRM)$",
-                      r"\g<1>0x***REDACTED\g<2>", text)
+        # /setkey carries a raw private key. Redact the ARGUMENTS WHOLESALE
+        # rather than pattern-matching the key: the previous regex demanded
+        # `0x` + 64 hex + a trailing ` CONFIRM`, and every input that misses
+        # that exact shape leaked the key in full to bot-*.log and the docker
+        # log. All of these reach this line and none matched:
+        #   /setkey <64hex> CONFIRM      — config_validators accepts a bare
+        #                                  key with no 0x prefix
+        #   /setkey@thebot 0x<64hex> …   — Telegram appends @botname
+        #   /setkey 0x<64hex> confirm    — a typo still echoes before dispatch
+        # There is no second layer: logger.scrub_secrets only knows the
+        # Telegram bot-token shape, never a private key. Matching the command
+        # and dropping everything after it cannot be got wrong; the outcome is
+        # still auditable because _handle_setkey logs cleared/rotated at
+        # WARNING once the key is validated.
+        head = text.split(None, 1)[0]
+        if head.split("@", 1)[0].lower() == "/setkey":
+            echo = f"{head} ***ARGUMENTS REDACTED***"
+        else:
+            echo = text
         logger.info(f"Telegram command: {echo}")
         try:
             _handle_command(text)

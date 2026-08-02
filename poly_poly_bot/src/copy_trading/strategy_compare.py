@@ -166,9 +166,18 @@ def cost_slices(rows: list[dict]) -> dict:
                 "ideal_roi_net": round((ideal - icost) / spent, 4) if spent else 0.0}
 
     def _bucket(spent: float) -> str:
+        # "under $25", never "<$25": these labels are rendered into a
+        # parse_mode=HTML Telegram message, where a bare "<" starts a tag.
+        # Telegram rejects the whole message with 400 "can't parse entities:
+        # Unsupported start tag" — verified against the live API 2026-08-02 —
+        # and <pre> does not protect it. Since COPY_PAPER_MAX_USD=50 every copy
+        # lands in one of these buckets, so the 08-22 §7 verdict memo would
+        # have been undeliverable, leaving verdict_sent unset and re-firing
+        # daily forever. send_message now also falls back to plain text, but
+        # not emitting the character is the first line of defence.
         for hi in (10.0, 25.0, 50.0):
             if spent < hi:
-                return f"<${hi:.0f}"
+                return f"under ${hi:.0f}"
         return "$50+"
 
     by_cat: dict[str, list[dict]] = {}
