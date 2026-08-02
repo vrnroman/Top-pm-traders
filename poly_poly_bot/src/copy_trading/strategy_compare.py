@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 from src.copy_trading import promotion_state
+from src.copy_trading.copy_cost import CostModel
 from src.copy_trading.copy_paper import drag_stats, fill_health_suspect
 from src.copy_trading.pnl_unified import (
     DIVERGENCE_MIN_CLOSED, DIVERGENCE_SUSPECT_BPS)
@@ -143,6 +144,27 @@ def _largest_gap_hours(rows: list[dict], era_start: float, now: float) -> float:
 _SLICE_MIN_N = 10          # thinner than this a slice is noise, not evidence
 
 
+def _row_modeled_cost(r: dict) -> float:
+    """Modeled cost for one settled row, derived ON THE FLY.
+
+    NOT the row-stamped ``ideal_cost_usd``. The stamp only exists on rows
+    opened after P1-7 shipped, so pre-P1-7 rows carry ``0`` and read as
+    cost-free — 461 of 1526 all-time rows and 41 of 1102 clean-era rows as of
+    2026-08-02. Summing the stamp therefore UNDERSTATES drag, which is why
+    ``rebaseline.book_stats`` and ``/pnl``'s sensitivity panel both derive it
+    instead, and why this table disagreed with both by up to 0.7pp on a slice
+    and ~4pp on a combined figure (verifier r8, s-r7m3qk). The docstring below
+    says the post-verdict gate wiring reads exactly this table, so a flattered
+    cost here would flatter a gate.
+    """
+    from src.config import CONFIG
+    cm = CostModel.from_env()
+    return (float(CONFIG.copy_paper_gas_usd)
+            + float(r.get("spent") or 0.0)
+            * (cm.cost_of(str(r.get("category") or "other"))
+               + float(CONFIG.copy_paper_trade_fee_bps) / 10000.0))
+
+
 def cost_slices(rows: list[dict]) -> dict:
     """Where does the net cost drag live? Group closed rows by category and by
     copy-size bucket, and for each slice compute the same trio the headline
@@ -159,7 +181,7 @@ def cost_slices(rows: list[dict]) -> dict:
         spent = sum(float(r.get("spent") or 0.0) for r in group_rows)
         pnl = sum(float(r.get("pnl") or 0.0) for r in group_rows)
         ideal = sum(float(r.get("ideal_pnl") or 0.0) for r in group_rows)
-        icost = sum(float(r.get("ideal_cost_usd") or 0.0) for r in group_rows)
+        icost = sum(_row_modeled_cost(r) for r in group_rows)  # derived, not stamped
         return {"n": len(group_rows), "spent": round(spent, 2),
                 "roi": round(pnl / spent, 4) if spent else 0.0,
                 "ideal_roi": round(ideal / spent, 4) if spent else 0.0,

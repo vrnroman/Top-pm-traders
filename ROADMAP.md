@@ -906,50 +906,64 @@ finding this section. If you edit them here, edit `_handle_golive` too.
    era-scoped. If the wallet's all-time record is much better than its clean-era
    record, the difference is the fill artifact, not skill.
 
-### 9.8 The §7 ROI leg is live — re-derived 2026-08-02, and it is not what §9.4 assumed
+### 9.8 Re-derived 2026-08-02 — §7 does not fire today, on EITHER leg
 
-Round-7 verification forced a re-derivation of the category and combined ROIs
-instead of carrying figures forward. Two of this section's own prose claims were
-false, and correcting them changes the picture the 08-22 verdict will present.
+Round-7/8 verification forced a re-derivation instead of carrying figures
+forward. Two prose claims in §9 were false, and correcting them changes what
+the 08-22 verdict is expected to say. **Per the standing rule at the end of
+this section, no ROI figures are reproduced here** — run
+`docker exec poly-poly-bot python scripts/rebaseline_ledger.py --era`, or
+`/pnl` and `/slice B`. That command prints both books, the combined figures,
+the persistence pair and the §7 bar in one screen.
 
-Live ledgers, dust excluded, clean era (`opened_ts >= era_floor`), derived twice
-independently:
+1. **"Sports loses in both books" is false.** In book B's clean era sports is
+   solidly positive at their own price, and it is not even the worst slice
+   (`other` is worse at `@net`). It loses only after modeled costs. §1.5's
+   finding was real on 2026-07-25 data and does not hold now, yet it was the
+   sole stated premise for the recalibrate arm's sports cut — re-derive before
+   applying that cut.
 
-```
-book B clean era   sports   n=455  realized +7.22%  @price +8.21%  @net -3.16%
-                   crypto   n=184  realized +8.22%  @price +9.21%  @net +4.27%
-                   other    n=184  realized +4.84%  @price +5.83%  @net -4.16%
-book A clean era   sports   n=149  realized -1.47%  @price -1.51%  @net -13.26%
-COMBINED  all-time  n=1524  realized +3.42%  @price +2.63%  @net -4.13%
-COMBINED  clean era n=1104  realized +4.68%  @price +5.44%  @net -4.47%
-```
+2. **Both §7 legs are currently unmet.** §7 fires only on clean-era at-price
+   ROI **< 0** AND split-half corr **≤ 0** across ≥15 wallets at n≥10. Today
+   combined at-price ROI is positive, and book B's clean-era persistence is
+   **positive across 27 wallets** — above the 15-wallet bar, so it is a
+   measured result, not an unmeasurable one. §9.4's RETIRE arm assumed both
+   would be met. On today's data the tree resolves to **HOLD** (corr > 0 and
+   at-price ROI ≥ 0), and it resolves cleanly — this is not an ambiguous state.
 
-Three things follow, and none of them were true in this file before:
+3. **The cost model does NOT decide whether §7 fires.** An earlier draft of
+   this section said it did; that was wrong. §7 and §9.4's arms are defined on
+   **gross** at-price ROI and split-half correlation, and neither is a function
+   of modeled cost. What the §9.2 cost bug decides is the **economic** read —
+   whether there is money in this after costs — because `@net` is the only
+   figure that is currently negative. Both questions matter; they are not the
+   same question, and only the second one turns on §9.2.
 
-1. **"Sports loses in both books" is false.** In book B, clean era, sports is
-   **+8.21% at their own price** and is *not* the worst slice — `other` is worse
-   at `@net`. It loses only after modeled costs. §1.5's finding was real on
-   2026-07-25 data; it does not hold today. The recalibrate arm's sports cut
-   must be re-derived before it is applied, not applied on this premise.
-2. **Combined at-their-price ROI is POSITIVE** (+5.44% clean era, +2.63%
-   all-time). §7's kill criterion requires at-price ROI negative **and**
-   persistence ≤ 0. On today's data the ROI leg is **not met**, and §9.4's
-   RETIRE arm assumed it would be.
-3. **So the verdict now hinges on the cost model** (§9.2). At-price is positive;
-   `@net` is negative; and `@net` is computed with a round-trip spread charged
-   against rows that redeem at par. Whether the honest cost-adjusted number is
-   above or below zero is genuinely undetermined until that is fixed — which
-   promotes the §9.2 cost fix from "queued tidy-up" to **the** thing that
-   decides how 08-22 reads.
+**This is not "the thesis is winning", and the caveats are load-bearing:**
 
-**This does not mean the thesis is winning.** Persistence is the leg to trust
-(§1.3, §9.5) and it remains the weaker one; a positive at-price ROI on a book
-whose wallet selection has no persistence is consistent with beta, not edge. But
-"negative and therefore falsified" is no longer the expected outcome, and
-anybody planning the 08-22 read off §9.4 alone would have been planning for the
-wrong result.
+- Persistence at 27 wallets carries a standard error of roughly 0.2, so a
+  reading near zero is weak evidence either way. The honest statement is "no
+  *demonstrated* persistence", not "no persistence" — and equally not
+  "persistence established". §1.3's negative correlation was a 2026-07-25
+  measurement; it has since flipped sign, which is itself what §1.3 predicted
+  wallet-level ROI would do.
+- **The combined A+B statistic double-counts.** A and B copy the same
+  watchlist, and about three quarters of book A's clean-era settled rows share
+  a `copy_id` with a book B row at an identical `their_price` — at
+  at-their-price those are literally the same observation counted twice, so
+  the combined `n` is inflated by roughly a fifth and its standard error is
+  understated on top of §1.2's already-weak t. By dollars the combined figure
+  is mostly book B wearing a combined label. De-duping to one row per
+  `copy_id` moves clean-era at-price **further above zero** on either
+  tie-break, so the *sign* of the ROI leg is robust — but §7 pre-registered
+  "combined" (§1.2 defines it as A+B) and the freeze forbids swapping the
+  statistic now. Recorded here so 08-22 is not ambushed by it.
+- A positive gross at-price ROI on a book whose wallet selection has no
+  demonstrated persistence is consistent with beta — a rising market lifting
+  everything copied — rather than with skill at picking wallets.
 
-**Standing rule for this file, learned the hard way over seven verification
-rounds:** do not write a derived ROI into this document. Point at `/pnl`,
-`/slice`, or `scripts/rebaseline_ledger.py --era`. Every hand-copied number in
-§9 went stale or was wrong at birth; the machine-derived wallet counts did not.
+**Standing rule for this file, learned over eight verification rounds:** do not
+write a derived ROI into this document. Point at `/pnl`, `/slice`, or
+`scripts/rebaseline_ledger.py --era`. Every hand-copied ROI in §9 went stale or
+was wrong at birth — including two written in the commit that first added this
+very rule. The machine-derived wallet counts held.

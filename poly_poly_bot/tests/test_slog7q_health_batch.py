@@ -283,7 +283,14 @@ def test_cost_slices_groups_by_category_and_size():
     assert not any("<" in k for k in out["by_size"])
     s = out["by_category"]["sports"]
     assert s["n"] == 12
-    assert s["ideal_roi_net"] == pytest.approx((12 * 1.1 - 12 * 0.4) / (12 * 5.0), abs=1e-4)
+    # @net is DERIVED per row (gas + spent*(category spread + fee)), not read
+    # from the row's ideal_cost_usd stamp — pre-P1-7 rows carry a 0 stamp and
+    # would otherwise read as cost-free (verifier r8, s-r7m3qk).
+    from src.copy_trading.strategy_compare import _row_modeled_cost
+    exp_cost = sum(_row_modeled_cost(r) for r in rows if r["category"] == "sports")
+    assert s["ideal_roi_net"] == pytest.approx(
+        (12 * 1.1 - exp_cost) / (12 * 5.0), abs=1e-4)
+    assert s["ideal_roi_net"] < s["ideal_roi"]      # cost must actually bite
 
 
 def test_cost_slices_drops_thin_slices():
@@ -533,3 +540,19 @@ def test_verdict_readiness_survives_a_missing_era_and_empty_persistence():
     r = verdict_readiness({}, verdict_days=27.0, now=1.0)
     assert r["wallets"] == 0 and r["days_left"] is None
     assert isinstance(fmt_readiness(r), str)
+
+
+def test_cost_slices_charge_pre_p1_7_rows_that_carry_no_cost_stamp():
+    """The defect: 461 of 1526 all-time rows have ideal_cost_usd == 0 because
+    they opened before P1-7. Summing the stamp read them as cost-free and
+    understated drag — while /pnl and rebaseline derive it. A gate wired off
+    this table (its own docstring says one will be) would read flattered costs.
+    """
+    from src.copy_trading.strategy_compare import cost_slices
+    unstamped = [{"closed": True, "category": "sports", "spent": 20.0,
+                  "pnl": 1.0, "ideal_pnl": 1.0, "ideal_cost_usd": 0.0,
+                  "won": True, "copy_id": f"u{i}"} for i in range(12)]
+    out = cost_slices(unstamped)
+    s = out["by_category"]["sports"]
+    assert s["ideal_roi_net"] < s["ideal_roi"], (
+        "rows with no cost stamp must still be charged modeled cost")
