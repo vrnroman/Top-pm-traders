@@ -502,3 +502,32 @@ def test_autopsy_size_trajectory_flags_runaway_growth(tmp_path):
     big.write_text("x" * (13 * 1024 * 1024))         # >2x growth, +7MB
     res = ledger_integrity.run_autopsy(d, now=1000.0 + 86400.0)
     assert any("trade-history grew" in a for a in res["new"])
+
+
+# --- s-r7m3qk: the §7 readability witness -----------------------------------
+
+def test_verdict_readiness_flags_an_uncomputable_verdict():
+    """A pre-registered falsification experiment that quietly never resolves is
+    worse than either outcome — the shortfall has to be visible before the due
+    date, not discovered on it."""
+    from src.copy_trading.strategy_compare import (
+        FALSIFY_MIN_WALLETS, fmt_readiness, verdict_readiness)
+    era = 1_000_000.0
+    cmp_ = {"era_start": era, "persistence": {"b": {"era": {"n": 4}}}}
+    r = verdict_readiness(cmp_, verdict_days=27.0, now=era + 7 * 86400)
+    assert r["readable"] is False
+    assert r["wallets"] == 4 and r["bar"] == FALSIFY_MIN_WALLETS
+    assert r["days_left"] == 20.0
+    assert "NOT YET READABLE" in fmt_readiness(r)
+
+    cmp_["persistence"]["b"]["era"]["n"] = FALSIFY_MIN_WALLETS
+    r2 = verdict_readiness(cmp_, verdict_days=27.0, now=era + 7 * 86400)
+    assert r2["readable"] is True
+    assert "NOT YET" not in fmt_readiness(r2)
+
+
+def test_verdict_readiness_survives_a_missing_era_and_empty_persistence():
+    from src.copy_trading.strategy_compare import fmt_readiness, verdict_readiness
+    r = verdict_readiness({}, verdict_days=27.0, now=1.0)
+    assert r["wallets"] == 0 and r["days_left"] is None
+    assert isinstance(fmt_readiness(r), str)

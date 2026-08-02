@@ -753,7 +753,8 @@ def _ab_race_reporter_loop():
 
     from src.copy_trading import era_state
     from src.copy_trading.strategy_compare import (
-        compare, format_snapshot, format_verdict)
+        compare, fmt_readiness, format_snapshot, format_verdict,
+        verdict_readiness)
 
     state_path = os.path.join(CONFIG.data_dir, "ab_race_state.json")
 
@@ -796,7 +797,22 @@ def _ab_race_reporter_loop():
             snapshot_msg = format_snapshot(cmp_)
             if integrity_line:
                 snapshot_msg += "\n" + integrity_line
-            sent_snap = telegram_bot.send_message(snapshot_msg)
+            # Standing readability witness: §7 needs >=15 wallets at n>=10 in
+            # the clean era, and nothing watched whether that floor would be
+            # met. Discovering on the due date that the statistic is undefined
+            # would silently disarm the pre-registered kill criterion.
+            from src.copy_trading import verdict_overlay as _vo
+            _vdays = float(_vo.effective(CONFIG.data_dir, "AB_RACE_VERDICT_DAYS",
+                                         CONFIG.ab_race_verdict_days))
+            _ready = verdict_readiness(cmp_, verdict_days=_vdays, now=time.time())
+            snapshot_msg += "\n" + fmt_readiness(_ready)
+            if not _ready["readable"]:
+                logger.warning(f"[AB-RACE] {fmt_readiness(_ready)}")
+            # Chunked, not send_message: integrity_line is an unbounded join of
+            # every new autopsy finding, so a noisy day could push the message
+            # past Telegram's 4096 cap and drop the WHOLE snapshot rather than
+            # just the tail.
+            sent_snap = telegram_bot._send_chunked(snapshot_msg)
             # Log every reporter post — Telegram is the only other trace, and an
             # unauditable daily job reads as "never ran" from the logs.
             logger.info(

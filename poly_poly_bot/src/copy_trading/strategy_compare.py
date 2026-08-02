@@ -193,6 +193,39 @@ def cost_slices(rows: list[dict]) -> dict:
     }
 
 
+def verdict_readiness(cmp: dict, *, verdict_days: float, now: float) -> dict:
+    """Will the §7 verdict be COMPUTABLE when it comes due?
+
+    §7 needs ≥FALSIFY_MIN_WALLETS wallets at n≥FALSIFY_MIN_N settled in the
+    clean era. Nothing watched whether that floor would actually be met, so the
+    failure mode was to arrive on the due date, find the statistic
+    undefined, and silently have no verdict — a pre-registered falsification
+    experiment that quietly never resolves is strictly worse than either
+    outcome. This runs daily so the shortfall is visible with time to act.
+    """
+    era = cmp.get("era_start")
+    days_left = None
+    if era:
+        days_left = max(0.0, verdict_days - (now - era) / 86400.0)
+    per = ((cmp.get("persistence") or {}).get("b") or {}).get("era") or {}
+    wallets = per.get("n") or 0
+    return {"wallets": wallets, "bar": FALSIFY_MIN_WALLETS,
+            "min_n": FALSIFY_MIN_N,
+            "days_left": (round(days_left, 1) if days_left is not None else None),
+            "readable": wallets >= FALSIFY_MIN_WALLETS}
+
+
+def fmt_readiness(r: dict) -> str:
+    """One line for the daily snapshot. Leads with the shortfall when short."""
+    d = ("" if r["days_left"] is None
+         else f" · {r['days_left']:.0f}d to verdict")
+    if r["readable"]:
+        return (f"§7 readable: {r['wallets']}w at n≥{r['min_n']} "
+                f"(bar {r['bar']}w){d}")
+    return (f"⚠ §7 NOT YET READABLE: {r['wallets']}w at n≥{r['min_n']}, "
+            f"need {r['bar']}w{d} — verdict would be undefined")
+
+
 def section7_reading(cmp: dict) -> dict:
     """The mechanical ROADMAP §7 reading, posted with the verdict memo: is the
     copy-thesis falsified, and what does that imply. NO auto-execution — the
