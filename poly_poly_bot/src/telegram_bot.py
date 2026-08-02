@@ -1469,9 +1469,24 @@ def _handle_golive(text: str) -> None:
     for label, ok, detail in checks:
         lines.append(f"{'✅' if ok else '❌'} {_esc(label)} <i>({_esc(str(detail))})</i>")
     if ready:
-        lines.append("\nAll checks pass. Safe to flip <code>PREVIEW_MODE=false</code> when you want real money on it.")
+        lines.append("\nAll mechanical checks pass.")
     else:
         lines.append("\nHold the live flip until the ❌ checks clear.")
+    # What the gate does NOT check, rendered where the flip decision is actually
+    # made. A precondition list that lives only in a dated ROADMAP section is a
+    # list nobody reads at the one-way door (verifier r3, s-r7m3qk).
+    lines.append(
+        "\n<b>Before flipping PREVIEW_MODE=false — the gate does NOT check these:</b>\n"
+        "• book persistence has <b>no minimum-wallet floor</b>; read the (Nw) "
+        "count next to it — a correlation over 3–4 wallets clears ≥0 about half "
+        "the time by chance\n"
+        "• confirm a successful CLOB api-key derivation in the logs first (the "
+        "400s are benign in PREVIEW, but that is the path a real order needs)\n"
+        "• modeled @net cost is biased ~4–6pp too negative (round-trip spread "
+        "charged on rows that redeem at par) — size off the ×0.5 column\n"
+        "• 3 of the bars above are ALL-TIME realized; if all-time ≫ clean-era, "
+        "the difference is the fill artifact, not skill\n"
+        "Full list: ROADMAP §9.7.")
     _send_chunked("\n".join(lines))
 
 

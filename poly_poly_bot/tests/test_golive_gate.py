@@ -291,3 +291,33 @@ def test_clean_era_bar_absent_when_honest_metrics_off():
     s = pg.compute_stats("0xA", _ready_positions(30))
     _, checks = pg.golive_check(s, min_clean_settled=None, **_BASE)
     assert not any("CLEAN ERA" in label for label, _, _ in checks)
+
+
+def test_golive_renders_the_manual_preconditions(stores, tmp_path, monkeypatch):
+    """The one-way door needs its unchecked preconditions AT the door, not in a
+    dated ROADMAP section (verifier r3)."""
+    import json
+    import time
+
+    from src import telegram_bot
+    wallet = "0x" + "b" * 40
+    now = time.time()
+    ledger = tmp_path / "ledger2.jsonl"
+    with open(ledger, "w") as f:
+        for i in range(30):
+            p = pos(wallet, i, pnl=1.2)
+            p.opened_ts = now - 3600 * i
+            p.closed_ts = now - 3600 * i
+            f.write(json.dumps(p.__dict__) + "\n")
+    monkeypatch.setattr(telegram_bot.CONFIG, "copy_paper_ledger", str(ledger), raising=False)
+    monkeypatch.setattr(telegram_bot.CONFIG, "copy_golive_honest_metrics", False, raising=False)
+    ps.add_promoted(wallet, tier="1b")
+    sent = []
+    monkeypatch.setattr(telegram_bot, "_send_chunked", lambda t, **k: sent.append(t))
+    telegram_bot._handle_golive(f"/golive {wallet}")
+    body = sent[0]
+    assert "minimum-wallet floor" in body
+    assert "api-key derivation" in body
+    assert "ROADMAP §9.7" in body
+    # and it must not overstate: no unqualified "safe to flip"
+    assert "Safe to flip" not in body

@@ -591,7 +591,8 @@ cycle repeats with the next small sample.
 - **It has gone network-dead before** (metadata server unreachable → SSH fails
   with "failed to connect to port 22"). `gcloud compute instances reset` recovers
   it; the container auto-restarts (`--restart unless-stopped`).
-- **Ship workflow** (see `CLAUDE.md`): full test suite must pass (1021 tests,
+- **Ship workflow** (see `CLAUDE.md`): full test suite must pass (count comes
+  from the run, not from this file;
   `cd poly_poly_bot && .venv/bin/python -m pytest tests/ -q`) → commit → push to
   `main` → GitHub Actions builds amd64 and pushes to Artifact Registry, VM pulls.
   Watch with `gh run watch <id>`. **Never** run `bash deploy.sh` on the Mac — it
@@ -599,6 +600,11 @@ cycle repeats with the next small sample.
 - **Report test counts as numbers** ("363 passed"), never "all tests pass".
 
 ### Key config anchors
+
+> **STALE — verified 2026-08-02 (s-r7m3qk):** 11 of the 12 line references
+> below were already wrong before this session (they predate several
+> refactors). Treat the *setting names* as real and the `file:line` column as
+> a hint only; `grep` the name rather than trusting the line number.
 
 | Setting | Location | Current |
 |---|---|---|
@@ -628,9 +634,11 @@ Production env overrides (`docker exec poly-poly-bot env`): `PREVIEW_MODE=true`,
 ## 9. Inspection s-r7m3qk — 2026-08-02 (second pass over the health batch)
 
 A full re-read of the four `feat/fix(health)` commits plus the money path,
-against the **live VM**, not just the code. Twelve findings confirmed; six
-shipped the same day (`7f5feb6`, `5e7f18b`, `41810a1`; 1021 tests). The rest
-are queued below with evidence so nobody re-derives them.
+against the **live VM**, not just the code. What shipped is enumerated in §9.1;
+what is still open is enumerated in §9.2 (verdict-integrity, before 08-22) and
+§9.3 (lower). Counts are deliberately not restated here — the lists are the
+tally, and a hand-maintained summary number is exactly what went stale twice
+during this session.
 
 **Framing for the next session:** protect the 08-22 verdict from being voided
 or made unreadable, and arrive on 08-22 with the pivot's evidence in hand.
@@ -852,6 +860,10 @@ not. Direction is safe (the gate is strictly stricter and PREVIEW_MODE is on).
 
 The manual flip is the one true one-way door. `/golive` renders the mechanical
 gate; this list is what the gate does **not** yet check and a human must.
+
+**These four are now rendered in the `/golive` output itself**, so the flip
+decision carries them at the point it is made rather than depending on anyone
+finding this section. If you edit them here, edit `_handle_golive` too.
 
 1. **`min_split_half_corr` has no minimum-wallet floor.** It is currently
    *passing* at `+0.45 (4w)`. A Pearson correlation over 4 points clears a
