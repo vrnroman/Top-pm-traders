@@ -207,22 +207,35 @@ def verdict_readiness(cmp: dict, *, verdict_days: float, now: float) -> dict:
     days_left = None
     if era:
         days_left = max(0.0, verdict_days - (now - era) / 86400.0)
-    per = ((cmp.get("persistence") or {}).get("b") or {}).get("era") or {}
-    wallets = per.get("n") or 0
-    return {"wallets": wallets, "bar": FALSIFY_MIN_WALLETS,
-            "min_n": FALSIFY_MIN_N,
+    per = cmp.get("persistence") or {}
+    # BOTH books, not just B. section7_reading renders a status per book, so a
+    # witness that watched only B would report "readable" while A still prints
+    # "inconclusive (Nw < 15w)" on the day — overstating exactly the thing this
+    # exists to stop anyone from discovering late.
+    counts = {k: ((per.get(k) or {}).get("era") or {}).get("n") or 0
+              for k in ("a", "b")}
+    return {"wallets": counts["b"], "counts": counts,
+            "bar": FALSIFY_MIN_WALLETS, "min_n": FALSIFY_MIN_N,
             "days_left": (round(days_left, 1) if days_left is not None else None),
-            "readable": wallets >= FALSIFY_MIN_WALLETS}
+            "readable": counts["b"] >= FALSIFY_MIN_WALLETS,
+            "readable_both": all(v >= FALSIFY_MIN_WALLETS
+                                 for v in counts.values())}
 
 
 def fmt_readiness(r: dict) -> str:
     """One line for the daily snapshot. Leads with the shortfall when short."""
     d = ("" if r["days_left"] is None
          else f" · {r['days_left']:.0f}d to verdict")
+    c = r.get("counts") or {}
+    books = f"A {c.get('a', 0)}w / B {c.get('b', 0)}w"
+    if r["readable_both"]:
+        return f"§7 readable: {books} at n≥{r['min_n']} (bar {r['bar']}w){d}"
     if r["readable"]:
-        return (f"§7 readable: {r['wallets']}w at n≥{r['min_n']} "
-                f"(bar {r['bar']}w){d}")
-    return (f"⚠ §7 NOT YET READABLE: {r['wallets']}w at n≥{r['min_n']}, "
+        # B carries the verdict's recommendation, so this is not fatal — but A
+        # will print inconclusive, and that should not be a surprise on the day.
+        return (f"§7 readable on B ({books} at n≥{r['min_n']}, bar "
+                f"{r['bar']}w) — A will read inconclusive{d}")
+    return (f"⚠ §7 NOT YET READABLE: {books} at n≥{r['min_n']}, "
             f"need {r['bar']}w{d} — verdict would be undefined")
 
 

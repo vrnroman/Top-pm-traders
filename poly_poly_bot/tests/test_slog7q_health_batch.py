@@ -513,7 +513,8 @@ def test_verdict_readiness_flags_an_uncomputable_verdict():
     from src.copy_trading.strategy_compare import (
         FALSIFY_MIN_WALLETS, fmt_readiness, verdict_readiness)
     era = 1_000_000.0
-    cmp_ = {"era_start": era, "persistence": {"b": {"era": {"n": 4}}}}
+    cmp_ = {"era_start": era,
+            "persistence": {"a": {"era": {"n": 4}}, "b": {"era": {"n": 4}}}}
     r = verdict_readiness(cmp_, verdict_days=27.0, now=era + 7 * 86400)
     assert r["readable"] is False
     assert r["wallets"] == 4 and r["bar"] == FALSIFY_MIN_WALLETS
@@ -521,6 +522,7 @@ def test_verdict_readiness_flags_an_uncomputable_verdict():
     assert "NOT YET READABLE" in fmt_readiness(r)
 
     cmp_["persistence"]["b"]["era"]["n"] = FALSIFY_MIN_WALLETS
+    cmp_["persistence"]["a"]["era"]["n"] = FALSIFY_MIN_WALLETS
     r2 = verdict_readiness(cmp_, verdict_days=27.0, now=era + 7 * 86400)
     assert r2["readable"] is True
     assert "NOT YET" not in fmt_readiness(r2)

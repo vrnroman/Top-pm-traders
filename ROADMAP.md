@@ -815,3 +815,35 @@ verdict.
 over the §7 bar of 15 — but §7 counts *clean-era* wallets, and the clean era is
 8 days old. That gap is precisely what the new readability witness (§9.1) now
 reports every morning.
+
+### 9.6 Verifier round 1 — one defect in this session's own fix
+
+The byte governor shipped in `7f5feb6` **failed open at the exact disk state it
+exists for**. `allowance = max(0, total + free - reserve)` clamps to `0` when
+free space reaches the reserve; `0` is falsy, and the eviction test read that as
+"no budget configured" — so the governor switched itself off under pressure, and
+`min(ceiling, 0)` discarded the explicit 5G/1.5G ceilings too. It was ~0.64G of
+free space from firing in prod. Compounding it, the same commit raised the
+rescache count cap 120k → 400k, which is +1.1G of growth headroom in precisely
+the OFF state. Fixed in `9e4f2b7`: the test is `max_bytes is not None`, and the
+allowance carries a floor (default 0.5G, injectable) so real pressure shrinks
+the cache to a working set instead of either ignoring the budget or emptying it
+and forcing a full refetch into an already-429-ing API.
+
+Also from the same pass: the wcache prune now logs (it was the one silent lever,
+on the biggest thing on the disk); the §7 readability witness reports **both**
+books, since A sits at 4w against the 15w bar and a B-only witness would have
+said "readable" while A printed inconclusive on the day; and two comments that
+the same commit had made stale were corrected.
+
+**Verifier's independent measurements on live prod, worth keeping:** §7 is
+already readable on B (**27 wallets at n≥10, bar 15**, 19 days out). Both
+promoted wallets read `READY=False` with *and* without the new clean-era bar —
+they already fail on paper-ROI, at-price-ROI and the promotion floor — so the
+30-copy default changes nothing today and only closes the artifact-era hole.
+Zero secrets in prod logs (no bot-token pattern, no 64-hex key, no setkey echo).
+
+**Still open from that pass, queued (not fixed):** the go-live
+`min_split_half_corr` bar has no min-wallets floor and is currently *passing* at
+`+0.45 (4w)` — the settled-count half of that hole was closed, this half was
+not. Direction is safe (the gate is strictly stricter and PREVIEW_MODE is on).

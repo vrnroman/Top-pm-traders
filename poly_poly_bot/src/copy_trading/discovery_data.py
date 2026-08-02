@@ -190,7 +190,8 @@ def build_universe(
 
 
 def prune_cache(cache_dir: str | None, ttl_s: float, max_files: int | None = None,
-                max_bytes: int | None = None, reserve_bytes: int | None = None) -> int:
+                max_bytes: int | None = None, reserve_bytes: int | None = None,
+                floor_bytes: int | None = None) -> int:
     """Bound the on-disk /activity cache; return how many files were removed.
 
     The universe churns every sweep, so wallets that drop out leave their
@@ -244,8 +245,17 @@ def prune_cache(cache_dir: str | None, ttl_s: float, max_files: int | None = Non
         try:
             free = shutil.disk_usage(cache_dir).free
             # Space this cache could occupy while still leaving the reserve free.
-            allowance = max(0, total_bytes + free - reserve_bytes)
-            max_bytes = min(max_bytes, allowance) if max_bytes else allowance
+            # FLOORED, never zero: an allowance of 0 is falsy, and the eviction
+            # test below used to read it as "no budget configured" — so the
+            # governor switched ITSELF OFF exactly when free space fell to the
+            # reserve, i.e. at the one disk state it exists for, and
+            # min(ceiling, 0) threw the explicit ceiling away too. The floor
+            # also stops a tight disk from evicting the whole cache and forcing
+            # a full refetch into an API that is already rate-limiting us.
+            floor = _MIN_CACHE_BYTES if floor_bytes is None else floor_bytes
+            allowance = max(floor, total_bytes + free - reserve_bytes)
+            max_bytes = (min(max_bytes, allowance) if max_bytes is not None
+                         else allowance)
         except OSError:
             pass
 
@@ -253,7 +263,10 @@ def prune_cache(cache_dir: str | None, ttl_s: float, max_files: int | None = Non
     over_count = (len(fresh) - max_files) if max_files else 0
     idx = 0
     for mtime, path, size in fresh:
-        if idx >= over_count and not (max_bytes and total_bytes > max_bytes):
+        # `is not None`, NOT truthiness: a computed budget of 0 means "evict
+        # everything", not "no budget" (see the reserve block above).
+        over_bytes = max_bytes is not None and total_bytes > max_bytes
+        if idx >= over_count and not over_bytes:
             break
         try:
             os.remove(path)
@@ -511,6 +524,11 @@ def _merge_topk(pool: list, chunk_scored: dict, cfg: DiscoveryConfig,
 _WCACHE_MAX_BYTES = 5.0 * 1024 ** 3
 _RESCACHE_MAX_BYTES = 1.5 * 1024 ** 3
 _DISK_RESERVE_BYTES = 7.0 * 1024 ** 3
+# Floor on the derived allowance. Under real disk pressure the cache shrinks to
+# this rather than to nothing: emptying it entirely would force a full refetch
+# on the next sweep into a data API that is already 429-ing us, trading a disk
+# problem for a data-quality one.
+_MIN_CACHE_BYTES = 0.5 * 1024 ** 3
 
 
 def _env_bytes(name: str, default: float) -> int:
@@ -554,11 +572,17 @@ def _prune_disk_caches(cache_dir: str | None, cfg: DiscoveryConfig,
     try:
         reserve = _env_bytes("DISK_CACHE_RESERVE_GB", _DISK_RESERVE_BYTES)
         if cache_dir:
-            prune_cache(
+            # Logged, not silent: wcache is the biggest thing on the disk and
+            # this is the lever that evicts gigabytes of it. An invisible lever
+            # is how the 8.2GB cache grew unnoticed in the first place.
+            removed = prune_cache(
                 cache_dir, activity_ttl_s,
                 max_files=int(os.environ.get("WALLET_DISCOVERY_CACHE_MAX_FILES", "4000")),
                 max_bytes=_env_bytes("WALLET_DISCOVERY_CACHE_MAX_GB", _WCACHE_MAX_BYTES),
                 reserve_bytes=reserve)
+            if removed:
+                logger.info("[DISCOVERY] wcache pruned (%s-sweep): %d file(s) removed",
+                            when, removed)
         # Resolution cache: files are tiny (~4KB) and immutable, but there are
         # ~90k written per sweep. Resolutions are facts, so a pruned file is
         # never *wrong* to lose — re-querying costs one batched Gamma call. The

@@ -7,8 +7,11 @@ Log files
                         kept forever.
 
   bot-{date}.log        Everything else (polling, queue depths, geo-scan,
-                        scheduler heartbeats). Higher volume — auto-deleted
-                        after BOT_LOG_RETENTION_DAYS (default 2).
+                        scheduler heartbeats) PLUS every WARNING/ERROR/CRITICAL,
+                        deliberately duplicated here so the operational log can
+                        never report a clean sheet while something is wrong.
+                        Higher volume — auto-deleted after
+                        BOT_LOG_RETENTION_DAYS (default 2).
 """
 
 import glob

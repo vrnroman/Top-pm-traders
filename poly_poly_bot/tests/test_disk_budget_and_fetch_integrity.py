@@ -122,7 +122,7 @@ def test_reserve_derives_the_budget_from_free_space(monkeypatch, tmp_path):
 
     # allowance = 10MB (cache) + 5MB (free) - 12MB (reserve) = 3MB
     removed = dd.prune_cache(str(tmp_path), ttl_s=0, max_bytes=None,
-                             reserve_bytes=12_000_000)
+                             reserve_bytes=12_000_000, floor_bytes=0)
     assert removed == 7
     total = sum(p.stat().st_size for p in tmp_path.glob("*.json"))
     assert total <= 3_000_000
@@ -281,3 +281,59 @@ def test_evidence_maps_exclude_dust_fills():
     n, roi = cat["sports"]
     assert n == 20, "the dust row must not be counted"
     assert roi < 0, f"losing category must still read negative, got {roi}"
+
+
+# --------------------------------------------------------------------------- #
+# The governor must not fail OPEN at the disk state it exists for (verifier r1)
+# --------------------------------------------------------------------------- #
+
+def test_zero_allowance_evicts_instead_of_disabling_the_budget(monkeypatch, tmp_path):
+    """free <= reserve made `allowance` 0, which is FALSY — the old eviction
+    test read that as "no budget configured" and pruned nothing, and
+    min(ceiling, 0) discarded the explicit ceiling too. The governor switched
+    itself off exactly when the disk was tightest."""
+    for i in range(10):
+        _write(tmp_path, f"w{i}.json", 1_000_000, 1_000_000 + i * 100)
+
+    class _DU:
+        free = 0                      # disk already past the reserve
+    monkeypatch.setattr(dd.shutil, "disk_usage", lambda p: _DU())
+
+    removed = dd.prune_cache(str(tmp_path), ttl_s=0, max_files=4000,
+                             max_bytes=5 * 1024 ** 3,
+                             reserve_bytes=7 * 1024 ** 3, floor_bytes=1_000_000)
+    assert removed > 0, "the byte governor disabled itself under disk pressure"
+    total = sum(p.stat().st_size for p in tmp_path.glob("*.json"))
+    assert total <= 1_000_000
+
+
+def test_pressure_floor_keeps_a_working_set(monkeypatch, tmp_path):
+    """Emptying the cache entirely would force a full refetch into an API that
+    is already 429-ing — trade a disk problem for a data-quality one."""
+    n = 200
+    for i in range(n):
+        _write(tmp_path, f"w{i}.json", 10_000_000, 1_000_000 + i)   # 2GB total
+
+    class _DU:
+        free = 0
+    monkeypatch.setattr(dd.shutil, "disk_usage", lambda p: _DU())
+    dd.prune_cache(str(tmp_path), ttl_s=0, reserve_bytes=7 * 1024 ** 3,
+                   floor_bytes=50_000_000)
+    survivors = list(tmp_path.glob("*.json"))
+    assert survivors, "must not evict the entire cache under pressure"
+    total = sum(p.stat().st_size for p in survivors)
+    assert total <= 50_000_000
+
+
+def test_explicit_ceiling_is_not_discarded_by_a_zero_allowance(monkeypatch, tmp_path):
+    _write(tmp_path, "w.json", 100, 1_000_000)
+
+    class _DU:
+        free = 0
+    monkeypatch.setattr(dd.shutil, "disk_usage", lambda p: _DU())
+    # floor 0 + free 0 => allowance 0. That must mean "evict everything",
+    # NOT "no budget configured" — and min(5GiB, 0) must not resurrect the
+    # ceiling either.
+    assert dd.prune_cache(str(tmp_path), ttl_s=0, max_bytes=5 * 1024 ** 3,
+                          reserve_bytes=7 * 1024 ** 3, floor_bytes=0) == 1
+    assert not (tmp_path / "w.json").exists()
