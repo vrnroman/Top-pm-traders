@@ -245,3 +245,39 @@ def test_incomplete_fetch_reporter_warns_and_never_raises(caplog):
     assert "4 wallet(s) had an INCOMPLETE" in caplog.text
     dd._activity_fetch_failures.clear()
     dd._report_incomplete_fetches()                     # silent when clean
+
+
+# --------------------------------------------------------------------------- #
+# P1-6 evidence gate must not read dust fills (s-r7m3qk)
+# --------------------------------------------------------------------------- #
+
+def test_evidence_maps_exclude_dust_fills():
+    """A dust WIN is unbounded while a dust LOSS is capped at -1 per row, so
+    one pre-fix gifted row can drag a whole losing category positive and keep
+    the block from ever firing. Contamination is one-directional: toward
+    admitting."""
+    from src.copy_trading.copy_paper import CopyPaperEngine, PaperPosition
+
+    def _p(i, entry, their, pnl, spent=50.0):
+        return PaperPosition(
+            copy_id=f"c{i}", target="0xA", condition_id=f"c{i}", token_id=f"T{i}",
+            outcome_index=0, category="sports", their_price=their,
+            entry_price=entry, shares=spent / entry, spent=spent, drag_bps=0,
+            opened_ts=float(i), closed=True, won=pnl > 0, pnl=pnl,
+            closed_ts=float(i))
+
+    book = CopyPaperEngine.__new__(CopyPaperEngine)
+    book.category_evidence_floor_ts = 0.0
+
+    class _L:
+        pass
+    book.ledger = _L()
+    # 20 genuinely losing rows, plus ONE dust row that swept a stale 0.001 ask
+    rows = [_p(i, 0.60, 0.60, -10.0) for i in range(20)]
+    rows.append(_p(99, 0.001, 0.62, 49_950.0))
+    book.ledger.positions = {p.copy_id: p for p in rows}
+
+    cat, _buck = book._evidence_maps()
+    n, roi = cat["sports"]
+    assert n == 20, "the dust row must not be counted"
+    assert roi < 0, f"losing category must still read negative, got {roi}"

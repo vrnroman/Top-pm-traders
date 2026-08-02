@@ -170,6 +170,11 @@ def split_half_corr(
     eps = 1e-18 * max(1.0, mx * mx, my * my)
     if vx <= eps or vy <= eps:
         return (None, n)    # no measurable cross-wallet variance: undefined
+    # KNOWN (s-r7m3qk, LOW, deliberately not "fixed"): `round` can return -0.0
+    # for a true corr of about -5e-5, and `-0.0 >= 0.0` is True, so a
+    # trivially-negative persistence clears a `>= 0` floor. Left as-is because
+    # every sign-preserving fix distorts the displayed magnitude by more than
+    # the 1e-5 error it corrects. Revisit only if the floor ever moves off zero.
     return (round(cov / math.sqrt(vx * vy), 4), n)
 
 
@@ -342,11 +347,12 @@ def honest_kwargs_from(cfg) -> dict:
     ``None`` (= the check is off) when the master toggle is off."""
     if not getattr(cfg, "copy_golive_honest_metrics", True):
         return dict(min_ideal_roi=None, min_ideal_settled=None,
-                    min_split_half_corr=None)
+                    min_split_half_corr=None, min_clean_settled=None)
     return dict(
         min_ideal_roi=cfg.copy_golive_min_ideal_roi,
         min_ideal_settled=cfg.copy_golive_min_ideal_settled,
-        min_split_half_corr=cfg.copy_golive_min_split_half_corr)
+        min_split_half_corr=cfg.copy_golive_min_split_half_corr,
+        min_clean_settled=getattr(cfg, "copy_golive_min_clean_settled", None))
 
 
 def ideal_roi_for(positions: Iterable, *, min_opened_ts: Optional[float] = None
@@ -390,6 +396,7 @@ def golive_check(
     min_ideal_settled: Optional[int] = None,
     book_corr: Optional[tuple] = None,
     min_split_half_corr: Optional[float] = None,
+    min_clean_settled: Optional[int] = None,
 ) -> tuple[bool, list[tuple]]:
     """Re-verify a promoted wallet is still worth REAL capital, right now.
 
@@ -415,6 +422,22 @@ def golive_check(
         f"≥{min_settled} settled copies",
         stats.n_closed >= min_settled,
         f"{stats.n_closed}"))
+
+    if min_clean_settled is not None:
+        # The three realized bars around this one (settled count, paper ROI,
+        # promotion floor) are computed by compute_stats over ALL-TIME rows —
+        # it has no era parameter. Only the two additive honest checks are
+        # era-scoped. So without this bar a wallet whose entire edge is
+        # pre-P0-1 fill artifact can still read READY: 40 all-time settles at
+        # +14% realized (the number P0-1 voided) satisfies every realized bar,
+        # while the honest pair needs only 5 clean settles and a 3-wallet
+        # correlation — both coin flips at that n. Requiring the SAME settled
+        # count in the clean era means real money is never blessed on
+        # evidence the repo has itself declared invalid.
+        checks.append((
+            f"≥{min_clean_settled} settled copies IN THE CLEAN ERA",
+            n_ideal_settled >= min_clean_settled,
+            f"{n_ideal_settled} clean (of {stats.n_closed} all-time)"))
 
     roi_ok = stats.roi is not None and stats.roi >= min_roi
     checks.append((

@@ -70,6 +70,7 @@ def evaluate_promoted(
     min_ideal_roi: Optional[float] = None,
     min_ideal_settled: Optional[int] = None,
     min_split_half_corr: Optional[float] = None,
+    min_clean_settled: Optional[int] = None,
 ) -> dict:
     """wallet(lower) -> (ready, stats, checks) for every promoted wallet,
     computed exactly like the manual ``/golive`` command (same gate, same
@@ -112,7 +113,8 @@ def evaluate_promoted(
             min_roi=min_roi, floor_kwargs=floor_kwargs,
             ideal_roi=ideal_roi, n_ideal_settled=n_ideal,
             min_ideal_roi=min_ideal_roi, min_ideal_settled=min_ideal_settled,
-            book_corr=book_corr, min_split_half_corr=min_split_half_corr)
+            book_corr=book_corr, min_split_half_corr=min_split_half_corr,
+            min_clean_settled=min_clean_settled)
         out[k] = (ready, stats, checks)
     return out
 
@@ -161,6 +163,7 @@ def run_golive_watch(
     min_ideal_roi: Optional[float] = None,
     min_ideal_settled: Optional[int] = None,
     min_split_half_corr: Optional[float] = None,
+    min_clean_settled: Optional[int] = None,
 ) -> list[tuple[str, bool]]:
     """One watch pass. Returns the [(wallet, ready)] transitions it alerted."""
     now = time.time() if now is None else now
@@ -169,7 +172,8 @@ def run_golive_watch(
         max_idle_days=max_idle_days, min_roi=min_roi,
         floor_kwargs=floor_kwargs, era_floor=era_floor,
         min_ideal_roi=min_ideal_roi, min_ideal_settled=min_ideal_settled,
-        min_split_half_corr=min_split_half_corr)
+        min_split_half_corr=min_split_half_corr,
+        min_clean_settled=min_clean_settled)
     state = _read_state(state_path)
     # prune wallets no longer promoted so the state file can't grow stale keys
     # — but ONLY when the promoted store actually returned wallets: its reader

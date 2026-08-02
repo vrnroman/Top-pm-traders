@@ -409,6 +409,16 @@ class Config:
     # review). Mirrors the repo's thin-sample band (MATURITY_THIN=5): below it,
     # an ROI is noise, not signal.
     copy_golive_min_ideal_settled: int = _opt_int("COPY_GOLIVE_MIN_IDEAL_SETTLED", 5)
+    # Minimum CLEAN-ERA settled copies for the gate to open AT ALL (s-r7m3qk,
+    # 2026-08-02). Distinct from the bar above, which only guards the ideal-ROI
+    # check: compute_stats has no era parameter, so the settled-count, paper-ROI
+    # and promotion-floor bars are ALL-TIME realized — i.e. the very number
+    # P0-1 voided. Without this, a wallet with 40 artifact-era settles at +14%
+    # realized clears every realized bar while the honest pair rests on 5 clean
+    # settles and a 3-wallet correlation, both coin flips at that n. Mirrors
+    # COPY_GOLIVE_MIN_SETTLED so the clean era must carry the same evidence the
+    # all-time record claims. Recalibrate at the 08-22 verdict.
+    copy_golive_min_clean_settled: int = _opt_int("COPY_GOLIVE_MIN_CLEAN_SETTLED", 30)
     copy_golive_min_split_half_corr: float = _opt_float(
         "COPY_GOLIVE_MIN_SPLIT_HALF_CORR", 0.0)
     # Edge-triggered Telegram ping when a promoted wallet crosses (or drops

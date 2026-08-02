@@ -534,6 +534,19 @@ class CopyPaperEngine:
         for p in self.ledger.positions.values():
             if not p.closed or (p.spent or 0) <= 0:
                 continue
+            # Dust fills are quarantined from every other aggregation in the
+            # repo (report, aggregate_system_b, split_half_corr, ideal_roi_for,
+            # rebaseline, fill_health) and this was the one that missed them.
+            # It matters here more than anywhere: the gate reads sum(pnl)/
+            # sum(spent), and a dust win is UNBOUNDED while a dust loss is
+            # capped at -1 per row. One pre-fix row that swept a stale 0.001
+            # ask against their_price 0.62 books shares ≈ 50,000 on $50 spent
+            # and returns +$49,950 — enough to drag an entire losing category
+            # positive on its own, so the gate never fires and the slice §1.5
+            # identified as the loser stays wide open. The contamination is
+            # one-directional: it can only push toward admitting.
+            if is_dust_fill(p):
+                continue
             if (p.opened_ts or 0) < self.category_evidence_floor_ts:
                 continue
             c = cat.setdefault(p.category or "other", [0, 0.0, 0.0])

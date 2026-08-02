@@ -105,13 +105,14 @@ def test_honest_kwargs_from_toggle():
         copy_golive_min_ideal_roi = 0.0
         copy_golive_min_ideal_settled = 5
         copy_golive_min_split_half_corr = 0.0
+        copy_golive_min_clean_settled = 30
     assert pg.honest_kwargs_from(C) == {
         "min_ideal_roi": 0.0, "min_ideal_settled": 5,
-        "min_split_half_corr": 0.0}
+        "min_split_half_corr": 0.0, "min_clean_settled": 30}
     C.copy_golive_honest_metrics = False
     assert pg.honest_kwargs_from(C) == {
         "min_ideal_roi": None, "min_ideal_settled": None,
-        "min_split_half_corr": None}
+        "min_split_half_corr": None, "min_clean_settled": None}
 
 
 def test_golive_honest_ideal_roi_needs_a_minimum_sample():
@@ -252,3 +253,41 @@ def test_golive_handler_usage_without_arg(monkeypatch):
     monkeypatch.setattr(telegram_bot, "send_message", lambda *a, **k: sent.append(a))
     telegram_bot._handle_golive("/golive")
     assert sent and "Usage" in sent[0][0]
+
+
+# --- s-r7m3qk (2026-08-02): the clean-era settled bar -----------------------
+
+def test_golive_blocks_a_wallet_whose_record_is_all_artifact_era():
+    """compute_stats has NO era parameter, so the settled-count, paper-ROI and
+    promotion-floor bars are all-time realized — the very number P0-1 voided.
+    Before this bar, 40 artifact-era settles at +14% plus 5 lucky clean settles
+    and a 3-wallet correlation read 🟢 READY on evidence the repo itself
+    declared invalid."""
+    s = pg.compute_stats("0xA", _ready_positions(40))
+    ready, checks = pg.golive_check(
+        s, min_ideal_roi=0.0, min_ideal_settled=5, min_clean_settled=30,
+        ideal_roi=0.02, n_ideal_settled=5,
+        min_split_half_corr=0.0, book_corr=(0.10, 3), **_BASE)
+    assert ready is False
+    assert any("CLEAN ERA" in label and not ok for label, ok, _ in checks)
+    # and it opens once the clean era actually carries the evidence
+    ready, _ = pg.golive_check(
+        s, min_ideal_roi=0.0, min_ideal_settled=5, min_clean_settled=30,
+        ideal_roi=0.02, n_ideal_settled=30,
+        min_split_half_corr=0.0, book_corr=(0.10, 3), **_BASE)
+    assert ready is True
+
+
+def test_clean_era_bar_fails_closed_with_no_era_floor():
+    """No recorded era floor means the caller passes n_ideal_settled=0."""
+    s = pg.compute_stats("0xA", _ready_positions(40))
+    ready, _ = pg.golive_check(
+        s, min_ideal_roi=0.0, min_clean_settled=30,
+        ideal_roi=None, n_ideal_settled=0, **_BASE)
+    assert ready is False
+
+
+def test_clean_era_bar_absent_when_honest_metrics_off():
+    s = pg.compute_stats("0xA", _ready_positions(30))
+    _, checks = pg.golive_check(s, min_clean_settled=None, **_BASE)
+    assert not any("CLEAN ERA" in label for label, _, _ in checks)
