@@ -266,3 +266,158 @@ def test_verdict_memo_renders_reading_and_slices():
     assert "alive" in text
     assert "hold PREVIEW" in text
     assert "COST DRAG" in text
+
+
+# --------------------------------------------------------------------------- #
+# Phase-2: verdict overlay + /verdict + /slice + data autopsy
+# --------------------------------------------------------------------------- #
+
+from src.copy_trading import verdict_overlay
+
+
+def test_overlay_draft_confirm_flow(tmp_path):
+    d = str(tmp_path)
+    draft = verdict_overlay.new_draft("retire", now=1000.0)
+    verdict_overlay.save(verdict_overlay.draft_path(d), draft)
+    patch = verdict_overlay.confirm(d, now=1001.0)
+    assert patch == {"COPY_PAPER_ENABLED": "false",
+                     "WALLET_DISCOVERY_ENABLED": "false"}
+    ov = verdict_overlay.load(verdict_overlay.overlay_path(d))
+    assert ov["COPY_PAPER_ENABLED"] == "false"
+    assert ov["_decision"]["action"] == "retire"
+    # draft consumed
+    assert verdict_overlay.confirm(d, now=1002.0) is None
+
+
+def test_overlay_expired_draft_does_not_apply(tmp_path):
+    d = str(tmp_path)
+    verdict_overlay.save(verdict_overlay.draft_path(d),
+                         verdict_overlay.new_draft("retire", now=1000.0))
+    assert verdict_overlay.confirm(d, now=1000.0 + 3700.0) is None
+    assert verdict_overlay.load(verdict_overlay.overlay_path(d)) == {}
+
+
+def test_overlay_effective_prefers_overlay_over_env(tmp_path):
+    d = str(tmp_path)
+    assert verdict_overlay.effective(d, "AB_RACE_VERDICT_DAYS", "27") == "27"
+    verdict_overlay.save(verdict_overlay.overlay_path(d),
+                         {"AB_RACE_VERDICT_DAYS": "30"})
+    assert verdict_overlay.effective(d, "AB_RACE_VERDICT_DAYS", "27") == "30"
+    assert verdict_overlay.effective_bool(d, "COPY_PAPER_ENABLED", True) is True
+    verdict_overlay.save(verdict_overlay.overlay_path(d),
+                         {"COPY_PAPER_ENABLED": "false"})
+    assert verdict_overlay.effective_bool(d, "COPY_PAPER_ENABLED", True) is False
+
+
+def _wire_verdict_env(tmp_path, monkeypatch, verdict_sent):
+    """Point telegram_bot at tmp data + capture sends; write race state."""
+    from src import telegram_bot
+    buf: list[str] = []
+    monkeypatch.setattr(telegram_bot, "send_message",
+                        lambda text, **_kw: buf.append(text))
+    monkeypatch.setattr(telegram_bot.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(telegram_bot.CONFIG, "ab_race_verdict_days", 27.0)
+    state = {"verdict_sent": verdict_sent, "era_floor_ts": 1784976482.0}
+    (tmp_path / "ab_race_state.json").write_text(json.dumps(state))
+    return telegram_bot, buf
+
+
+def test_verdict_inert_before_memo_posts(tmp_path, monkeypatch):
+    tb, buf = _wire_verdict_env(tmp_path, monkeypatch, verdict_sent=False)
+    tb._handle_verdict("/verdict")
+    assert "No verdict yet" in buf[-1]
+    tb._handle_verdict("/verdict retire")
+    assert "Inert" in buf[-1]
+    # nothing drafted, nothing applied
+    assert verdict_overlay.load(
+        verdict_overlay.overlay_path(str(tmp_path))) == {}
+
+
+def test_verdict_draft_preview_confirm(tmp_path, monkeypatch):
+    tb, buf = _wire_verdict_env(tmp_path, monkeypatch, verdict_sent=True)
+    tb._handle_verdict("/verdict retire")
+    preview = buf[-1]
+    assert "Draft: retire" in preview
+    assert "COPY_PAPER_ENABLED" in preview and "false" in preview
+    assert "confirm" in preview
+    tb._handle_verdict("/verdict confirm")
+    assert "Applied" in buf[-1]
+    ov = verdict_overlay.load(verdict_overlay.overlay_path(str(tmp_path)))
+    assert ov["COPY_PAPER_ENABLED"] == "false"
+    # overlay survives (the deploy-regenerates-.env guarantee): a fresh read
+    # through effective_bool sees the decision without any env change
+    assert verdict_overlay.effective_bool(
+        str(tmp_path), "COPY_PAPER_ENABLED", True) is False
+
+
+def test_verdict_hold_records_decision_without_changes(tmp_path, monkeypatch):
+    tb, buf = _wire_verdict_env(tmp_path, monkeypatch, verdict_sent=True)
+    tb._handle_verdict("/verdict hold")
+    assert "no config change" in buf[-1]
+    tb._handle_verdict("/verdict confirm")
+    ov = verdict_overlay.load(verdict_overlay.overlay_path(str(tmp_path)))
+    assert ov["_decision"]["action"] == "hold"
+    assert "COPY_PAPER_ENABLED" not in ov
+
+
+def test_slice_renders_same_table_as_memo(tmp_path, monkeypatch):
+    from src import telegram_bot
+    buf: list[str] = []
+    monkeypatch.setattr(telegram_bot, "send_message",
+                        lambda text, **_kw: buf.append(text))
+    monkeypatch.setattr(telegram_bot.CONFIG, "data_dir", str(tmp_path))
+    ledger = tmp_path / "b.jsonl"
+    rows = [_closed_row(cat="crypto", spent=20.0) for _ in range(12)]
+    for r in rows:
+        r["opened_ts"] = 1785000000.0
+    ledger.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    monkeypatch.setattr(telegram_bot.CONFIG, "copy_paper_b_ledger", str(ledger))
+    (tmp_path / "ab_race_state.json").write_text(
+        json.dumps({"era_floor_ts": 1784976482.0}))
+    telegram_bot._handle_slice("/slice B")
+    msg = buf[-1]
+    assert "cost slices" in msg and "crypto" in msg
+    # same renderer as the memo: identical row line
+    from src.copy_trading.strategy_compare import cost_slices, fmt_slices
+    expect = fmt_slices("x", cost_slices(rows)["by_category"])[1]
+    assert expect.strip() in msg
+
+
+def test_autopsy_detects_and_dedups(tmp_path):
+    d = str(tmp_path)
+    # realized-pnl with a duplicate AND a >1h inversion
+    rows = [
+        {"timestamp": "2026-07-30T18:19:08+00:00", "condition_id": "c1",
+         "token_id": "t1", "pnl": -5.0, "exit": "resolution"},
+        {"timestamp": "2026-07-30T18:19:08+00:00", "condition_id": "c1",
+         "token_id": "t1", "pnl": -5.0, "exit": "resolution"},
+        {"timestamp": "2026-07-28T00:00:00+00:00", "condition_id": "c2",
+         "token_id": "t2", "pnl": 1.0, "exit": "resolution"},
+    ]
+    (tmp_path / "realized-pnl.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n")
+    first = ledger_integrity.run_autopsy(d, now=1000.0)
+    assert any("duplicate resolution" in a for a in first["findings"])
+    assert any("inversion" in a for a in first["findings"])
+    assert first["new"] == first["findings"]
+    # rerun-safety: identical state → no re-alert
+    second = ledger_integrity.run_autopsy(d, now=2000.0)
+    assert second["new"] == []
+    assert second["findings"] == first["findings"]
+    # changed anomaly shape → re-alerts
+    rows.append({"timestamp": "2026-07-30T18:19:08+00:00", "condition_id": "c1",
+                 "token_id": "t1", "pnl": -5.0, "exit": "resolution"})
+    (tmp_path / "realized-pnl.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n")
+    third = ledger_integrity.run_autopsy(d, now=3000.0)
+    assert any("duplicate resolution" in a for a in third["new"])
+
+
+def test_autopsy_size_trajectory_flags_runaway_growth(tmp_path):
+    d = str(tmp_path)
+    big = tmp_path / "trade-history.jsonl"
+    big.write_text("x" * (6 * 1024 * 1024))
+    ledger_integrity.run_autopsy(d, now=1000.0)      # baseline sample
+    big.write_text("x" * (13 * 1024 * 1024))         # >2x growth, +7MB
+    res = ledger_integrity.run_autopsy(d, now=1000.0 + 86400.0)
+    assert any("trade-history grew" in a for a in res["new"])

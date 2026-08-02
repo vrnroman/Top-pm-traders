@@ -239,7 +239,7 @@ def _fmt_reading(reading: dict) -> list:
     return lines
 
 
-def _fmt_slices(title: str, slices: dict) -> list:
+def fmt_slices(title: str, slices: dict) -> list:
     lines = []
     if not slices:
         return lines
@@ -483,9 +483,9 @@ def format_verdict(cmp: dict) -> str:
         out.append("")
         out.extend(_fmt_reading(cmp["section7"]))
     slices = cmp.get("b_cost_slices") or {}
-    slice_lines = (_fmt_slices("B cost slices — by category (net drag first):",
+    slice_lines = (fmt_slices("B cost slices — by category (net drag first):",
                                slices.get("by_category") or {})
-                   + _fmt_slices("B cost slices — by copy size:",
+                   + fmt_slices("B cost slices — by copy size:",
                                  slices.get("by_size") or {}))
     if slice_lines:
         out.append("")

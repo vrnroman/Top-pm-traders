@@ -774,17 +774,21 @@ def _ab_race_reporter_loop():
             cmp_ = compare(CONFIG.copy_paper_ledger, CONFIG.copy_paper_b_ledger,
                            b_slippage_bps=CONFIG.copy_paper_b_slippage_bps,
                            era_floor=era_floor)
-            # Ledger-integrity witness (s-log7q): the snapshot renders sums of
-            # these files — say on the watched channel if they carry duplicate
-            # settled rows (the 2026-07-30 double-write class). Silent when clean.
+            # Ledger-integrity + data autopsy (s-log7q): the snapshot renders
+            # sums of these files — say on the watched channel if they carry
+            # duplicate settled rows, inversions, or runaway growth (the
+            # 2026-07-30 double-write class). Silent when clean; a standing
+            # anomaly re-alerts only when its shape changes.
             from src.copy_trading import ledger_integrity
-            findings = ledger_integrity.scan(
-                realized_path=os.path.join(CONFIG.data_dir, "realized-pnl.jsonl"),
-                a_ledger=CONFIG.copy_paper_ledger,
-                b_ledger=CONFIG.copy_paper_b_ledger)
-            integrity_line = ledger_integrity.format_findings(findings)
-            if integrity_line:
+            autopsy = ledger_integrity.run_autopsy(CONFIG.data_dir)
+            integrity_line = ""
+            if autopsy["new"]:
+                integrity_line = ("⚠ DATA AUTOPSY — "
+                                  + "; ".join(autopsy["new"][:3]))
                 logger.warning(f"[AB-RACE] {integrity_line}")
+            elif autopsy["findings"]:
+                logger.info(f"[AB-RACE] autopsy: {len(autopsy['findings'])} "
+                            "standing finding(s) (already reported)")
             snapshot_msg = format_snapshot(cmp_)
             if integrity_line:
                 snapshot_msg += "\n" + integrity_line
@@ -797,8 +801,14 @@ def _ab_race_reporter_loop():
                 f"era_floor={era_floor:.0f})")
             st = era_state.load(state_path)
             era = cmp_.get("era_start")
+            # Verdict clock: the confirmed /verdict overlay outranks env (an
+            # owner's "recalibrate" must survive the next deploy).
+            from src.copy_trading import verdict_overlay
+            verdict_days = float(verdict_overlay.effective(
+                CONFIG.data_dir, "AB_RACE_VERDICT_DAYS",
+                CONFIG.ab_race_verdict_days))
             if (era and not st.get("verdict_sent")
-                    and time.time() - era >= CONFIG.ab_race_verdict_days * 86400.0):
+                    and time.time() - era >= verdict_days * 86400.0):
                 sent = telegram_bot.send_message(
                     "🏁 <b>A-vs-B verdict memo</b>\n<pre>"
                     + format_verdict(cmp_) + "</pre>")
@@ -1014,7 +1024,12 @@ async def main():
 
     # Start the copy-paper validation harness (Strategy 1b) in a thread.
     # Measurement only — never places real orders — so it is always safe to run.
-    if CONFIG.copy_paper_enabled:
+    # The verdict overlay (a confirmed /verdict decision) outranks env here:
+    # deploys regenerate .env, so the owner's decision must live on the data
+    # volume to survive them.
+    from src.copy_trading import verdict_overlay
+    if verdict_overlay.effective_bool(
+            CONFIG.data_dir, "COPY_PAPER_ENABLED", CONFIG.copy_paper_enabled):
         copy_paper_thread = threading.Thread(
             target=_copy_paper_loop, daemon=True, name="copy-paper"
         )
@@ -1053,7 +1068,9 @@ async def main():
 
     # Start the continuous wallet-discovery hunter (feeds the paper watchlist).
     # Measurement/selection only — never places real orders or edits live tiers.
-    if CONFIG.wallet_discovery_enabled:
+    if verdict_overlay.effective_bool(
+            CONFIG.data_dir, "WALLET_DISCOVERY_ENABLED",
+            CONFIG.wallet_discovery_enabled):
         discovery_thread = threading.Thread(
             target=_discovery_loop, daemon=True, name="wallet-discovery"
         )

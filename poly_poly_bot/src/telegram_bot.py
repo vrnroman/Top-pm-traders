@@ -49,6 +49,8 @@ BOT_MENU_COMMANDS: list[dict] = [
     {"command": "history", "description": "Last 10 copy trades"},
     {"command": "check", "description": "Verify trading setup (read-only, no orders)"},
     {"command": "setkey", "description": "Rotate/clear in-memory private key (e.g. /setkey clear CONFIRM)"},
+    {"command": "slice", "description": "Cost-slice @net table for a paper book (/slice A|B)"},
+    {"command": "verdict", "description": "One-word era decision after the §7 memo (arms 2026-08-22)"},
     {"command": "reset", "description": "Zero all P&L + risk/spend state (archives first; needs CONFIRM)"},
     {"command": "promote", "description": "Promote a paper-validated wallet to System A (tier 1b, paper)"},
     {"command": "golive", "description": "Re-check a promoted wallet before the real-money PREVIEW flip"},
@@ -269,6 +271,10 @@ def _handle_command(text: str):
         _handle_golive(text)
     elif text.startswith("/promote"):
         _handle_promote(text)
+    elif text.startswith("/slice"):
+        _handle_slice(text)
+    elif text.startswith("/verdict"):
+        _handle_verdict(text)
     elif text.startswith("/shutdown"):
         _handle_shutdown(text)
     elif text.startswith("/help") or text.startswith("/start"):
@@ -1194,7 +1200,124 @@ def _handle_promote(text: str) -> None:
     )
 
 
+def _handle_slice(text: str) -> None:
+    """/slice [A|B] — the verdict memo's cost-slice table, on demand (s-log7q).
+
+    Renders through the exact functions the memo uses (``cost_slices`` +
+    ``fmt_slices``) so the two surfaces can never disagree. Clean-era scoped,
+    same as the race."""
+    from src.copy_trading import era_state
+    from src.copy_trading.strategy_compare import (
+        _load_rows, cost_slices, fmt_slices)
+    parts = text.split()
+    book = parts[1].upper() if len(parts) > 1 else "B"
+    if book not in ("A", "B"):
+        send_message("Usage: <code>/slice A</code> or <code>/slice B</code>")
+        return
+    path = CONFIG.copy_paper_b_ledger if book == "B" else CONFIG.copy_paper_ledger
+    era_floor = era_state.era_floor_ts(
+        os.path.join(CONFIG.data_dir, "ab_race_state.json"))
+    rows = [r for r in _load_rows(path)
+            if float(r.get("opened_ts") or 0.0) >= (era_floor or 0.0)]
+    slices = cost_slices(rows)
+    lines = [f"🔪 <b>Book {book} cost slices</b> "
+             f"({len([r for r in rows if r.get('closed')])} settled, clean era)"]
+    body = (fmt_slices("by category (net drag first):",
+                       slices.get("by_category") or {})
+            + fmt_slices("by copy size:", slices.get("by_size") or {}))
+    if body:
+        lines.append("<pre>" + "\n".join(body) + "</pre>")
+    else:
+        lines.append("no slices with n≥10 yet")
+    send_message("\n".join(lines))
+
+
+def _handle_verdict(text: str) -> None:
+    """/verdict [hold|retire|recalibrate|confirm] — the one-word era decision.
+
+    Inert until the §7 memo has posted (``verdict_sent`` in ab_race_state.json)
+    — zero interaction with the race before the evidence is in. A decision is
+    previewed first (current → new values, effect timing) and only a typed
+    ``/verdict confirm`` within the hour applies it. Applies to a durable
+    overlay on the data volume (never .env — deploys regenerate it), so the
+    decision survives redeploys.
+    """
+    from src.copy_trading import era_state, verdict_overlay
+    state_path = os.path.join(CONFIG.data_dir, "ab_race_state.json")
+    parts = text.split()
+    st = era_state.load(state_path)
+
+    if len(parts) == 1:
+        if not st.get("verdict_sent"):
+            vdays = float(verdict_overlay.effective(
+                CONFIG.data_dir, "AB_RACE_VERDICT_DAYS",
+                CONFIG.ab_race_verdict_days))
+            era_ts = st.get("era_floor_ts")
+            eta = ""
+            if era_ts:
+                from datetime import datetime, timezone
+                eta = (" — memo posts ~"
+                       + datetime.fromtimestamp(
+                           float(era_ts) + vdays * 86400.0 + 2 * 86400.0,
+                           timezone.utc).strftime("%Y-%m-%d"))
+            send_message(
+                "🏁 No verdict yet — the §7 memo has not posted"
+                f"{eta}. This command arms once it has.")
+            return
+        ov = verdict_overlay.load(
+            verdict_overlay.overlay_path(CONFIG.data_dir))
+        dec = ov.get("_decision") or {}
+        send_message(
+            "🏁 <b>Era decision</b>\n"
+            f"Decision so far: <code>{_esc(str(dec.get('action') or 'none'))}</code>\n"
+            "Reply <code>/verdict hold</code> (change nothing), "
+            "<code>/verdict retire</code> (stop paper books + discovery), or "
+            "<code>/verdict recalibrate</code> (extend era 30d). "
+            "Each previews before anything applies.")
+        return
+
+    arg = parts[1].lower()
+    if not st.get("verdict_sent"):
+        send_message("🏁 Inert until the §7 memo posts — no verdict to act on.")
+        return
+
+    if arg == "confirm":
+        patch = verdict_overlay.confirm(CONFIG.data_dir)
+        if patch is None:
+            send_message("No live draft (expired or never made) — "
+                         "start with /verdict hold|retire|recalibrate.")
+            return
+        lines = ["✅ <b>Applied.</b> Overlay now:"]
+        for k, v in patch.items():
+            lines.append(f"  {k} = {v} "
+                         f"(effective {verdict_overlay.EFFECT_TIMING.get(k, 'next restart')})")
+        if not patch:
+            lines.append("  (no config change — decision recorded)")
+        send_message("\n".join(lines))
+        return
+
+    if arg not in verdict_overlay.ACTION_PATCHES:
+        send_message("Usage: <code>/verdict hold|retire|recalibrate|confirm</code>")
+        return
+
+    draft = verdict_overlay.new_draft(arg)
+    verdict_overlay.save(verdict_overlay.draft_path(CONFIG.data_dir), draft)
+    ov = verdict_overlay.load(verdict_overlay.overlay_path(CONFIG.data_dir))
+    lines = [f"🏁 <b>Draft: {arg}</b> (expires in 1h)"]
+    if draft["patch"]:
+        for k, v in draft["patch"].items():
+            cur = ov.get(k, getattr(CONFIG, k.lower(), os.environ.get(k, "—")))
+            lines.append(f"  {k}: <code>{_esc(str(cur))}</code> → "
+                         f"<code>{_esc(str(v))}</code> "
+                         f"({verdict_overlay.EFFECT_TIMING.get(k, 'next restart')})")
+    else:
+        lines.append("  no config change — the decision is just recorded")
+    lines.append("Reply <code>/verdict confirm</code> to apply.")
+    send_message("\n".join(lines))
+
+
 def _golive_target(query: str) -> str | None:
+
     """Resolve a /golive argument to a wallet: a full 0x address, or a prefix that
     uniquely matches a *promoted* wallet."""
     q = (query or "").strip().lower()
