@@ -59,33 +59,6 @@ def duplicate_copy_ids(rows: list[dict]) -> Counter:
     return Counter({k: n for k, n in closed.items() if n > 1})
 
 
-def scan(*, realized_path: str, a_ledger: str, b_ledger: str) -> dict:
-    """Scan the three money ledgers. Returns per-file duplicate counts with a
-    sample of offending keys (first 3) for the alert line."""
-    out = {}
-    for name, path, scanner in (
-            ("realized-pnl", realized_path, duplicate_resolution_keys),
-            ("ledger-A", a_ledger, duplicate_copy_ids),
-            ("ledger-B", b_ledger, duplicate_copy_ids)):
-        dups = scanner(_load_rows(path))
-        if dups:
-            sample = ["…".join((k[0][:8], k[1][:8])) if isinstance(k, tuple)
-                      else k[:14] for k in list(dups)[:3]]
-            out[name] = {"rows": sum(dups.values()), "keys": len(dups),
-                         "sample": sample}
-    return out
-
-
-def format_findings(findings: dict) -> str:
-    """One Telegram-safe line per dirty ledger ('' when all clean)."""
-    if not findings:
-        return ""
-    bits = [f"{name}: {d['rows']} dup rows over {d['keys']} keys "
-            f"({', '.join(d['sample'])})"
-            for name, d in findings.items()]
-    return "⚠ LEDGER INTEGRITY — duplicate settled rows: " + "; ".join(bits)
-
-
 # --------------------------------------------------------------------------- #
 # Daily data autopsy (s-log7q phase-2, P2) — one watched line for every file
 # --------------------------------------------------------------------------- #
@@ -185,15 +158,22 @@ def scan_ts_inversions(name: str, path: str, max_findings: int = 3) -> list[str]
     return []
 
 
-def default_watches(data_dir: str) -> list[dict]:
+def default_watches(data_dir: str, *, realized_path: str | None = None,
+                    a_ledger: str | None = None,
+                    b_ledger: str | None = None) -> list[dict]:
     """The money/state ledgers under watch. Each: name, path, and which extra
-    scanners run beyond the size trajectory."""
+    scanners run beyond the size trajectory. Ledger paths come from CONFIG at
+    the call site so env overrides are watched too — hardcoding the defaults
+    here would silently watch nonexistent files forever (code-review L9)."""
     return [
-        {"name": "realized-pnl", "path": _os.path.join(data_dir, "realized-pnl.jsonl"),
+        {"name": "realized-pnl",
+         "path": realized_path or _os.path.join(data_dir, "realized-pnl.jsonl"),
          "dups": "resolution", "ts": True},
-        {"name": "ledger-A", "path": _os.path.join(data_dir, "copy_paper_ledger.jsonl"),
+        {"name": "ledger-A",
+         "path": a_ledger or _os.path.join(data_dir, "copy_paper_ledger.jsonl"),
          "dups": "copy_id", "ts": False},
-        {"name": "ledger-B", "path": _os.path.join(data_dir, "copy_paper_ledger_b.jsonl"),
+        {"name": "ledger-B",
+         "path": b_ledger or _os.path.join(data_dir, "copy_paper_ledger_b.jsonl"),
          "dups": "copy_id", "ts": False},
         {"name": "gate-history", "path": _os.path.join(data_dir, "gate-history.jsonl"),
          "dups": None, "ts": True},
@@ -205,6 +185,8 @@ def default_watches(data_dir: str) -> list[dict]:
 
 
 def run_autopsy(data_dir: str, *, now: float | None = None,
+                realized_path: str | None = None, a_ledger: str | None = None,
+                b_ledger: str | None = None,
                 state_name: str = "autopsy-state.json") -> dict:
     """Run every watch, dedup findings by fingerprint, persist state.
 
@@ -220,7 +202,8 @@ def run_autopsy(data_dir: str, *, now: float | None = None,
     seen_fps = state.get("fingerprints") or {}
     findings, new_findings, files_state = [], [], {}
     try:
-        for w in default_watches(data_dir):
+        for w in default_watches(data_dir, realized_path=realized_path,
+                                 a_ledger=a_ledger, b_ledger=b_ledger):
             name, path = w["name"], w["path"]
             anomalies = []
             if w.get("dups") == "resolution":

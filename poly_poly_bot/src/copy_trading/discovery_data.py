@@ -485,9 +485,10 @@ def evaluate_sweep(
     # files are tiny (~4KB) and immutable, but unbounded — it doubled
     # 578MB → 1.1GB in five days (~260k files, ~23k/day) on an 84%-full disk.
     # Resolutions are facts, so a pruned file is never *wrong* to lose: if the
-    # market is ever queried again it costs one batched Gamma call to refetch.
-    # TTL drops files no sweep has touched in 7 days; the count cap is the hard
-    # backstop (120k ≈ ~0.5GB).
+    # market is queried again it costs one batched Gamma call to refetch. The
+    # prune is mtime-based (reads don't touch), so a still-hot file older than
+    # the TTL is deleted and refetched within the same sweep — self-healing.
+    # The count cap is the hard backstop (120k ≈ ~0.5GB).
     if cfg.res_cache_dir:
         removed = prune_cache(
             cfg.res_cache_dir,

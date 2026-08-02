@@ -780,11 +780,15 @@ def _ab_race_reporter_loop():
             # 2026-07-30 double-write class). Silent when clean; a standing
             # anomaly re-alerts only when its shape changes.
             from src.copy_trading import ledger_integrity
-            autopsy = ledger_integrity.run_autopsy(CONFIG.data_dir)
+            autopsy = ledger_integrity.run_autopsy(
+                CONFIG.data_dir,
+                realized_path=os.path.join(CONFIG.data_dir, "realized-pnl.jsonl"),
+                a_ledger=CONFIG.copy_paper_ledger,
+                b_ledger=CONFIG.copy_paper_b_ledger)
             integrity_line = ""
             if autopsy["new"]:
                 integrity_line = ("⚠ DATA AUTOPSY — "
-                                  + "; ".join(autopsy["new"][:3]))
+                                  + "; ".join(autopsy["new"]))
                 logger.warning(f"[AB-RACE] {integrity_line}")
             elif autopsy["findings"]:
                 logger.info(f"[AB-RACE] autopsy: {len(autopsy['findings'])} "
@@ -809,13 +813,17 @@ def _ab_race_reporter_loop():
                 CONFIG.ab_race_verdict_days))
             if (era and not st.get("verdict_sent")
                     and time.time() - era >= verdict_days * 86400.0):
-                sent = telegram_bot.send_message(
-                    "🏁 <b>A-vs-B verdict memo</b>\n<pre>"
-                    + format_verdict(cmp_) + "</pre>")
+                # Chunked: the memo (headline + routing + §7 reading + slice
+                # tables) can cross Telegram's 4096-char cap, and a rejected
+                # send must NOT flip verdict_sent — the one-shot would be lost
+                # and /verdict would never arm (code-review L5). No <pre> wrap:
+                # it would tear across chunks.
+                memo_ok = telegram_bot._send_chunked(
+                    "🏁 <b>A-vs-B verdict memo</b>\n" + format_verdict(cmp_))
                 logger.info(
-                    f"[AB-RACE] day-7 verdict memo "
-                    f"{'sent' if sent else 'SEND FAILED (will retry next fire)'}")
-                if sent:
+                    f"[AB-RACE] verdict memo "
+                    f"{'sent' if memo_ok else 'SEND FAILED (will retry next fire)'}")
+                if memo_ok:
                     st["verdict_sent"] = True
                     st["verdict_ts"] = time.time()
                     era_state.save(state_path, st)

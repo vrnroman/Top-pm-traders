@@ -12,6 +12,7 @@ Commands:
 
 import os
 import json
+import re
 import time
 import logging
 import threading
@@ -183,29 +184,31 @@ def send_promotion_offer(wallet: str, n_closed: int, roi: float,
     return send_message(text, reply_markup=keyboard)
 
 
-def _send_chunked(text: str, parse_mode: str = "HTML", chunk_size: int = 3800):
+def _send_chunked(text: str, parse_mode: str = "HTML", chunk_size: int = 3800) -> bool:
     """Send a potentially long message as multiple Telegram messages.
 
     Splits on newline boundaries. We rely on the convention that HTML tags
     used here (<b>, <code>, <i>) open and close on the same line, so a split
-    between lines won't tear a tag.
+    between lines won't tear a tag. Returns True only when every chunk landed —
+    callers gating one-shot state (the verdict memo) retry on False.
     """
     if len(text) <= chunk_size:
-        send_message(text, parse_mode=parse_mode)
-        return
+        return send_message(text, parse_mode=parse_mode)
 
+    ok = True
     buf: list[str] = []
     cur = 0
     for line in text.split("\n"):
         ln = len(line) + 1  # +1 for the newline we re-insert
         if buf and cur + ln > chunk_size:
-            send_message("\n".join(buf), parse_mode=parse_mode)
+            ok = send_message("\n".join(buf), parse_mode=parse_mode) and ok
             buf = []
             cur = 0
         buf.append(line)
         cur += ln
     if buf:
-        send_message("\n".join(buf), parse_mode=parse_mode)
+        ok = send_message("\n".join(buf), parse_mode=parse_mode) and ok
+    return ok
 
 
 # --- Live price fetching ---
@@ -1267,13 +1270,21 @@ def _handle_verdict(text: str) -> None:
         ov = verdict_overlay.load(
             verdict_overlay.overlay_path(CONFIG.data_dir))
         dec = ov.get("_decision") or {}
-        send_message(
-            "🏁 <b>Era decision</b>\n"
-            f"Decision so far: <code>{_esc(str(dec.get('action') or 'none'))}</code>\n"
+        lines = [
+            "🏁 <b>Era decision</b>",
+            f"Decision so far: <code>{_esc(str(dec.get('action') or 'none'))}</code>",
+        ]
+        active = {k: v for k, v in ov.items() if k != "_decision"}
+        if active:
+            lines.append("Overlay in force (outranks env):")
+            for k, v in active.items():
+                lines.append(f"  {k} = <code>{_esc(str(v))}</code>")
+        lines.append(
             "Reply <code>/verdict hold</code> (change nothing), "
             "<code>/verdict retire</code> (stop paper books + discovery), or "
             "<code>/verdict recalibrate</code> (extend era 30d). "
             "Each previews before anything applies.")
+        send_message("\n".join(lines))
         return
 
     arg = parts[1].lower()
@@ -1282,17 +1293,30 @@ def _handle_verdict(text: str) -> None:
         return
 
     if arg == "confirm":
+        draft = verdict_overlay.load(verdict_overlay.draft_path(CONFIG.data_dir))
+        action = draft.get("action") if verdict_overlay.draft_valid(draft) else None
         patch = verdict_overlay.confirm(CONFIG.data_dir)
         if patch is None:
             send_message("No live draft (expired or never made) — "
                          "start with /verdict hold|retire|recalibrate.")
             return
+        # recalibrate re-arms the era: the memo clock's only reader is gated on
+        # verdict_sent, so without a reset the extended clock would have nothing
+        # to fire (code-review M1). The next memo posts verdict_days from the
+        # overlay after B's era start.
+        if action == "recalibrate":
+            st = era_state.load(state_path)
+            st.pop("verdict_sent", None)
+            st.pop("verdict_ts", None)
+            era_state.save(state_path, st)
         lines = ["✅ <b>Applied.</b> Overlay now:"]
         for k, v in patch.items():
             lines.append(f"  {k} = {v} "
                          f"(effective {verdict_overlay.EFFECT_TIMING.get(k, 'next restart')})")
         if not patch:
             lines.append("  (no config change — decision recorded)")
+        if action == "recalibrate":
+            lines.append("  era re-armed — a fresh memo will post at the new clock")
         send_message("\n".join(lines))
         return
 
@@ -1492,7 +1516,12 @@ def _process_update(update: dict) -> None:
         return
 
     if text.startswith("/"):
-        logger.info(f"Telegram command: {text}")
+        # /setkey carries a raw private key — redact it at the echo site
+        # (surgical: a blanket 64-hex scrub would also eat condition_ids,
+        # which are legitimate log content).
+        echo = re.sub(r"^(/setkey\s+)0x[0-9a-fA-F]{64}(\s+CONFIRM)$",
+                      r"\g<1>0x***REDACTED\g<2>", text)
+        logger.info(f"Telegram command: {echo}")
         try:
             _handle_command(text)
         except Exception as e:

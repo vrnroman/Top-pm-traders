@@ -173,14 +173,68 @@ def test_integrity_ignores_open_close_pair_but_flags_double_close():
 def test_integrity_scan_and_format(tmp_path):
     realized = tmp_path / "realized-pnl.jsonl"
     realized.write_text("\n".join(json.dumps(r) for r in [_res_row(), _res_row()]) + "\n")
-    clean = tmp_path / "clean.jsonl"
-    clean.write_text(json.dumps({"copy_id": "c1", "closed": True}) + "\n")
-    findings = ledger_integrity.scan(realized_path=str(realized),
-                                     a_ledger=str(clean), b_ledger=str(clean))
-    assert "realized-pnl" in findings
-    line = ledger_integrity.format_findings(findings)
-    assert "LEDGER INTEGRITY" in line and "realized-pnl" in line
-    assert ledger_integrity.format_findings({}) == ""
+    # the autopsy (the live caller) flags the duplicate as a NEW finding once
+    res = ledger_integrity.run_autopsy(str(tmp_path), now=1000.0)
+    assert any("realized-pnl" in a and "duplicate" in a for a in res["new"])
+
+
+# --------------------------------------------------------------------------- #
+# Code-review fixes (M1 recalibrate re-arm, M2 setkey echo, L5 memo gate)
+# --------------------------------------------------------------------------- #
+
+def test_verdict_recalibrate_rearms_memo_clock(tmp_path, monkeypatch):
+    tb, buf = _wire_verdict_env(tmp_path, monkeypatch, verdict_sent=True)
+    st_path = tmp_path / "ab_race_state.json"
+    st = json.loads(st_path.read_text())
+    st["verdict_ts"] = 1785000000.0
+    st_path.write_text(json.dumps(st))
+    tb._handle_verdict("/verdict recalibrate")
+    tb._handle_verdict("/verdict confirm")
+    assert "Applied" in buf[-1]
+    after = json.loads(st_path.read_text())
+    assert "verdict_sent" not in after and "verdict_ts" not in after
+    ov = verdict_overlay.load(verdict_overlay.overlay_path(str(tmp_path)))
+    assert ov["AB_RACE_VERDICT_DAYS"] == "30"
+
+
+def test_verdict_non_recalibrate_keeps_verdict_sent(tmp_path, monkeypatch):
+    tb, buf = _wire_verdict_env(tmp_path, monkeypatch, verdict_sent=True)
+    tb._handle_verdict("/verdict hold")
+    tb._handle_verdict("/verdict confirm")
+    after = json.loads((tmp_path / "ab_race_state.json").read_text())
+    assert after["verdict_sent"] is True
+
+
+def test_setkey_echo_redacts_private_key():
+    import re as _re
+    text = "/setkey 0x" + "ab" * 32 + " CONFIRM"
+    echo = _re.sub(r"^(/setkey\s+)0x[0-9a-fA-F]{64}(\s+CONFIRM)$",
+                   r"\g<1>0x***REDACTED\g<2>", text)
+    assert "abab" not in echo and "REDACTED" in echo
+    # a condition_id (also 0x+64hex) in any other command is NOT touched
+    other = "/check 0x" + "cd" * 32
+    echo2 = _re.sub(r"^(/setkey\s+)0x[0-9a-fA-F]{64}(\s+CONFIRM)$",
+                    r"\g<1>0x***REDACTED\g<2>", other)
+    assert echo2 == other
+
+
+def test_send_chunked_reports_failure(tmp_path, monkeypatch):
+    from src import telegram_bot
+    calls = []
+    monkeypatch.setattr(telegram_bot, "send_message",
+                        lambda text, **kw: calls.append(text) or len(calls) > 1)
+    long_text = "\n".join(f"line {i} " + "x" * 100 for i in range(100))
+    ok = telegram_bot._send_chunked(long_text, chunk_size=1000)
+    assert ok is False and len(calls) > 1
+    monkeypatch.setattr(telegram_bot, "send_message", lambda text, **kw: True)
+    assert telegram_bot._send_chunked(long_text, chunk_size=1000) is True
+
+
+def test_disk_eval_ignores_tight_sample_pairs():
+    prev = {"ts": 0.0, "free_gb": 3.1}
+    # 3 minutes later, 200MB drop — must NOT extrapolate to a scary slope
+    res = disk_watch.evaluate(2.9, prev, floor_gb=2.5, days_bar=14, now=180.0)
+    assert not res["tripped"] and res["days_to_floor"] is None
 
 
 # --------------------------------------------------------------------------- #

@@ -46,7 +46,10 @@ def evaluate(free_gb: float, prev: Optional[dict], *,
     days_to_floor: Optional[float] = None
     if prev and prev.get("free_gb") is not None and prev.get("ts") is not None:
         dt_days = (now - float(prev["ts"])) / 86400.0
-        if dt_days > 0:
+        # Below ~1h between samples a few-MB wobble extrapolates to a bogus
+        # GB/day slope (a manual rerun right after a sweep, say) — too tight a
+        # pair to say anything about trajectory (code-review L8).
+        if dt_days >= 1.0 / 24.0:
             shrink_gb_day = (float(prev["free_gb"]) - free_gb) / dt_days
             if shrink_gb_day > 0 and free_gb > floor_gb:
                 days_to_floor = (free_gb - floor_gb) / shrink_gb_day

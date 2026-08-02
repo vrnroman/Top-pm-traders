@@ -1060,7 +1060,11 @@ class DiscoveryRunner:
 
                 def _tg(text: str) -> None:
                     from src import telegram_bot
-                    telegram_bot.send_message(text)
+                    # Raise on a failed send so check() skips its state save —
+                    # alerting stays False and the next sweep retries the edge
+                    # alert instead of losing it silently (code-review M3).
+                    if not telegram_bot.send_message(text):
+                        raise RuntimeError("disk-watch telegram send failed")
 
                 disk_watch.check(os.path.dirname(self.state_path) or ".",
                                  sender=_tg)
