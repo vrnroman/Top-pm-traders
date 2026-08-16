@@ -45,11 +45,6 @@ STUCK_ORDER_S = 15 * 60.0
 # redeemer is not doing its job, and unredeemed positions are dead capital.
 UNREDEEMED_S = 6 * 3600.0
 
-# Balance drift beyond this fraction between what we think we hold and what the
-# chain says means our accounting is wrong. Trading on wrong accounting is how
-# a small bug becomes a large one.
-BALANCE_DRIFT_FRAC = 0.10
-
 # Consecutive cycle failures before the session stops trusting itself.
 CRASH_LOOP_N = 5
 
@@ -155,6 +150,10 @@ def find_unredeemed(positions: list, now: Optional[float] = None,
     return out
 
 
+def _is_neg_risk(p) -> bool:
+    return bool(_field(p, "negRisk", False))
+
+
 def redeemable_positions(proxy_wallet: str) -> list:
     """Positions the chain says are redeemable RIGHT NOW.
 
@@ -170,23 +169,34 @@ def redeemable_positions(proxy_wallet: str) -> list:
         import asyncio
 
         from src.copy_trading.auto_redeemer import _fetch_redeemable_positions
-        return list(asyncio.run(_fetch_redeemable_positions(proxy_wallet)) or [])
+        rows = list(asyncio.run(_fetch_redeemable_positions(proxy_wallet)) or [])
+        # The redeemer itself SKIPS neg-risk positions (they use a different
+        # redemption mechanism), so they sit in this list forever. Counting
+        # them as "failed to redeem" meant three of them would self-disarm a
+        # live session permanently, for something the redeemer was never going
+        # to do. Excluded here, mirroring the redeemer's own rule.
+        kept = [p for p in rows if not _is_neg_risk(p)]
+        skipped = len(rows) - len(kept)
+        if skipped:
+            logger.info(f"[guard] {skipped} neg-risk position(s) excluded: the "
+                        f"redeemer skips them by design")
+        return kept
     except Exception as exc:
         logger.warn(f"[guard] redeemable lookup failed: {exc}")
         return []
 
 
-def balance_drift(expected_usd: Optional[float],
-                  actual_usd: Optional[float]) -> Optional[float]:
-    """Fractional gap between our accounting and the chain, or None."""
-    if expected_usd is None or actual_usd is None:
-        return None
-    base = max(abs(expected_usd), 1.0)
-    return abs(expected_usd - actual_usd) / base
+# NOTE: there was a fourth trigger here, balance drift. It is deleted rather
+# than left in place. Nothing in this codebase produces an EXPECTED balance to
+# compare the chain against, so `main` never supplied one and the trigger could
+# not fire on any real pass, while the drill kept it green by handing in
+# 1000.0/1000.0. A guard that advertises four triggers and has three is worse
+# than one that advertises three: the extra name is a false green on the
+# safety net itself. Reinstate it when there is a real expected-balance
+# source, with a test that asserts the LOOP supplies it.
 
 
 def should_self_disarm(*, crash_streak: int = 0,
-                       drift: Optional[float] = None,
                        unredeemed: int = 0,
                        feed_stale_s: Optional[float] = None) -> tuple[bool, str]:
     """Has the session lost enough trust in its own state to stop trading?
@@ -198,9 +208,6 @@ def should_self_disarm(*, crash_streak: int = 0,
     if crash_streak >= CRASH_LOOP_N:
         return (True, f"{crash_streak} consecutive cycle failures: the session "
                       f"cannot complete a pass, so it cannot know its own state")
-    if drift is not None and drift > BALANCE_DRIFT_FRAC:
-        return (True, f"balance accounting is off by {drift * 100:.0f}%: "
-                      f"trading on wrong accounting compounds the error")
     if unredeemed >= 3:
         return (True, f"{unredeemed} resolved positions failed to redeem: "
                       f"capital is stuck and the redeemer is not working")
@@ -217,8 +224,6 @@ def should_self_disarm(*, crash_streak: int = 0,
 def run_once(*, pending_orders: Optional[list] = None,
              positions: Optional[list] = None,
              redeemable: Optional[list] = None,
-             expected_usd: Optional[float] = None,
-             actual_usd: Optional[float] = None,
              crash_streak: int = 0,
              feed_stale_s: Optional[float] = None,
              send: Optional[Callable] = None,
@@ -239,18 +244,12 @@ def run_once(*, pending_orders: Optional[list] = None,
     # being in the list AT ALL means the capital is sitting unredeemed, so
     # there is no age field to test and none is invented.
     unred = find_unredeemed(positions or [], now=now) + list(redeemable or [])
-    drift = balance_drift(expected_usd, actual_usd)
-
     edge("stuck_orders", bool(stuck),
          f"⏳ {len(stuck)} order(s) resting over "
          f"{STUCK_ORDER_S / 60:.0f} minutes", send, st)
     edge("unredeemed", bool(unred),
          f"💤 {len(unred)} resolved position(s) not redeemed after "
          f"{UNREDEEMED_S / 3600:.0f}h", send, st)
-    edge("balance_drift", bool(drift is not None and drift > BALANCE_DRIFT_FRAC),
-         f"⚠️ balance accounting off by "
-         f"{(drift or 0) * 100:.0f}%", send, st)
-
     acted: list = []
     if armed and stuck and cancel_order is not None:
         for o in stuck:
@@ -266,7 +265,7 @@ def run_once(*, pending_orders: Optional[list] = None,
                 logger.error(f"[guard] could not cancel {oid}: {exc}")
 
     disarm, why = should_self_disarm(
-        crash_streak=crash_streak, drift=drift, unredeemed=len(unred),
+        crash_streak=crash_streak, unredeemed=len(unred),
         feed_stale_s=feed_stale_s)
     disarmed = False
     if disarm:
@@ -284,7 +283,6 @@ def run_once(*, pending_orders: Optional[list] = None,
         "armed": armed,
         "stuck_orders": len(stuck),
         "unredeemed": len(unred),
-        "balance_drift": drift,
         "cancelled": acted,
         "self_disarmed": disarmed,
         "disarm_reason": why,

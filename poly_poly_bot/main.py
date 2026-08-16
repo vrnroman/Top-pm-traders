@@ -121,7 +121,7 @@ def _live_guard_loop():
         # was structurally incapable of firing while the log said the guard was
         # up. A read that fails must be loud AND must count as a failed pass,
         # or the guard keeps passing on empty inputs forever.
-        pending, redeemable, actual_usd = [], [], None
+        pending, redeemable = [], []
         read_failed = False
         try:
             pending = list(trade_queue.peek_pending_orders())
@@ -136,13 +136,6 @@ def _live_guard_loop():
         except Exception as exc:
             read_failed = True
             logger.error(f"[guard] could not read redeemable positions: {exc}")
-        try:
-            from src.copy_trading.get_balance import get_usdc_balance
-            bal = get_usdc_balance()
-            actual_usd = bal if bal is not None and bal >= 0 else None
-        except Exception as exc:
-            logger.warn(f"[guard] could not read USDC balance: {exc}")
-
         # How long since the detector last saw ANY trade. This is the input
         # the stale-feed trigger needs and never had.
         feed_stale_s = None
@@ -159,7 +152,7 @@ def _live_guard_loop():
         try:
             out = live_guard.run_once(
                 pending_orders=pending, redeemable=redeemable,
-                actual_usd=actual_usd, feed_stale_s=feed_stale_s,
+                feed_stale_s=feed_stale_s,
                 crash_streak=crash_streak, send=telegram_bot.send_message)
             crash_streak = crash_streak + 1 if read_failed else 0
             if out.get("stuck_orders") or out.get("unredeemed"):

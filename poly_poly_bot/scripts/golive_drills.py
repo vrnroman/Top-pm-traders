@@ -111,7 +111,6 @@ def drill_guard_detects_without_acting() -> None:
     out = live_guard.run_once(
         pending_orders=[Order("stuck-1", 3600), Order("fresh-1", 5)],
         positions=[Pos(48 * 3600), Pos(48 * 3600), Pos(10)],
-        expected_usd=1000.0, actual_usd=1000.0,
         crash_streak=0, send=None,
         cancel_order=lambda oid: cancelled.append(oid), now=now)
 
@@ -130,7 +129,6 @@ def drill_self_disarm_triggers() -> None:
     print("\n[5] self-disarm conditions")
     cases = [
         ("crash loop", dict(crash_streak=live_guard.CRASH_LOOP_N)),
-        ("balance drift", dict(drift=0.5)),
         ("stuck redemptions", dict(unredeemed=3)),
         ("stale feed", dict(feed_stale_s=3600)),
     ]

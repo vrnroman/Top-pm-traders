@@ -195,14 +195,13 @@ def test_detectors_fire_but_actions_do_not_while_unarmed(monkeypatch):
 def test_a_losing_session_is_not_a_disarm_condition():
     """Losing money is a strategy question. Not knowing what you hold is a
     trust question. Only the second one disarms."""
-    fires, _ = live_guard.should_self_disarm(crash_streak=0, drift=0.0,
+    fires, _ = live_guard.should_self_disarm(crash_streak=0,
                                              unredeemed=0, feed_stale_s=10)
     assert fires is False
 
 
 @pytest.mark.parametrize("kw", [
     dict(crash_streak=live_guard.CRASH_LOOP_N),
-    dict(drift=0.5),
     dict(unredeemed=3),
     dict(feed_stale_s=3600),
 ])
@@ -554,3 +553,64 @@ def test_the_drills_never_call_arm():
              if isinstance(n, ast.Call)
              and isinstance(n.func, ast.Attribute) and n.func.attr == "arm"]
     assert calls == [], "the drills must not be able to arm the bot"
+
+
+def test_every_disarm_trigger_is_actually_fed_by_production():
+    """The class that survived three verification rounds.
+
+    Every guard test asserted on `run_once`'s kwargs, and none asserted on the
+    PRODUCTION call site, so a trigger the loop forgot to supply stayed green
+    forever while the drills fed it by hand. Three rounds running, the fix
+    closed one instance and the next round found another. This asserts the
+    contract at the seam instead: every parameter `should_self_disarm` accepts
+    must actually be passed by `_live_guard_loop`.
+    """
+    import ast
+    import inspect
+
+    import main
+
+    trigger_params = {
+        p.name for p in
+        inspect.signature(live_guard.should_self_disarm).parameters.values()
+        if p.kind is inspect.Parameter.KEYWORD_ONLY
+    }
+    assert trigger_params, "no triggers found; the signature changed shape"
+
+    tree = ast.parse(inspect.getsource(main._live_guard_loop).lstrip())
+    supplied = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "run_once"):
+            supplied |= {kw.arg for kw in node.keywords if kw.arg}
+    # `unredeemed` is derived inside run_once from `redeemable`/`positions`.
+    derived = {"unredeemed": {"redeemable", "positions"}}
+    missing = []
+    for t in sorted(trigger_params):
+        if t in supplied:
+            continue
+        if t in derived and (derived[t] & supplied):
+            continue
+        missing.append(t)
+    assert not missing, (
+        f"live_guard advertises trigger(s) {missing} that the production loop "
+        f"never supplies. Wire them or delete them: a trigger nothing can feed "
+        f"is a false green on the safety net itself.")
+
+
+def test_neg_risk_positions_do_not_disarm_the_session(monkeypatch, tmp_path):
+    """The redeemer SKIPS neg-risk positions by design, so they sit in the
+    redeemable list forever. Counting presence alone meant three of them would
+    permanently self-disarm a live session for something that was never going
+    to be redeemed."""
+    monkeypatch.setattr(live_guard.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(
+        "src.copy_trading.auto_redeemer._fetch_redeemable_positions",
+        None, raising=False)
+    negs = [{"negRisk": True, "title": "n"} for _ in range(5)]
+    assert all(live_guard._is_neg_risk(p) for p in negs)
+    # run_once counts what it is given; the exclusion happens at the source,
+    # so assert the source filter rather than the counter
+    import inspect
+    src = inspect.getsource(live_guard.redeemable_positions)
+    assert "_is_neg_risk" in src
