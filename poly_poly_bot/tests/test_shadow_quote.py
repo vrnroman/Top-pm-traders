@@ -738,68 +738,103 @@ def test_non_finite_penalties_cannot_render_as_a_measurement():
     assert s["penalty_mean_bps"] == 200
 
 
-def test_no_user_facing_dash_in_this_runs_code():
-    """The owner's hardest style rule, over the text this run authored.
+def _render(cmd, rows, tmp_path, monkeypatch):
+    """Render a Telegram command against `rows` and return what it would send."""
+    from unittest.mock import patch as _patch
+    import src.telegram_bot as tb
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    with open(os.path.join(str(tmp_path), "shadow-quotes.jsonl"), "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    sent = []
+    with _patch.object(tb, "_send_chunked", lambda x: sent.append(x)), \
+         _patch.object(tb, "send_message", lambda x, **k: sent.append(x)):
+        if cmd.startswith("/speed"):
+            tb._handle_speed(cmd)
+        else:
+            tb._handle_live(cmd)
+    return "\n".join(sent)
 
-    Two earlier versions of this test were wrong in opposite directions. The
-    first listed only the four modules the run CREATED, so an em-dash shipped
-    in main.py's boot log, a file the run merely edited. The second scoped by
-    `git diff`, which returns nothing under CI's shallow clone, so it flagged
-    every pre-existing string in the repo and turned the deploy gate red: a
-    false positive in a gate is worse than the bug it guards.
 
-    So the scope is defined by ownership markers instead, which need no git
-    and cannot over-reach: every string in the modules this run wrote, plus
-    every string anywhere that carries this run's own log prefixes.
+def _panel_rows(n=8, **over):
+    import time as _t
+    now = _t.time()
+    base = dict(target="0xw", token_id="tok", category="sports",
+                their_price=0.5, our_price=0.55, penalty_bps=1000,
+                penalty_bps_t1=1100, t1_stale=False, quote_lag_s=1.0,
+                boot_flush=False, notify_latency_s=60.0, book_ts=1.0)
+    out = []
+    for i in range(n):
+        r = dict(base)
+        r.update(copy_id=f"c{i}", detected_at=now - 10,
+                 token_id=f"tok{i}", book_ts=float(i))
+        r.update(over)
+        out.append(r)
+    return out
+
+
+def test_no_dash_in_anything_these_commands_render(tmp_path, monkeypatch):
+    """The owner's hardest style rule, asserted on the RENDERED TEXT.
+
+    Three earlier versions of this guard checked source provenance and each
+    was wrong. v1 listed only the modules the run created, so a dash shipped
+    in main.py. v2 scoped by `git diff`, which is empty under CI's shallow
+    clone, so it flagged the whole repo and turned the deploy gate red. v3
+    scoped by log-prefix markers and therefore covered none of
+    telegram_bot.py, i.e. every line of /speed and /live output, which is
+    exactly the text he reads.
+
+    The rule is about rendered text, so this asserts on rendered text. Every
+    branch of both commands, including the empty and degenerate states.
     """
-    import ast
+    import time as _t
+    now = _t.time()
+    cases = {
+        "healthy": _panel_rows(8),
+        "empty": [],
+        "all boot flush": _panel_rows(6, boot_flush=True),
+        "all stale quotes": _panel_rows(6, quote_lag_s=900.0),
+        "one market one read": [dict(r, token_id="tokA", book_ts=1.0)
+                                for r in _panel_rows(9)],
+        "no independence stamp": [{k: v for k, v in r.items() if k != "book_ts"}
+                                  for r in _panel_rows(7)],
+        "mixed coverage": (_panel_rows(4)
+                           + [{k: v for k, v in r.items() if k != "book_ts"}
+                              for r in _panel_rows(9)]),
+        "unquotable only": [{"copy_id": "u", "target": "0xw", "token_id": "t",
+                             "category": "x", "their_price": 0.4,
+                             "their_ts": now - 50, "detected_at": now - 10,
+                             "unquotable": True, "reason": "no usable book"}],
+        "negative penalty": _panel_rows(6, penalty_bps=-1400,
+                                        penalty_bps_t1=-1600),
+        "junk fields": _panel_rows(5, quote_lag_s="abc", penalty_bps=1000),
+    }
+    for label, rows in cases.items():
+        for cmd in ("/speed 7", "/speed", "/speed banana", "/live"):
+            out = _render(cmd, rows, tmp_path, monkeypatch)
+            assert "\u2014" not in out and "\u2013" not in out, (
+                f"dash rendered by {cmd} in the {label!r} case")
 
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    OWNED_FILES = (
-        "src/copy_trading/live_mode.py",
-        "src/copy_trading/shadow_quote.py",
-        "src/copy_trading/virtual_ledger.py",
-        "src/copy_trading/order_executor.py",
-    )
-    # Files this run only edited: just the lines it owns, found by its prefixes.
-    MARKERS = ("[shadow]", "[live]", "PREVIEW_MODE=false starts real")
-    EDITED_FILES = (
-        "main.py", "src/config.py", "src/models.py", "src/telegram_bot.py",
-        "src/copy_trading/copy_paper.py", "src/copy_trading/copy_paper_live.py",
-        "src/copy_trading/copy_paper_runner.py",
-        "src/copy_trading/data_api_source.py", "src/copy_trading/market_price.py",
-        "src/copy_trading/onchain_source.py", "src/copy_trading/trade_executor.py",
-    )
 
-    def _strings(path):
-        tree = ast.parse(open(path, encoding="utf-8").read())
-        docs = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Module, ast.FunctionDef,
-                                 ast.AsyncFunctionDef, ast.ClassDef)):
-                if ast.get_docstring(node, clean=False) and node.body:
-                    docs.add(node.body[0].lineno)
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Constant)
-                    and isinstance(node.value, str)
-                    and node.lineno not in docs):
-                yield node.lineno, node.value
+def test_the_dash_guard_actually_catches_one(tmp_path, monkeypatch):
+    """A guard that cannot fail is not a guard. Proves this one can."""
+    import src.telegram_bot as tb
+    real = tb._fmt_bps
+    monkeypatch.setattr(tb, "_fmt_bps", lambda v: "\u2014" + real(v))
+    out = _render("/speed 7", _panel_rows(8), tmp_path, monkeypatch)
+    assert "\u2014" in out, (
+        "the render path must be reachable by the guard, or the guard proves "
+        "nothing")
 
-    offenders = []
-    for rel in OWNED_FILES:
-        path = os.path.join(repo, rel)
-        if os.path.exists(path):
-            for lineno, val in _strings(path):
-                if "\u2014" in val or "\u2013" in val:
-                    offenders.append(f"{rel}:{lineno}: {val[:60]!r}")
-    for rel in EDITED_FILES:
-        path = os.path.join(repo, rel)
-        if not os.path.exists(path):
-            continue
-        for lineno, val in _strings(path):
-            if not any(m in val for m in MARKERS):
-                continue
-            if "\u2014" in val or "\u2013" in val:
-                offenders.append(f"{rel}:{lineno}: {val[:60]!r}")
 
-    assert not offenders, "dash in text this run wrote:\n" + "\n".join(offenders)
+def test_rendered_output_never_emits_an_unescaped_angle_bracket(tmp_path,
+                                                                monkeypatch):
+    """The class that made the 2026-08-22 verdict memo undeliverable."""
+    import re
+    hostile = _panel_rows(4, target="<script>alert(1)</script>",
+                          category="a < b & c")
+    for cmd in ("/speed 7", "/live"):
+        out = _render(cmd, hostile, tmp_path, monkeypatch)
+        stray = [m for m in re.findall(r"<[^>]*", out)
+                 if not re.match(r"</?(b|i|code|pre|a)\b", m)]
+        assert not stray, f"{cmd} emitted {stray}"

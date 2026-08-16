@@ -1546,6 +1546,11 @@ def _handle_speed(text: str) -> None:
         elif reads <= 4:
             lines.append(f"  ⚠️ <i>only {reads} independent book read(s) behind "
                          "this. Treat the sign as unsettled.</i>")
+        if s.get("n_excluded_unmeasured"):
+            lines.append(f"  <i>{s['n_excluded_unmeasured']} older sample(s) "
+                         f"excluded: they predate the independence stamp, so "
+                         f"there is no way to tell how many are the same book "
+                         f"read</i>")
         if s["n_excluded_lag"]:
             lines.append(f"  <i>{s['n_excluded_lag']} sample(s) excluded: quoted "
                          f"over {shadow_quote.MAX_QUOTE_LAG_S:.0f}s after "

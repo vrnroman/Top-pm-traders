@@ -447,6 +447,16 @@ def make_observer(clob_client_factory, queue_max: int = 500):
 # Reporting — the numbers the owner actually asked for
 # --------------------------------------------------------------------------- #
 
+def _num(v) -> Optional[float]:
+    """float(v) or None. Never raises: a corrupt field must skip, not crash."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _pct(values: list[float], q: float) -> Optional[float]:
     if not values:
         return None
@@ -572,6 +582,18 @@ def summarize(rows: list[dict]) -> dict:
     """
     lat_rows = [r for r in rows if valid_for_latency(r)]
     pen_rows = [r for r in rows if valid_for_penalty(r)]
+    # MIXED COVERAGE. `book_ts` is what makes a row's independence knowable.
+    # Once ANY row carries it, rows without it are excluded and counted, the
+    # same rule this module already applies to the restart backlog. Without
+    # this the independence line describes a minority of the sample while the
+    # headline is computed from all of it, so the warning switches itself off
+    # as the field populates even though most rows remain unmeasured, which is
+    # the disclosure expiring rather than becoming true.
+    n_unmeasured = 0
+    if any(r.get("book_ts") is not None for r in pen_rows):
+        before = len(pen_rows)
+        pen_rows = [r for r in pen_rows if r.get("book_ts") is not None]
+        n_unmeasured = before - len(pen_rows)
     def _finite(vals):
         # A NaN or Inf sorts unpredictably and poisons every percentile. Not
         # reachable from the live writer, but a hand-edited or truncated line
@@ -619,6 +641,9 @@ def summarize(rows: list[dict]) -> dict:
         "n_markets": n_markets,
         "n_book_reads": n_reads,
         "n_decay_moves": n_moves,
+        # Rows dropped because their independence is unknowable while other
+        # rows' is known. Named on the panel, never silently averaged in.
+        "n_excluded_unmeasured": n_unmeasured,
         "n_excluded_boot": sum(1 for r in rows if r.get("boot_flush")),
         "n_excluded_lag": sum(
             1 for r in rows
@@ -630,9 +655,12 @@ def summarize(rows: list[dict]) -> dict:
         # ones: dropping them silently would move book A's survivor bias out
         # of the fill gate and into the book read.
         "n_unquotable": sum(1 for r in rows if r.get("unquotable")),
+        # _num, not float(): usable_quote() already tolerates a corrupt
+        # quote_lag_s, and this line raising on the same value would take the
+        # whole /speed command down with it.
         "quote_lag_p50_s": _pct(
-            [float(r["quote_lag_s"]) for r in rows
-             if r.get("quote_lag_s") is not None], 0.50),
+            _finite([v for v in (_num(r.get("quote_lag_s")) for r in rows)
+                     if v is not None]), 0.50),
         "n_latency": len(lat),
         "latency_p50_s": _pct(lat, 0.50),
         "latency_p90_s": _pct(lat, 0.90),
