@@ -1427,7 +1427,7 @@ def _wallet_ledger_view(wallet: str):
 
 
 def _fmt_secs(v) -> str:
-    """Human seconds. Never emits a bare '<' — Telegram HTML rejects it, which
+    """Human seconds. Never emits a bare '<', Telegram HTML rejects it, which
     is exactly what made the 08-22 verdict memo undeliverable."""
     if v is None:
         return "n/a"
@@ -1446,7 +1446,7 @@ def _fmt_bps(v) -> str:
 
 
 def _handle_speed(text: str) -> None:
-    """/speed [days] — the two pre-flip numbers, measured, not modeled.
+    """/speed [days], the two pre-flip numbers, measured, not modeled.
 
     How fast we are told a copied wallet traded, and how much worse our entry
     price would be than theirs if we had acted the moment we were told.
@@ -1467,7 +1467,7 @@ def _handle_speed(text: str) -> None:
     rows = shadow_quote.load_rows(since_ts=since)
     s = shadow_quote.summarize(rows)
 
-    lines = [f"⏱ <b>Pre-flip speed &amp; price</b> — last {days:g}d", ""]
+    lines = [f"⏱ <b>Pre-flip speed &amp; price</b>, last {days:g}d", ""]
 
     if not rows:
         # Honest empty: say it is collecting, never print a zero that reads
@@ -1476,11 +1476,11 @@ def _handle_speed(text: str) -> None:
         since_ts = shadow_quote.collecting_since(all_rows)
         if since_ts:
             age_h = (_time.time() - since_ts) / 3600
-            lines.append(f"Collecting — {len(all_rows)} sample(s) so far, "
+            lines.append(f"Collecting, {len(all_rows)} sample(s) so far, "
                          f"oldest {age_h:.1f}h old, none inside the last "
                          f"{days:g}d window.")
         else:
-            lines.append("Collecting — <b>no samples yet</b>. Nothing here is "
+            lines.append("Collecting, <b>no samples yet</b>. Nothing here is "
                          "a measurement; it is an empty file.")
             lines.append("")
             lines.append("The observer quotes each newly detected trade against "
@@ -1498,7 +1498,7 @@ def _handle_speed(text: str) -> None:
         lines.append("")
 
     if not s["n_latency"]:
-        lines.append("<b>How fast am I told</b> — <i>no usable samples yet</i>")
+        lines.append("<b>How fast am I told</b>, <i>no usable samples yet</i>")
         if s["n_excluded_boot"]:
             lines.append(f"  all {s['n_excluded_boot']} sample(s) are restart "
                          f"backlog, which measures the last deploy, not us")
@@ -1511,13 +1511,13 @@ def _handle_speed(text: str) -> None:
         lines.append("  <i>from their trade timestamp to our detection</i>")
         if s["n_excluded_boot"]:
             lines.append(f"  <i>{s['n_excluded_boot']} restart-backlog sample(s) "
-                         f"excluded — they measure the look-back window, "
+                         f"excluded, they measure the look-back window, "
                          f"not our speed</i>")
         lines.append("")
 
     worse = s.get("penalty_worse_frac")
     if not s["n_penalty"]:
-        lines.append("<b>How much worse is my entry</b> — <i>no usable samples yet</i>")
+        lines.append("<b>How much worse is my entry</b>, <i>no usable samples yet</i>")
         lines.append("")
     else:
         lines.append(f"<b>How much worse is my entry</b> ({s['n_penalty']} samples)")
@@ -1570,7 +1570,7 @@ def _handle_speed(text: str) -> None:
         if vl["n_matched"] < 5:
             if vl["n_matched"]:
                 lines.append(f"<i>counterfactual: only {vl['n_matched']} of "
-                             f"{vl['n_settled']} settled copies carry a quote — "
+                             f"{vl['n_settled']} settled copies carry a quote, "
                              f"too thin to report</i>")
                 lines.append("")
         elif vl["n_matched"]:
@@ -1587,14 +1587,14 @@ def _handle_speed(text: str) -> None:
         lines.append(f"<i>counterfactual unavailable: {_esc(str(exc))}</i>")
         lines.append("")
 
-    lines.append("<i>Measurement only — no order was placed. Book A models a "
+    lines.append("<i>Measurement only, no order was placed. Book A models a "
                  "lagged fill and censors the copies whose price ran away; "
                  "these rows price every detected trade, including those.</i>")
     _send_chunked("\n".join(lines))
 
 
 def _handle_live(text: str) -> None:
-    """/live — the real-money interlock. Status by default; CONFIRM to arm.
+    """/live, the real-money interlock. Status by default; CONFIRM to arm.
 
     Advisory-by-default on purpose: the owner's env key (LIVE_ARM_ENABLED)
     must already be set on the VM for this command to be able to do anything
@@ -1607,7 +1607,7 @@ def _handle_live(text: str) -> None:
 
     if len(parts) > 1 and parts[1].upper() == "DISARM":
         live_mode.disarm(by="telegram")
-        send_message("🛑 <b>Disarmed</b> — back to paper. No real orders can be placed.")
+        send_message("🛑 <b>Disarmed</b>, back to paper. No real orders can be placed.")
         return
 
     if len(parts) > 1 and parts[1].upper() == "CONFIRM":
@@ -1621,8 +1621,8 @@ def _handle_live(text: str) -> None:
             send_message(f"⏸ <b>Not armed.</b> {_esc(detail)}")
         return
 
-    head = ("🔴 <b>LIVE — real orders enabled</b>" if not st["preview"]
-            else "🟢 <b>PREVIEW — no real money at risk</b>")
+    head = ("🔴 <b>LIVE, real orders enabled</b>" if not st["preview"]
+            else "🟢 <b>PREVIEW, no real money at risk</b>")
     lines = [head, ""]
     lines.append("<b>Interlock</b> (both keys needed for a real order)")
     lines.append(f"  {'✅' if st['process_live'] else '❌'} process: "
@@ -1640,10 +1640,10 @@ def _handle_live(text: str) -> None:
     lines.append("")
     lines.append("<b>Before you flip</b>")
     lines.append(f"  ⚠️ {_esc(live_mode.approvals_warning())}")
-    lines.append("  • <code>/check</code> — key, proxy, CLOB auth, balance, approvals")
-    lines.append("  • <code>/speed</code> — how fast you are told, how much worse your entry is")
-    lines.append("  • <code>/golive &lt;wallet&gt;</code> — the per-wallet bar")
-    lines.append("  • ROADMAP §9.7 — what the gate does NOT check")
+    lines.append("  • <code>/check</code>, key, proxy, CLOB auth, balance, approvals")
+    lines.append("  • <code>/speed</code>, how fast you are told, how much worse your entry is")
+    lines.append("  • <code>/golive &lt;wallet&gt;</code>, the per-wallet bar")
+    lines.append("  • ROADMAP §9.7, what the gate does NOT check")
     _send_chunked("\n".join(lines))
 
 

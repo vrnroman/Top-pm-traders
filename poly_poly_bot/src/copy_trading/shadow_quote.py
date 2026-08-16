@@ -425,10 +425,14 @@ def by_wallet(rows: list[dict], min_n: int = 3) -> list[dict]:
     out = []
     for w, rs in groups.items():
         s = summarize(rs)
+        # Report the count the penalty figure is actually computed from, not
+        # the raw row count: showing n=8 next to a median derived from 7 is
+        # the small kind of lie that makes a reader trust the big numbers.
+        n_used = s["n_penalty"]
         out.append({
             "wallet": w,
-            "n": s["n"],
-            "thin": s["n"] < min_n,
+            "n": n_used,
+            "thin": n_used < min_n,
             "latency_p50_s": s["latency_p50_s"],
             "penalty_p50_bps": s["penalty_p50_bps"],
             "penalty_p90_bps": s["penalty_p90_bps"],
