@@ -1086,6 +1086,15 @@ any error, and a persisted arm goes inert the moment the env key is pulled.
 The order-placement gate reads the interlock; **startup** guards still read
 `CONFIG.preview_mode`, so a live boot *prepares* and the arm *releases*.
 
+**The admission thresholds have never met real book data.** `/check`'s drift
+gate (300bps) and spread gate (500bps) sat downstream of the snapshot function
+that returned `None` on every live call (§10.2), so every copy was rejected
+before either threshold was consulted. They are untested against production
+books, not tuned. On nine live books sampled 2026-08-16, two were above the
+500bps spread gate. Expect the first live session to admit a different number
+of copies than you assume, in either direction, and watch these two numbers
+before you conclude anything about the strategy from the fill count.
+
 **The genuinely irreversible step is the boot, not the order.** With
 `PREVIEW_MODE=false`, `runner.py` fires `check_and_set_approvals`, the
 auto-redeemer and inventory reconcile against the real proxy wallet — real
