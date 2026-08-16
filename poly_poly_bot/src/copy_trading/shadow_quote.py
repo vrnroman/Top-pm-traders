@@ -479,6 +479,10 @@ def by_wallet(rows: list[dict], min_n: int = 3) -> list[dict]:
     reach them. Wallets under ``min_n`` samples are returned too, flagged
     thin: hiding them would make a sparse sample look like a complete one.
     """
+    # Same whole-sample coverage decision as the headline, taken BEFORE the
+    # split. Deciding it per wallet is what let the table contradict the
+    # headline (see apply_coverage_filter).
+    rows = apply_coverage_filter(rows)
     groups: dict = {}
     for r in rows:
         w = (r.get("target") or "").lower()
@@ -572,6 +576,37 @@ def valid_for_penalty(r: dict) -> bool:
     return usable_quote(r)
 
 
+def apply_coverage_filter(rows: list[dict]) -> list[dict]:
+    """Drop rows whose independence is unknowable, but only once it is knowable.
+
+    `book_ts` is what makes a row's independence measurable, and rows written
+    before it existed lack it. Once ANY row has it, the ones without it are
+    dropped, the same rule this module applies to the restart backlog.
+
+    It is deliberately a WHOLE-SAMPLE decision, not a per-row predicate, which
+    makes it the one filter here that can answer differently for different
+    slices of the same data. So every surface must apply it to the SAME set
+    before splitting: `/speed` once filtered the headline and then let
+    `by_wallet` re-partition the raw rows, and a wallet whose rows all
+    predated the stamp saw "no row has it" and kept them all. The table then
+    led with a +3548bps wallet drawn entirely from rows the headline had
+    excluded four lines above, 15x outside its own p90. Idempotent, so
+    applying it again downstream is safe.
+    """
+    eligible = [r for r in rows if valid_for_penalty(r)]
+    if not any(r.get("book_ts") is not None for r in eligible):
+        return list(rows)
+    keep = []
+    for r in rows:
+        # Only penalty-eligible rows are subject to it: a latency-only row has
+        # no price to be clustered with, so dropping it would shrink the
+        # latency sample for no reason.
+        if valid_for_penalty(r) and r.get("book_ts") is None:
+            continue
+        keep.append(r)
+    return keep
+
+
 def summarize(rows: list[dict]) -> dict:
     """Latency and entry-penalty distributions over shadow-quote rows.
 
@@ -589,11 +624,9 @@ def summarize(rows: list[dict]) -> dict:
     # headline is computed from all of it, so the warning switches itself off
     # as the field populates even though most rows remain unmeasured, which is
     # the disclosure expiring rather than becoming true.
-    n_unmeasured = 0
-    if any(r.get("book_ts") is not None for r in pen_rows):
-        before = len(pen_rows)
-        pen_rows = [r for r in pen_rows if r.get("book_ts") is not None]
-        n_unmeasured = before - len(pen_rows)
+    before = len(pen_rows)
+    pen_rows = [r for r in apply_coverage_filter(rows) if valid_for_penalty(r)]
+    n_unmeasured = before - len(pen_rows)
     def _finite(vals):
         # A NaN or Inf sorts unpredictably and poisons every percentile. Not
         # reachable from the live writer, but a hand-edited or truncated line
@@ -606,11 +639,21 @@ def summarize(rows: list[dict]) -> dict:
     # anything"), so it takes the same filtered rows AND drops any second
     # sample that was a cache replay rather than a fresh read — that would
     # report a guaranteed zero drift and argue against speed for free.
-    decay = _finite([float(r["penalty_bps_t1"]) - float(r["penalty_bps"])
-                     for r in pen_rows
-                     if r.get("penalty_bps_t1") is not None
-                     and r.get("penalty_bps") is not None
-                     and not r.get("t1_stale", False)])
+    # Averaged PER BOOK MOVE, not per row: the label says "N distinct book
+    # moves", so the estimator has to agree with it. Row-weighting let one
+    # read with 30 clone copies outvote four quiet reads (+1324bps rendered
+    # where the move-weighted answer was +300). The gate moved to move-keys
+    # two rounds ago and the estimator did not follow.
+    _by_move: dict = {}
+    for r in pen_rows:
+        if (r.get("penalty_bps_t1") is None or r.get("penalty_bps") is None
+                or r.get("t1_stale", False)):
+            continue
+        d = float(r["penalty_bps_t1"]) - float(r["penalty_bps"])
+        if not math.isfinite(d):
+            continue
+        _by_move.setdefault((r.get("token_id"), r.get("book_ts")), []).append(d)
+    decay = [sum(v) / len(v) for v in _by_move.values()]
     # How much of the sample is INDEPENDENT. A burst of copies on one market
     # priced from one cached book read is one observation wearing many row
     # numbers: in production 23 of 27 rows were a single in-play match and 14

@@ -1466,6 +1466,11 @@ def _handle_speed(text: str) -> None:
     since = _time.time() - days * 86400
     rows = shadow_quote.load_rows(since_ts=since)
     s = shadow_quote.summarize(rows)
+    # ONE coverage decision for the whole panel, taken on the full set before
+    # anything splits it. Letting the headline and the per-wallet table each
+    # decide left the table leading with wallets built entirely from rows the
+    # headline had just excluded as unmeasurable, 15x outside its own p90.
+    scoped = shadow_quote.apply_coverage_filter(rows)
 
     lines = [f"⏱ <b>Pre-flip speed &amp; price</b>, last {days:g}d", ""]
 
@@ -1579,7 +1584,7 @@ def _handle_speed(text: str) -> None:
         lines.append("")
 
     # Per-wallet: which wallets are reachable at a price worth paying.
-    per = shadow_quote.by_wallet(rows)
+    per = shadow_quote.by_wallet(scoped)
     if per:
         lines.append("<b>Worst entry penalty by wallet</b>")
         for d in per[:8]:
@@ -1597,7 +1602,8 @@ def _handle_speed(text: str) -> None:
     # The counterfactual book, if any settled copies have a quote to re-price.
     try:
         from src.copy_trading import virtual_ledger
-        vl = virtual_ledger.replay(CONFIG.copy_paper_b_ledger, quote_rows=rows)
+        vl = virtual_ledger.replay(CONFIG.copy_paper_b_ledger,
+                                   quote_rows=scoped)
         # A counterfactual ROI off a handful of matched copies is noise wearing
         # a percentage sign. Mirrors the repo's thin-sample band (MATURITY_THIN).
         if vl["n_matched"] < 5:

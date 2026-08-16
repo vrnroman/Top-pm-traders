@@ -649,8 +649,9 @@ def test_clustered_rows_are_disclosed_as_few_independent_observations():
     assert s["n_penalty"] == 15        # rows
     assert s["n_markets"] == 2         # ...but only two markets
     assert s["n_book_reads"] == 2      # ...and two book reads
-    # and the decay term counts distinct MOVES, not clones of one move
-    assert s["n_decay"] == 15
+    # and the decay term counts distinct MOVES, not clones of one move: the
+    # estimator is averaged per move too, so n_decay and n_decay_moves agree.
+    assert s["n_decay"] == 2
     assert s["n_decay_moves"] == 2
 
 
@@ -838,3 +839,121 @@ def test_rendered_output_never_emits_an_unescaped_angle_bracket(tmp_path,
         stray = [m for m in re.findall(r"<[^>]*", out)
                  if not re.match(r"</?(b|i|code|pre|a)\b", m)]
         assert not stray, f"{cmd} emitted {stray}"
+
+
+# --------------------------------------------------------------------------- #
+# Round-9: every surface must describe the SAME sample
+# --------------------------------------------------------------------------- #
+
+def _mixed_rows():
+    """4 rows with the independence stamp, plus wallets that predate it."""
+    import time as _t
+    now = _t.time()
+    base = dict(category="sports", their_price=0.5, our_price=0.55,
+                penalty_bps_t1=1100, t1_stale=False, quote_lag_s=1.0,
+                boot_flush=False, notify_latency_s=60.0, detected_at=now - 10)
+    rows = []
+    for i in range(4):                      # measured
+        rows.append({**base, "copy_id": f"m{i}", "target": "0xmeasured",
+                     "token_id": f"tok{i}", "book_ts": float(i),
+                     "penalty_bps": 100})
+    for i in range(3):                      # a wallet with NO stamp at all
+        rows.append({**base, "copy_id": f"u{i}", "target": "0xunstamped",
+                     "token_id": "tokU", "penalty_bps": 2439})
+    rows.append({**base, "copy_id": "s1", "target": "0xsolo",
+                 "token_id": "tokS", "penalty_bps": 3548})
+    return rows
+
+
+def test_the_wallet_table_cannot_contradict_the_headline():
+    """The round-8 fix was sample-conditional, and `by_wallet` re-partitioned
+    the rows, so a wallet whose rows ALL predated the stamp saw "nothing has
+    it" and kept them. The table then led with +3548bps drawn entirely from
+    rows the headline had excluded four lines above."""
+    rows = _mixed_rows()
+    s = shadow_quote.summarize(rows)
+    per = shadow_quote.by_wallet(shadow_quote.apply_coverage_filter(rows), min_n=1)
+
+    assert s["n_penalty"] == 4
+    assert s["n_excluded_unmeasured"] == 4
+    # the table sums to exactly the headline's sample
+    assert sum(d["n"] for d in per) == s["n_penalty"]
+    wallets = {d["wallet"] for d in per}
+    assert "0xunstamped" not in wallets
+    assert "0xsolo" not in wallets
+    # and nothing in the table sits outside the headline's own range
+    assert max(d["penalty_p50_bps"] for d in per) <= s["penalty_p90_bps"]
+
+
+def test_coverage_filter_is_idempotent_and_decides_on_the_whole_set():
+    rows = _mixed_rows()
+    once = shadow_quote.apply_coverage_filter(rows)
+    twice = shadow_quote.apply_coverage_filter(once)
+    assert once == twice
+    # A slice that happens to contain no stamped row must not resurrect them:
+    # that is exactly the per-wallet bug, so the decision belongs upstream.
+    unstamped_slice = [r for r in rows if r.get("target") == "0xunstamped"]
+    assert shadow_quote.apply_coverage_filter(unstamped_slice) == unstamped_slice
+    assert [r for r in once if r.get("target") == "0xunstamped"] == []
+
+
+def test_latency_only_rows_survive_the_coverage_filter():
+    """A row with no price has nothing to be clustered with; dropping it would
+    shrink the latency sample for no reason."""
+    rows = _mixed_rows()
+    rows.append({"copy_id": "lat", "target": "0xw", "notify_latency_s": 42.0,
+                 "detected_at": 1.0})
+    kept = shadow_quote.apply_coverage_filter(rows)
+    assert any(r["copy_id"] == "lat" for r in kept)
+
+
+def test_decay_is_averaged_per_move_not_per_row():
+    """4 quiet reads plus one read with 30 clone copies. Row-weighting let the
+    one noisy read outvote the other four."""
+    rows = []
+    for i in range(4):
+        rows.append({"token_id": "tokA", "book_ts": float(i),
+                     "penalty_bps": 100, "penalty_bps_t1": 400,
+                     "t1_stale": False, "quote_lag_s": 1.0,
+                     "boot_flush": False})
+    for j in range(30):
+        rows.append({"token_id": "tokB", "book_ts": 99.0,
+                     "penalty_bps": 100 + j, "penalty_bps_t1": 2400 + j,
+                     "t1_stale": False, "quote_lag_s": 1.0,
+                     "boot_flush": False})
+    s = shadow_quote.summarize(rows)
+    assert s["n_decay_moves"] == 5
+    assert s["n_decay"] == 5, "the estimator must count moves, like its label"
+    # four moves of +300 and one of +2300 -> +700, not the row-weighted +2065
+    assert s["decay_mean_bps"] == pytest.approx(700.0, abs=1.0)
+
+
+def test_log_lines_this_run_wrote_have_no_dash():
+    """Complements the render guard: it covers Telegram output, this covers
+    the log lines, which is where round 7's em-dash actually shipped."""
+    import ast
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    MARKERS = ("[shadow]", "[live]")
+    FILES = ("main.py", "src/copy_trading/live_mode.py",
+             "src/copy_trading/shadow_quote.py", "src/copy_trading/copy_paper.py")
+    offenders = []
+    for rel in FILES:
+        path = os.path.join(repo, rel)
+        if not os.path.exists(path):
+            continue
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        docs = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef,
+                                 ast.AsyncFunctionDef, ast.ClassDef)):
+                if ast.get_docstring(node, clean=False) and node.body:
+                    docs.add(node.body[0].lineno)
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and node.lineno not in docs
+                    and any(m in node.value for m in MARKERS)
+                    and ("—" in node.value or "–" in node.value)):
+                offenders.append(f"{rel}:{node.lineno}: {node.value[:60]!r}")
+    assert not offenders, "dash in a log line this run wrote:\n" + "\n".join(offenders)
