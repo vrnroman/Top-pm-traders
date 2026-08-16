@@ -480,11 +480,15 @@ def test_a_hand_written_z_entry_is_ignored(tmp_path):
     """Secondary finding: the store is a file on a box. A hand-added record
     lacks the gate source and must be inert, not tradable."""
     from src.copy_trading import promotion_state
+    # Admit through the gate first: that initialises the eviction history, so
+    # this test isolates the SOURCE filter rather than tripping the
+    # missing-history rule.
+    zset.admit("0xLEGIT", ready=True, checks=[], settled=[P(ideal=6.0)] * 30,
+               rails_supplied=True)
     promotion_state.add_promoted("0xATTACKER", tier="1a", source="telegram",
                                  scope=zset.SCOPE)
-    assert zset.wallets() == [], "a non-gate record reached the live list"
-    zset.admit("0xLEGIT", ready=True, checks=[], settled=[P(ideal=6.0)] * 30, rails_supplied=True)
-    assert [w.lower() for w in zset.wallets()] == ["0xlegit"]
+    assert [w.lower() for w in zset.wallets()] == ["0xlegit"], (
+        "a non-gate record reached the live list")
 
 
 def test_the_guard_loop_reads_functions_that_exist():
@@ -687,6 +691,10 @@ def test_an_unreadable_demote_list_refuses_rather_than_passes(tmp_path):
 
 
 def test_unreadable_eviction_history_closes_the_set(tmp_path, monkeypatch):
+    # Both files present, so the probe gets past the missing-file branch and
+    # exercises the read failure itself.
+    zset.admit("0xANY0", ready=True, checks=[], settled=[P(ideal=6.0)] * 30,
+               rails_supplied=True)
     monkeypatch.setattr(zset.promotion_state, "retired_map",
                         lambda scope="": (_ for _ in ()).throw(OSError("boom")))
     assert zset.evicted_set() == {"*"}
@@ -758,3 +766,98 @@ def test_wallet_set_is_derived_from_the_filtered_list(tmp_path):
     promotion_state.add_promoted("0xHAND", tier="1a", source="telegram",
                                  scope=zset.SCOPE)
     assert zset.wallet_set() == set()
+
+
+# --------------------------------------------------------------------------- #
+# Round-4: the kill switch must not lie, and the gate needs a BEHAVIOURAL test
+# --------------------------------------------------------------------------- #
+
+def test_zset_drop_reports_a_failed_eviction_as_a_failure(tmp_path, monkeypatch):
+    """The owner's only manual kill switch. `evict()` returns False when the
+    durable record cannot be written, and the handler threw that away and sent
+    'Real money can no longer follow it' while the wallet was still in Z: the
+    headline and the wallet count contradicting each other in one message."""
+    from unittest.mock import patch
+
+    import src.telegram_bot as tb
+    zset.admit("0xAAAABBBB", ready=True, checks=[], settled=[P(ideal=6.0)] * 30,
+               rails_supplied=True)
+    assert len(zset.wallets()) == 1
+
+    monkeypatch.setattr(zset.promotion_state, "add_retired",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("ENOSPC")))
+    sent = []
+    with patch.object(tb, "send_message", lambda x, **k: sent.append(x)), \
+         patch.object(tb, "_send_chunked", lambda x: sent.append(x)):
+        tb._handle_zset("/zset drop 0xAAAABBBB")
+    out = "\n".join(sent)
+    assert "EVICTION FAILED" in out, out
+    assert "can no longer follow" not in out
+    assert len(zset.wallets()) == 1, "and it really is still in Z"
+
+
+def test_a_deleted_eviction_history_closes_the_set(tmp_path):
+    """Corrupt already failed closed; MISSING did not, which left the
+    2026-08-18 expiry live on its third failure mode. `seed_zset` draws
+    candidates from the ledger every run, so the demoted wallet stays a
+    candidate forever."""
+    import os
+
+    from src.copy_trading import promotion_state
+    zset.admit("0xKEEP", ready=True, checks=[], settled=[P(ideal=6.0)] * 30,
+               rails_supplied=True)
+    zset.evict("0xGONE", reason="test")
+    os.remove(promotion_state.retired_path(zset.SCOPE))
+    promotion_state.clear_cache()
+    assert zset.evicted_set() == {"*"}
+    assert zset.wallets() == [], "a missing history must close Z, not open it"
+    ok, _ = zset.admit("0xGONE", ready=True, checks=[],
+                       settled=[P(ideal=9.0)] * 40, rails_supplied=True)
+    assert ok is False
+
+
+def test_an_evicted_wallet_is_off_the_money_path_even_if_removal_failed(tmp_path,
+                                                                        monkeypatch):
+    """`evict` removes AND records; the removal half can fail on its own."""
+    from src.copy_trading import promotion_state
+    zset.admit("0xSTUCK", ready=True, checks=[], settled=[P(ideal=6.0)] * 30,
+               rails_supplied=True)
+    monkeypatch.setattr(promotion_state, "remove_promoted",
+                        lambda w, scope="": False)
+    zset.evict("0xSTUCK", reason="record only")
+    assert zset.wallets() == [], "the eviction record must subtract it anyway"
+
+
+@pytest.mark.asyncio
+async def test_a_non_z_wallet_places_no_order_even_with_tiering_off(tmp_path,
+                                                                    monkeypatch):
+    """BEHAVIOURAL, not textual. The only previous guard on this gate asserted
+    source ORDER, and a plausible re-indent into the `TIERED_MODE and
+    TIER_1C.enabled` block above it re-arms 21 env wallets with the whole
+    suite green. This exercises the money path instead."""
+    from src.copy_trading import trade_executor
+    from src.models import DetectedTrade, QueuedTrade
+
+    class Boom:
+        def __getattr__(self, _n):
+            raise AssertionError("the executor reached the CLOB for a non-Z wallet")
+
+    monkeypatch.setattr(trade_executor.live_mode, "is_preview", lambda: False)
+    monkeypatch.setattr(trade_executor, "_strategy_config",
+                        lambda: (False, lambda a: None, None))  # TIERED_MODE off
+
+    t = DetectedTrade(id="t1", trader_address="0xDEADBEEF",
+                      timestamp="2026-08-17T00:00:00+00:00", market="m",
+                      token_id="tok", side="BUY", size=100.0, price=0.5)
+    monkeypatch.setattr(trade_executor, "_trade_queue",
+                        lambda: (lambda *a, **k: None, lambda *a, **k: None,
+                                 lambda *a, **k: 0))
+    seen = set()
+    monkeypatch.setattr(trade_executor, "_trade_store",
+                        lambda: (lambda i: False, lambda i: seen.add(i),
+                                 lambda i: 0, lambda i: False,
+                                 lambda r: None, lambda k, s: 0))
+    assert zset.wallets() == [], "Z must be empty for this test to mean anything"
+    await trade_executor.place_trade_orders(
+        [QueuedTrade(trade=t, enqueued_at=0.0, source_detected_at=0.0)], Boom())
+    assert t.id in seen, "the trade should have been marked seen and skipped"

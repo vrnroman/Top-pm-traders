@@ -55,8 +55,17 @@ def wallets() -> list[str]:
     hand-edited entry is possible; ignoring anything without a gate source
     means such an entry is inert rather than tradable.
     """
+    # Subtract the eviction history. `evict()` removes AND records, but the
+    # removal can fail on its own, and an evicted-but-still-listed wallet on
+    # the money path is the failure this set exists to prevent. Belt and
+    # braces, on the cheap side of the trade.
+    evicted = evicted_set()
+    if "*" in evicted:
+        return []
     out = []
     for key, rec in promotion_state.promoted_map(SCOPE).items():
+        if key.lower() in evicted:
+            continue
         if not isinstance(rec, dict):
             continue
         if rec.get("source") not in GATE_SOURCES:
@@ -268,6 +277,18 @@ def admit(wallet: str, *, ready: bool, checks: list, settled: Iterable,
                     f"{conc_detail}")
         return (False, all_checks)
 
+    # Touch the eviction history so its later absence is detectable. Without
+    # this, "missing" is ambiguous between "never used" and "deleted".
+    try:
+        import os as _os
+        rp = promotion_state.retired_path(SCOPE)
+        if not _os.path.exists(rp):
+            promotion_state._write(rp, {})
+    except Exception as exc:
+        logger.error(f"[zset] could not initialise the eviction history: {exc}")
+        return (False, all_checks + [
+            ("eviction history is writable", False, str(exc)[:80])])
+
     promotion_state.add_promoted(wallet, tier=tier, source=source, scope=SCOPE)
     logger.warn(f"[zset] ADMITTED {wallet} to set Z ({conc_detail}). "
                 f"Real money may now follow it once armed.")
@@ -291,14 +312,24 @@ def evicted_set() -> set:
     # this VM has run at 84% and been a day from full. The earlier
     # `except Exception` here could never fire in production.
     path = promotion_state.retired_path(SCOPE)
-    if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                json.load(f)
-        except Exception as exc:
-            logger.warn(f"[zset] eviction history unreadable ({exc}); "
-                        f"treating set Z as closed")
+    if not os.path.exists(path):
+        # MISSING is not the same as empty. `admit()` writes this file on
+        # every successful admission, so once Z has ever been used its absence
+        # means the history was deleted or the data dir was restored from
+        # before an eviction. Corrupt already failed closed; missing did not,
+        # which left the 2026-08-18 expiry bomb live on its third failure mode.
+        if os.path.exists(promotion_state.promoted_path(SCOPE)):
+            logger.warn("[zset] eviction history is MISSING while set Z exists; "
+                        "treating set Z as closed")
             return {"*"}
+        return set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            json.load(f)
+    except Exception as exc:
+        logger.warn(f"[zset] eviction history unreadable ({exc}); "
+                    f"treating set Z as closed")
+        return {"*"}
     try:
         return {k.lower() for k in promotion_state.retired_map(SCOPE)}
     except Exception as exc:

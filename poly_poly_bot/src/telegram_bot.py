@@ -1693,10 +1693,22 @@ def _handle_zset(text: str) -> None:
                          f"<code>{_esc(target)}</code> "
                          f"({len(matches)} match(es)).")
             return
-        zset.evict(matches[0], reason="telegram /zset drop")
+        # The owner's only manual kill switch. `evict` returns False when the
+        # durable record could not be written, and reporting that as success
+        # was the worst possible lie: the message said real money could no
+        # longer follow the wallet while it was still in Z.
+        ok = zset.evict(matches[0], reason="telegram /zset drop")
+        left = zset.wallets()
+        if not ok or matches[0].lower() in {w.lower() for w in left}:
+            send_message(
+                f"⚠️ <b>EVICTION FAILED</b>\n<code>{_esc(matches[0])}</code>\n"
+                f"It is still in set Z and real money can still follow it. "
+                f"The eviction record could not be written (check disk space "
+                f"on the VM). Do not treat this wallet as removed.")
+            return
         send_message(f"🚫 <b>Evicted from set Z</b>\n<code>{_esc(matches[0])}</code>\n"
                      f"Real money can no longer follow it. "
-                     f"{len(zset.wallets())} wallet(s) left in Z.")
+                     f"{len(left)} wallet(s) left in Z.")
         return
 
     wallets = zset.wallets()
