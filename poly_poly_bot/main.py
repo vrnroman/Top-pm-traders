@@ -141,7 +141,9 @@ def _live_guard_loop():
         feed_stale_s = None
         try:
             from src.copy_trading import shadow_quote
-            rows = shadow_quote.load_rows()
+            # Bounded: this runs every 300s on an e2-small and the log
+            # holds up to 20k rows; only the newest matter here.
+            rows = shadow_quote.load_rows(since_ts=time.time() - 3600)
             if rows:
                 newest = max(float(r.get("detected_at") or 0) for r in rows)
                 if newest > 0:

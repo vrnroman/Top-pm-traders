@@ -152,7 +152,8 @@ def main(argv=None) -> int:
             a_settled, _ = _wallet_rows(a_positions, w)
             a_roi, a_n = _clean_roi(a_settled, era)
             zset.admit(w, ready=True, checks=gate_checks, settled=settled,
-                       era_floor=era, other_book_roi=a_roi, other_book_n=a_n)
+                       era_floor=era, other_book_roi=a_roi,
+                       other_book_n=a_n, rails_supplied=True)
 
     print(f"=== ADMITTED TO SET Z: {len(admitted)} ===")
     for w, ok, nf, nt, checks, roi, n, trimmed, _s in admitted:

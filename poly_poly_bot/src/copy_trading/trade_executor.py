@@ -17,7 +17,7 @@ from typing import Optional
 from py_clob_client_v2 import ClobClient
 
 from src.config import CONFIG
-from src.copy_trading import live_mode
+from src.copy_trading import live_mode, zset
 from src.logger import logger
 from src.models import (
     DetectedTrade,
@@ -402,6 +402,22 @@ async def place_trade_orders(
                     await analyze_patterns(trade)
                 except Exception as exc:
                     logger.warn(f"[exec] Pattern detection error: {error_message(exc)}")
+
+            # --- SET Z: the unconditional membership check ---
+            # Deliberately here, OUTSIDE the TIERED_MODE branch and before any
+            # routing, so the Z invariant does not depend on which trade
+            # source produced this trade or on how the tier lists happen to be
+            # configured. Two live bypasses existed without it: `onchain_source`
+            # still builds its own list from CONFIG.user_addresses, and the
+            # legacy non-tiered branch consults no wallet set at all, so
+            # emptying the env tier lists would have put 21 ungated wallets
+            # back on the money path.
+            if (trade.trader_address or "").lower() not in {
+                    w.lower() for w in zset.wallets()}:
+                logger.skip(f"[exec] not in set Z: "
+                            f"{short_address(trade.trader_address)}")
+                mark_trade_as_seen(trade.id)
+                continue
 
             # --- Tier routing ---
             tier: Optional[str] = None

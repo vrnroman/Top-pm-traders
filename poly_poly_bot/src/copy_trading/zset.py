@@ -36,6 +36,9 @@ from src.logger import logger
 
 SCOPE = "z"
 
+# Records already warned about, so the per-trade path does not repeat itself.
+_warned_non_gate: set = set()
+
 # How many of a wallet's best copies are deleted before re-checking its floor.
 DROP_TOP_N = 3
 
@@ -57,15 +60,26 @@ def wallets() -> list[str]:
         if not isinstance(rec, dict):
             continue
         if rec.get("source") not in GATE_SOURCES:
-            logger.warn(f"[zset] ignoring {key[:12]}: not written by the gate "
-                        f"(source={rec.get('source')!r})")
+            # Warn ONCE per record, not per call: this runs per live trade and
+            # every 3s in the prober, so a single hand-edited entry would have
+            # produced a warning every three seconds forever.
+            if key not in _warned_non_gate:
+                _warned_non_gate.add(key)
+                logger.warn(f"[zset] ignoring {key[:12]}: not written by the "
+                            f"gate (source={rec.get('source')!r})")
             continue
         out.append(rec.get("wallet") or key)
     return out
 
 
 def wallet_set() -> set:
-    return promotion_state.promoted_set(SCOPE)
+    """Same population as `wallets()`, as a set.
+
+    Derived, never read raw: reading `promoted_set(SCOPE)` directly skipped
+    the gate-source filter, so this was the forgeable twin of the safe
+    function and the more natural-looking name for "is this wallet in Z".
+    """
+    return {w.lower() for w in wallets()}
 
 
 def _num(x) -> float:
@@ -149,16 +163,32 @@ def _blacklist_block(wallet: str, now: Optional[float] = None) -> Optional[str]:
     contradiction rail because the demotion had removed its clean-era rows
     from book A, so the rail saw "not enough evidence to contradict".
     """
+    import json
+    import os
+
     from src.copy_trading import promotion_state
     for scope in ("", "b"):
+        # FAIL CLOSED on unreadable evidence. `promotion_state._read` returns
+        # {} for a corrupt file, which would silently turn "no active demote"
+        # into a pass for every wallet. A blacklist we cannot read is not an
+        # empty blacklist.
+        path = promotion_state.blacklist_path(scope)
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    json.load(f)
+            except Exception as exc:
+                return (f"the book {scope or 'A'} demote list is unreadable "
+                        f"({exc}); refusing rather than assuming it is empty")
         try:
             if promotion_state.is_blacklisted(wallet, now=now, scope=scope):
                 rec = promotion_state.blacklist_map(scope).get((wallet or "").lower(), {})
                 return (f"under an active auto-demote in book "
                         f"{scope or 'A'} ({rec.get('reason', 'no reason')}, "
                         f"n={rec.get('n_closed', '?')}, roi={rec.get('roi', '?')})")
-        except Exception:
-            continue
+        except Exception as exc:
+            return (f"could not check the book {scope or 'A'} demote list "
+                    f"({exc}); refusing rather than assuming it is clear")
     return None
 
 
@@ -182,7 +212,8 @@ def admit(wallet: str, *, ready: bool, checks: list, settled: Iterable,
           era_floor: Optional[float] = None, tier: str = "1b",
           source: str = "gate",
           other_book_roi: Optional[float] = None,
-          other_book_n: int = 0) -> tuple[bool, list]:
+          other_book_n: int = 0,
+          rails_supplied: bool = False) -> tuple[bool, list]:
     """Admit a wallet to Z, but ONLY if the gate passed it and the rail holds.
 
     ``ready`` and ``checks`` come from ``promotion_gate.golive_check``. This
@@ -190,6 +221,17 @@ def admit(wallet: str, *, ready: bool, checks: list, settled: Iterable,
     flag, because the entire point of Z is that the decision belongs to the
     gate. Returns ``(admitted, full_check_list)``.
     """
+    # A caller that does not explicitly supply the rail evidence gets a
+    # REFUSAL, not a free pass. `other_book_*` defaulting to (None, 0) made
+    # the contradiction rail print PASS for a caller who simply omitted it,
+    # and `era_floor=None` silently computed the concentration rail over the
+    # pre-clean-era rows the whole repo has spent months invalidating.
+    if not rails_supplied:
+        logger.warn(f"[zset] {wallet[:12]} NOT admitted: caller did not supply "
+                    f"the rail evidence (era_floor / other-book)")
+        return (False, list(checks) + [
+            ("rail evidence supplied by the caller", False,
+             "admit() was called without era_floor and other-book evidence")])
     conc_ok, conc_detail = concentration_check(settled, min_opened_ts=era_floor)
     contra_ok, contra_detail = contradiction_check(other_book_roi, other_book_n)
     bl = _blacklist_block(wallet)
@@ -200,6 +242,15 @@ def admit(wallet: str, *, ready: bool, checks: list, settled: Iterable,
         ("not under the bot's own auto-demote", bl is None,
          bl or "no active demotion"),
     ]
+
+    ev = evicted_set()
+    if "*" in ev or (wallet or "").lower() in ev:
+        detail = ("set Z's eviction history is unreadable" if "*" in ev
+                  else "previously evicted from set Z; use zset.readmit first")
+        all_checks = all_checks + [("not previously evicted", False, detail)]
+        logger.warn(f"[zset] {wallet[:12]} NOT admitted, {detail}")
+        return (False, all_checks)
+    all_checks = all_checks + [("not previously evicted", True, "no eviction on record")]
 
     if bl is not None:
         logger.warn(f"[zset] {wallet[:12]} NOT admitted, {bl}")
@@ -223,14 +274,86 @@ def admit(wallet: str, *, ready: bool, checks: list, settled: Iterable,
     return (True, all_checks)
 
 
-def evict(wallet: str, reason: str = "") -> bool:
-    """Remove a wallet from Z. Always allowed, never gated.
+# An eviction lasts this long. Far past any auto-demote window, because the
+# point is that re-entry needs a deliberate decision, not the passage of time.
+EVICTION_YEARS_S = 10 * 365 * 24 * 3600
 
-    Asymmetry on purpose: getting in takes a gate and a rail, getting out
-    takes one call. Anything that can only reduce live exposure should be
-    reachable from anywhere, including from inside the loop.
+
+def evicted_set() -> set:
+    """Wallets evicted from Z. Re-entry requires clearing this deliberately."""
+    import json
+    import os
+
+    # Probe the RAW file. `promotion_state._read` catches JSONDecodeError and
+    # OSError and returns {}, so a corrupt, truncated or deleted eviction
+    # history was indistinguishable from "nobody was ever evicted" — which is
+    # precisely the regression this record exists to prevent, and the disk on
+    # this VM has run at 84% and been a day from full. The earlier
+    # `except Exception` here could never fire in production.
+    path = promotion_state.retired_path(SCOPE)
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                json.load(f)
+        except Exception as exc:
+            logger.warn(f"[zset] eviction history unreadable ({exc}); "
+                        f"treating set Z as closed")
+            return {"*"}
+    try:
+        return {k.lower() for k in promotion_state.retired_map(SCOPE)}
+    except Exception as exc:
+        logger.warn(f"[zset] eviction history unreadable ({exc}); "
+                    f"treating set Z as closed")
+        return {"*"}
+
+
+def evict(wallet: str, reason: str = "") -> bool:
+    """Remove a wallet from Z, and keep it out.
+
+    Asymmetry on purpose: getting in takes a gate and three rails, getting out
+    takes one call, so anything that only reduces live exposure is reachable
+    from anywhere including inside the loop.
+
+    STICKY, and that is the point. The bot's own auto-demote is time-boxed:
+    0x4a3f86ed was evicted for carrying an active demote that expires
+    2026-08-18, and without a durable record the next run of the seeding
+    script would have re-admitted it on the same evidence the bot demoted it
+    for, days before the flip. Eviction is a decision, not a timeout.
     """
+    import time as _t
+    # Record FIRST. Removing first and recording second meant an ENOSPC left
+    # the wallet out of Z with no durable record while `/zset drop` still told
+    # the owner "real money can no longer follow it" — true only until the
+    # next re-seed.
+    try:
+        promotion_state.add_retired(
+            wallet, until=_t.time() + EVICTION_YEARS_S,
+            reason=reason or "evicted from set Z", scope=SCOPE)
+    except Exception as exc:
+        logger.error(f"[zset] could NOT record the eviction of {wallet}: {exc}. "
+                     f"Refusing to report an eviction that would not stick.")
+        return False
     gone = promotion_state.remove_promoted(wallet, scope=SCOPE)
     if gone:
         logger.warn(f"[zset] EVICTED {wallet} from set Z: {reason or 'no reason given'}")
     return gone
+
+
+def readmit(wallet: str, reason: str = "") -> bool:
+    """Clear an eviction so the gate may consider the wallet again.
+
+    Deliberately separate and deliberately explicit: this is the only way back
+    in, and it should read like a decision in the log.
+    """
+    key = (wallet or "").lower()
+    try:
+        data = dict(promotion_state.retired_map(SCOPE))
+        if key not in data:
+            return False
+        del data[key]
+        promotion_state._write(promotion_state.retired_path(SCOPE), data)
+    except Exception as exc:
+        logger.error(f"[zset] could not clear the eviction of {wallet}: {exc}")
+        return False
+    logger.warn(f"[zset] eviction CLEARED for {wallet}: {reason or 'no reason given'}")
+    return True

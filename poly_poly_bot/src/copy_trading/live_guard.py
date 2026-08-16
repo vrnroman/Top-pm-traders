@@ -125,7 +125,17 @@ def find_stuck_orders(pending: list, now: Optional[float] = None,
             placed = float(placed or 0)
         except (TypeError, ValueError):
             continue
-        if placed > 0 and (now - placed) > max_age_s:
+        if placed <= 0:
+            continue
+        # `trade_executor` stamps `placed_at = time.time() * 1000`, i.e. epoch
+        # MILLISECONDS, while this compared it against epoch seconds. So a
+        # real resting order read as ~57 years in the future and the detector
+        # (and the armed cancel) were dead on production state, green only
+        # because the drill built its own seconds-shaped object. Normalise
+        # rather than assume either unit.
+        if placed > 1e11:
+            placed /= 1000.0
+        if (now - placed) > max_age_s:
             out.append(o)
     return out
 
@@ -182,8 +192,11 @@ def redeemable_positions(proxy_wallet: str) -> list:
                         f"redeemer skips them by design")
         return kept
     except Exception as exc:
+        # None, not []. An empty list means "nothing is stuck"; a failed read
+        # means we do not know, and reporting the second as the first sends a
+        # "resolved" message for a condition nobody confirmed cleared.
         logger.warn(f"[guard] redeemable lookup failed: {exc}")
-        return []
+        return None
 
 
 # NOTE: there was a fourth trigger here, balance drift. It is deleted rather
@@ -243,13 +256,17 @@ def run_once(*, pending_orders: Optional[list] = None,
     # closed/redeemed/closed_ts; `redeemable` comes from the chain, where
     # being in the list AT ALL means the capital is sitting unredeemed, so
     # there is no age field to test and none is invented.
+    # None means the redeemable read FAILED, which is not the same as zero.
+    # Skip the edge entirely in that case rather than announcing a clearance.
+    redeem_unknown = redeemable is None
     unred = find_unredeemed(positions or [], now=now) + list(redeemable or [])
     edge("stuck_orders", bool(stuck),
          f"⏳ {len(stuck)} order(s) resting over "
          f"{STUCK_ORDER_S / 60:.0f} minutes", send, st)
-    edge("unredeemed", bool(unred),
-         f"💤 {len(unred)} resolved position(s) not redeemed after "
-         f"{UNREDEEMED_S / 3600:.0f}h", send, st)
+    if not redeem_unknown:
+        edge("unredeemed", bool(unred),
+             f"💤 {len(unred)} resolved position(s) not redeemed after "
+             f"{UNREDEEMED_S / 3600:.0f}h", send, st)
     acted: list = []
     if armed and stuck and cancel_order is not None:
         for o in stuck:
@@ -265,7 +282,8 @@ def run_once(*, pending_orders: Optional[list] = None,
                 logger.error(f"[guard] could not cancel {oid}: {exc}")
 
     disarm, why = should_self_disarm(
-        crash_streak=crash_streak, unredeemed=len(unred),
+        crash_streak=crash_streak,
+        unredeemed=0 if redeem_unknown else len(unred),
         feed_stale_s=feed_stale_s)
     disarmed = False
     if disarm:

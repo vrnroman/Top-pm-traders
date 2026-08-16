@@ -66,7 +66,7 @@ def drill_set_z_is_gated() -> None:
     admitted, checks = zset.admit(
         "0x000000000000000000000000000000000000dead",
         ready=False, checks=[("fabricated gate result", False, "drill")],
-        settled=[])
+        settled=[], rails_supplied=True)
     check("a wallet the gate refused cannot be admitted", admitted is False)
     check("...and nothing was written", set(zset.wallet_set()) == before,
           f"{len(before)} wallet(s) in Z, unchanged")

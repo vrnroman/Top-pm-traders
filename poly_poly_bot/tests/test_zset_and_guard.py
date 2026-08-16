@@ -40,14 +40,14 @@ def _isolated(tmp_path, monkeypatch):
 def test_a_wallet_the_gate_refused_cannot_be_admitted():
     """The whole point of Z. `admit` has no force flag on purpose."""
     ok, _checks = zset.admit("0xdead", ready=False,
-                             checks=[("fake", False, "")], settled=[P()] * 40)
+                             checks=[("fake", False, "")], settled=[P()] * 40, rails_supplied=True)
     assert ok is False
     assert zset.wallets() == []
 
 
 def test_a_passing_wallet_is_admitted():
     ok, checks = zset.admit("0xGOOD", ready=True, checks=[("gate", True, "")],
-                            settled=[P(ideal=6.0) for _ in range(30)])
+                            settled=[P(ideal=6.0) for _ in range(30)], rails_supplied=True)
     assert ok is True
     assert [w.lower() for w in zset.wallets()] == ["0xgood"]
     assert any("best 3" in lab for lab, _o, _d in checks)
@@ -62,7 +62,7 @@ def test_the_concentration_rail_rejects_a_three_ticket_record():
     assert ok is False, detail
     # and it blocks admission even when the gate said ready
     admitted, _ = zset.admit("0xJACKPOT", ready=True,
-                             checks=[("gate", True, "")], settled=jackpot)
+                             checks=[("gate", True, "")], settled=jackpot, rails_supplied=True)
     assert admitted is False
     assert zset.wallets() == []
 
@@ -87,7 +87,7 @@ def test_trimmed_roi_deletes_the_best_not_the_worst():
 
 
 def test_eviction_is_always_allowed():
-    zset.admit("0xGOOD", ready=True, checks=[], settled=[P(ideal=6.0)] * 30)
+    zset.admit("0xGOOD", ready=True, checks=[], settled=[P(ideal=6.0)] * 30, rails_supplied=True)
     assert zset.evict("0xGOOD", reason="drill") is True
     assert zset.wallets() == []
 
@@ -239,7 +239,7 @@ def test_pentest_forged_gate_result_cannot_admit(monkeypatch):
     get a wallet in without the gate."""
     for ready, checks in ((False, []), (False, [("x", True, "")])):
         ok, _ = zset.admit("0xEVIL", ready=ready, checks=checks,
-                           settled=[P(ideal=9.0)] * 40)
+                           settled=[P(ideal=9.0)] * 40, rails_supplied=True)
         assert ok is False
     assert zset.wallets() == []
 
@@ -250,7 +250,7 @@ def test_pentest_wash_trade_shaped_record_is_rejected():
     wash = [P(50, 5000) for _ in range(3)] + [P(50, -25) for _ in range(60)]
     ok, _ = zset.concentration_check(wash)
     assert ok is False
-    admitted, _ = zset.admit("0xWASH", ready=True, checks=[], settled=wash)
+    admitted, _ = zset.admit("0xWASH", ready=True, checks=[], settled=wash, rails_supplied=True)
     assert admitted is False
 
 
@@ -315,7 +315,7 @@ def test_pentest_a_hostile_market_title_cannot_break_the_panel(tmp_path,
 
 def test_pentest_admitting_the_same_wallet_twice_is_idempotent():
     for _ in range(3):
-        zset.admit("0xGOOD", ready=True, checks=[], settled=[P(ideal=6.0)] * 30)
+        zset.admit("0xGOOD", ready=True, checks=[], settled=[P(ideal=6.0)] * 30, rails_supplied=True)
     assert len(zset.wallets()) == 1
 
 
@@ -414,7 +414,7 @@ def test_a_z_wallet_resolves_to_a_tier(tmp_path, monkeypatch):
     while the 21 env wallets kept their tiers and were the only ones that
     would have traded. Exactly backwards."""
     from src.copy_trading import strategy_config
-    zset.admit("0xZWALLET", ready=True, checks=[], settled=[P(ideal=6.0)] * 30)
+    zset.admit("0xZWALLET", ready=True, checks=[], settled=[P(ideal=6.0)] * 30, rails_supplied=True)
     assert strategy_config.get_wallet_tier("0xZWALLET") == "1b"
 
 
@@ -456,7 +456,7 @@ def test_a_blacklisted_wallet_cannot_enter_z(tmp_path, monkeypatch):
     promotion_state.add_blacklist("0xDEMOTED", until=time.time() + 86400,
                                   reason="auto-demote")
     ok, checks = zset.admit("0xDEMOTED", ready=True, checks=[],
-                            settled=[P(ideal=9.0)] * 40)
+                            settled=[P(ideal=9.0)] * 40, rails_supplied=True)
     assert ok is False
     assert any("auto-demote" in lab and not good for lab, good, _d in checks)
     assert zset.wallets() == []
@@ -472,7 +472,7 @@ def test_the_contradiction_rail_is_a_property_of_z_not_a_script():
     # and admit enforces it
     admitted, _ = zset.admit("0xCONTRA", ready=True, checks=[],
                              settled=[P(ideal=6.0)] * 30,
-                             other_book_roi=-0.19, other_book_n=15)
+                             other_book_roi=-0.19, other_book_n=15, rails_supplied=True)
     assert admitted is False
 
 
@@ -483,7 +483,7 @@ def test_a_hand_written_z_entry_is_ignored(tmp_path):
     promotion_state.add_promoted("0xATTACKER", tier="1a", source="telegram",
                                  scope=zset.SCOPE)
     assert zset.wallets() == [], "a non-gate record reached the live list"
-    zset.admit("0xLEGIT", ready=True, checks=[], settled=[P(ideal=6.0)] * 30)
+    zset.admit("0xLEGIT", ready=True, checks=[], settled=[P(ideal=6.0)] * 30, rails_supplied=True)
     assert [w.lower() for w in zset.wallets()] == ["0xlegit"]
 
 
@@ -634,3 +634,127 @@ def test_the_drills_themselves_still_run(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "drills passed" in out
     assert rc == 0, out
+
+
+# --------------------------------------------------------------------------- #
+# Round-3 manager gate: the expiry bomb and the fail-open door
+# --------------------------------------------------------------------------- #
+
+def test_eviction_is_sticky_past_the_demote_window(tmp_path, monkeypatch):
+    """B1, the dated regression. The bot's auto-demote is TIME-BOXED:
+    0x4a3f86ed's block expires 2026-08-18. Without a durable eviction record a
+    re-run of the seeding script after that date would re-admit it on the very
+    evidence the bot demoted it for, days before the flip."""
+    from src.copy_trading import promotion_state
+
+    # demoted, evicted, then the demote window expires
+    promotion_state.add_blacklist("0xDEMOTED", until=time.time() + 60,
+                                  reason="auto-demote")
+    zset.admit("0xDEMOTED", ready=True, checks=[], settled=[P(ideal=9.0)] * 40, rails_supplied=True)
+    assert zset.wallets() == []
+    zset.evict("0xDEMOTED", reason="active auto-demote")
+
+    # fast-forward past the demote expiry: the blacklist no longer blocks
+    monkeypatch.setattr(promotion_state, "is_blacklisted",
+                        lambda w, now=None, scope="": False)
+    ok, checks = zset.admit("0xDEMOTED", ready=True, checks=[],
+                            settled=[P(ideal=9.0)] * 40, rails_supplied=True)
+    assert ok is False, "the expiry bomb: it walked back in"
+    assert any("evicted" in lab and not good for lab, good, _d in checks)
+
+
+def test_readmission_is_explicit(tmp_path):
+    zset.evict("0xGONE", reason="test")
+    ok, _ = zset.admit("0xGONE", ready=True, checks=[], settled=[P(ideal=6.0)] * 30, rails_supplied=True)
+    assert ok is False
+    assert zset.readmit("0xGONE", reason="reviewed") is True
+    ok2, _ = zset.admit("0xGONE", ready=True, checks=[], settled=[P(ideal=6.0)] * 30, rails_supplied=True)
+    assert ok2 is True
+
+
+def test_an_unreadable_demote_list_refuses_rather_than_passes(tmp_path):
+    """B2. `promotion_state._read` returns {} for corrupt JSON, which would
+    turn 'no active demote' into a pass for every wallet. A blacklist we
+    cannot read is not an empty blacklist."""
+    from src.copy_trading import promotion_state
+    with open(promotion_state.blacklist_path(""), "w") as f:
+        f.write("{not json")
+    promotion_state.clear_cache()
+    blocked = zset._blacklist_block("0xANY")
+    assert blocked is not None and "unreadable" in blocked
+    ok, _ = zset.admit("0xANY", ready=True, checks=[], settled=[P(ideal=6.0)] * 30, rails_supplied=True)
+    assert ok is False
+
+
+def test_unreadable_eviction_history_closes_the_set(tmp_path, monkeypatch):
+    monkeypatch.setattr(zset.promotion_state, "retired_map",
+                        lambda scope="": (_ for _ in ()).throw(OSError("boom")))
+    assert zset.evicted_set() == {"*"}
+    ok, _ = zset.admit("0xANY", ready=True, checks=[], settled=[P(ideal=6.0)] * 30, rails_supplied=True)
+    assert ok is False, "unreadable eviction history must close Z, not open it"
+
+
+def test_admit_refuses_a_caller_that_omits_the_rail_evidence():
+    """The rails defaulted to PASS: `other_book_*` at (None, 0) printed the
+    contradiction check as PASS for a caller who simply omitted it, and
+    `era_floor=None` computed the concentration rail over the pre-clean-era
+    rows this repo spent months invalidating. A caller who does not supply the
+    evidence now gets a refusal, not a free pass."""
+    ok, checks = zset.admit("0xLAZY", ready=True, checks=[],
+                            settled=[P(ideal=9.0)] * 40)
+    assert ok is False
+    assert any("rail evidence" in lab for lab, _o, _d in checks)
+    assert zset.wallets() == []
+
+
+def test_a_stuck_order_is_detected_in_the_unit_production_writes():
+    """`trade_executor` stamps `placed_at = time.time() * 1000`. Comparing
+    that against epoch SECONDS made a real resting order read as decades in
+    the future, so the detector and the armed cancel were both dead on
+    production state while the drill stayed green on its own seconds shape."""
+    now = time.time()
+    ms_order = {"order_id": "prod", "placed_at": (now - 3600) * 1000}
+    s_order = {"order_id": "drill", "placed_at": now - 3600}
+    assert len(live_guard.find_stuck_orders([ms_order], now=now)) == 1
+    assert len(live_guard.find_stuck_orders([s_order], now=now)) == 1
+    fresh_ms = {"order_id": "fresh", "placed_at": (now - 5) * 1000}
+    assert live_guard.find_stuck_orders([fresh_ms], now=now) == []
+
+
+def test_a_failed_redeemable_read_is_not_reported_as_resolved(tmp_path,
+                                                              monkeypatch):
+    """[] means nothing is stuck; a failed read means we do not know. Reporting
+    the second as the first sends a 'resolved' message for a condition nobody
+    confirmed cleared, and blinds the trigger."""
+    monkeypatch.setattr(live_guard.CONFIG, "data_dir", str(tmp_path))
+    sent = []
+    # first: a real finding
+    live_guard.run_once(redeemable=[{"a": 1}], send=sent.append)
+    assert sent, "the finding should have alerted"
+    sent.clear()
+    # then the read FAILS: no clearance message may be sent
+    out = live_guard.run_once(redeemable=None, send=sent.append)
+    assert sent == [], "a failed read must not announce a clearance"
+    assert out["unredeemed"] == 0
+
+
+def test_the_executor_checks_set_z_outside_the_tiered_branch():
+    """Two live bypasses existed while the check sat inside `if TIERED_MODE`:
+    `onchain_source` builds its own list from CONFIG.user_addresses, and the
+    legacy non-tiered branch consults no wallet set at all."""
+    import inspect
+
+    from src.copy_trading import trade_executor
+    src = inspect.getsource(trade_executor.place_trade_orders)
+    zi = src.index("not in set Z")
+    ti = src.index("if TIERED_MODE:")
+    assert zi < ti, "the Z check must come BEFORE the tiered branch"
+
+
+def test_wallet_set_is_derived_from_the_filtered_list(tmp_path):
+    """`wallet_set()` read the store raw, so it was the forgeable twin of
+    `wallets()` and the more natural name for 'is this wallet in Z'."""
+    from src.copy_trading import promotion_state
+    promotion_state.add_promoted("0xHAND", tier="1a", source="telegram",
+                                 scope=zset.SCOPE)
+    assert zset.wallet_set() == set()
