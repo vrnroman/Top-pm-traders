@@ -128,6 +128,14 @@ gcloud compute ssh "$TARGET" \
 gcloud compute scp "${SSH_FLAGS[@]}" .env "$TARGET:~/app/.env" \
     --project="$GCP_PROJECT_ID" --zone="$ZONE"
 
+# scp lands it 0644. That file holds the private key that can spend real
+# money, and the 2026-05-10 security audit's HIGH #1 was exactly this. A
+# one-off chmod on the box does not survive the next deploy, so it belongs
+# here, on every deploy, right after the upload.
+gcloud compute ssh "$TARGET" \
+    --project="$GCP_PROJECT_ID" --zone="$ZONE" "${SSH_FLAGS[@]}" \
+    --command='chmod 600 ~/app/.env && stat -c "secured .env: %A" ~/app/.env'
+
 # The VM's service account lacks the cloud-platform/AR OAuth scope, so it can't
 # mint its own pull token. Instead mint one HERE (from the deploy identity,
 # which has AR read) and ship it as a short-lived file the VM feeds to
