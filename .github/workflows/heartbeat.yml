@@ -55,8 +55,8 @@ jobs:
               # gone quiet is as bad as one that is gone.
               LAST=$(docker logs --tail 1 --timestamps poly-poly-bot 2>&1 | head -1 | cut -d" " -f1)
               # Is it armed for real money, and does it still hold set Z?
-              ARMED=$(cat ~/app/data/live_arm.json 2>/dev/null | tr -d "\n" || echo "none")
-              ZN=$(python3 -c "import json,sys;print(len(json.load(open(\"$HOME/app/data/promoted_wallets_z.json\"))))" 2>/dev/null || echo 0)
+              ARMED=$(cat /home/tianyuezhou/app/data/live_arm.json 2>/dev/null | tr -d "\n" || echo "none")
+              ZN=$(python3 -c "import json;print(len(json.load(open(\"/home/tianyuezhou/app/data/promoted_wallets_z.json\"))))" 2>/dev/null || echo -1)
               DISK=$(df -h / | awk "NR==2{print \$5}")
               echo "up=$UP last=$LAST arm=$ARMED z=$ZN disk=$DISK"
             ' 2>&1)
@@ -113,11 +113,19 @@ jobs:
               if '"armed": true' in raw.replace("'", '"'):
                   problems.append("NOTE: this box is ARMED for real orders")
 
+          token, chat = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT")
+
+          # Check the CHANNEL on every run, including healthy ones. Learning
+          # the alert path is dead during the incident is the same failure as
+          # the 08-22 memo that shipped undeliverable.
+          if not token or not chat:
+              print("::warning::heartbeat cannot reach Telegram: repository "
+                    "secrets TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not "
+                    "set. Alerts will appear only as a red Actions run.")
+
           if not problems:
               print("healthy, staying silent")
               raise SystemExit(0)
-
-          token, chat = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT")
           text = ("🚨 <b>Heartbeat failed</b>\n"
                   + "\n".join(f"• {p}" for p in problems)
                   + "\n\n<i>Checked from GitHub Actions, outside the VM.</i>")

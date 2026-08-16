@@ -492,17 +492,45 @@ def test_the_guard_loop_reads_functions_that_exist():
     """D3. The loop imported `inventory.get_open_positions`, which does not
     exist; the ImportError was swallowed and every detector became
     structurally incapable of firing while the log said the guard was up."""
-    from src.copy_trading import inventory, trade_queue
-    assert hasattr(inventory, "get_positions")
-    assert hasattr(trade_queue, "peek_pending_orders")
     import inspect
+
+    from src.copy_trading import live_guard, trade_queue
+    assert hasattr(trade_queue, "peek_pending_orders")
+    assert hasattr(live_guard, "redeemable_positions")
 
     import main
     src = inspect.getsource(main._live_guard_loop)
-    assert "get_open_positions" not in src
-    assert "peek_pending_orders" in src and "get_positions" in src
-    # and a failed read must be logged, not silently swallowed
-    assert "could not read inventory" in src
+    assert "get_open_positions" not in src, "imports a function that does not exist"
+    assert "peek_pending_orders" in src
+    # The redeemer's own source, not the inventory store: inventory holds OPEN
+    # positions and knows nothing about resolution, so it could never answer
+    # "what failed to redeem".
+    assert "redeemable_positions" in src
+    # a failed read must be logged AND must count toward the crash streak,
+    # or the guard keeps passing on empty inputs forever
+    assert "could not read pending orders" in src
+    assert "read_failed" in src
+
+
+def test_the_guard_reads_dict_positions(monkeypatch, tmp_path):
+    """`inventory.Position` is a dict alias, so `getattr(p, "closed")` was
+    always False and three of four triggers could never fire on real state."""
+    now = time.time()
+    dict_rows = [{"closed": True, "redeemed": False, "closed_ts": now - 48 * 3600}
+                 for _ in range(3)]
+    assert len(live_guard.find_unredeemed(dict_rows, now=now)) == 3
+    dict_orders = [{"order_id": "o1", "placed_at": now - 3600}]
+    assert len(live_guard.find_stuck_orders(dict_orders, now=now)) == 1
+
+
+def test_chain_redeemable_rows_count_as_unredeemed(tmp_path, monkeypatch):
+    """A row from the redeemable API has no closed/closed_ts to test: being in
+    that list at all IS the finding."""
+    monkeypatch.setattr(live_guard.CONFIG, "data_dir", str(tmp_path))
+    out = live_guard.run_once(redeemable=[{"asset": "a"}, {"asset": "b"},
+                                          {"asset": "c"}])
+    assert out["unredeemed"] == 3
+    assert out["disarm_reason"], "3 stuck redemptions must trip self-disarm"
 
 
 def test_the_drills_do_not_write_the_real_guard_state():

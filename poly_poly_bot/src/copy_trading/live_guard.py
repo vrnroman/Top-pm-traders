@@ -54,6 +54,20 @@ BALANCE_DRIFT_FRAC = 0.10
 CRASH_LOOP_N = 5
 
 
+def _field(o, name, default=None):
+    """Read a field from an attribute object OR a dict.
+
+    `inventory.Position` is a plain `dict` alias, so reading production state
+    with `getattr(p, "closed", False)` returned False for every real position,
+    forever, while the drills stayed green because they hand in attribute
+    objects production never produces. Anything reading real state must accept
+    both shapes.
+    """
+    if isinstance(o, dict):
+        return o.get(name, default)
+    return getattr(o, name, default)
+
+
 def _state_path() -> str:
     return os.path.join(CONFIG.data_dir, STATE_FILE)
 
@@ -111,9 +125,7 @@ def find_stuck_orders(pending: list, now: Optional[float] = None,
     now = time.time() if now is None else now
     out = []
     for o in pending or []:
-        placed = getattr(o, "placed_at", None)
-        if placed is None and isinstance(o, dict):
-            placed = o.get("placed_at")
+        placed = _field(o, "placed_at")
         try:
             placed = float(placed or 0)
         except (TypeError, ValueError):
@@ -129,18 +141,39 @@ def find_unredeemed(positions: list, now: Optional[float] = None,
     now = time.time() if now is None else now
     out = []
     for p in positions or []:
-        if not getattr(p, "closed", False):
+        if not _field(p, "closed", False):
             continue
-        if getattr(p, "redeemed", False):
+        if _field(p, "redeemed", False):
             continue
         closed_ts = 0.0
         try:
-            closed_ts = float(getattr(p, "closed_ts", 0) or 0)
+            closed_ts = float(_field(p, "closed_ts", 0) or 0)
         except (TypeError, ValueError):
             pass
         if closed_ts > 0 and (now - closed_ts) > max_age_s:
             out.append(p)
     return out
+
+
+def redeemable_positions(proxy_wallet: str) -> list:
+    """Positions the chain says are redeemable RIGHT NOW.
+
+    The inventory store holds OPEN positions and knows nothing about
+    resolution, so asking it about unredeemed capital was asking the wrong
+    source. This asks the same source the redeemer itself uses. Read-only;
+    returns [] rather than raising, since a guard that dies on a bad read
+    is worse than one that reports nothing.
+    """
+    if not proxy_wallet:
+        return []
+    try:
+        import asyncio
+
+        from src.copy_trading.auto_redeemer import _fetch_redeemable_positions
+        return list(asyncio.run(_fetch_redeemable_positions(proxy_wallet)) or [])
+    except Exception as exc:
+        logger.warn(f"[guard] redeemable lookup failed: {exc}")
+        return []
 
 
 def balance_drift(expected_usd: Optional[float],
@@ -183,6 +216,7 @@ def should_self_disarm(*, crash_streak: int = 0,
 
 def run_once(*, pending_orders: Optional[list] = None,
              positions: Optional[list] = None,
+             redeemable: Optional[list] = None,
              expected_usd: Optional[float] = None,
              actual_usd: Optional[float] = None,
              crash_streak: int = 0,
@@ -200,7 +234,11 @@ def run_once(*, pending_orders: Optional[list] = None,
     st = _read_state()
 
     stuck = find_stuck_orders(pending_orders or [], now=now)
-    unred = find_unredeemed(positions or [], now=now)
+    # Two sources, deliberately. `positions` are ledger-shaped rows carrying
+    # closed/redeemed/closed_ts; `redeemable` comes from the chain, where
+    # being in the list AT ALL means the capital is sitting unredeemed, so
+    # there is no age field to test and none is invented.
+    unred = find_unredeemed(positions or [], now=now) + list(redeemable or [])
     drift = balance_drift(expected_usd, actual_usd)
 
     edge("stuck_orders", bool(stuck),

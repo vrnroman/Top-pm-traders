@@ -17,6 +17,7 @@ import sys
 import signal
 import logging
 import threading
+import time
 from pathlib import Path
 
 # Add parent to path for imports
@@ -108,34 +109,59 @@ def _live_guard_loop():
     """
     from src.copy_trading import live_guard
 
-    from src.copy_trading import trade_queue
-    from src.copy_trading.inventory import get_positions
+    from src.copy_trading import live_guard, trade_queue
 
     interval = 300.0
     crash_streak = 0
     logger.info("[guard] live guard started (detect always, act only when armed)")
     while not _shutdown_event.is_set():
-        # Gather the REAL inputs. The first version of this loop imported a
-        # function that does not exist, swallowed the ImportError silently, and
-        # called run_once with nothing, so every detector was structurally
-        # incapable of firing while the logs said the guard was running. An
-        # import that fails here must be loud and must count as a failed pass.
-        positions, pending = [], []
-        try:
-            positions = list(get_positions().values())
-        except Exception as exc:
-            logger.error(f"[guard] could not read inventory: {exc}")
+        # Gather the REAL inputs, from the sources that actually know. An
+        # earlier version imported a function that does not exist, swallowed
+        # the ImportError, and called run_once with nothing, so every detector
+        # was structurally incapable of firing while the log said the guard was
+        # up. A read that fails must be loud AND must count as a failed pass,
+        # or the guard keeps passing on empty inputs forever.
+        pending, redeemable, actual_usd = [], [], None
+        read_failed = False
         try:
             pending = list(trade_queue.peek_pending_orders())
         except Exception as exc:
+            read_failed = True
             logger.error(f"[guard] could not read pending orders: {exc}")
+        try:
+            # The redeemer's own source. The inventory store holds OPEN
+            # positions and knows nothing about resolution, so it could never
+            # answer "what failed to redeem".
+            redeemable = live_guard.redeemable_positions(CONFIG.proxy_wallet)
+        except Exception as exc:
+            read_failed = True
+            logger.error(f"[guard] could not read redeemable positions: {exc}")
+        try:
+            from src.copy_trading.get_balance import get_usdc_balance
+            bal = get_usdc_balance()
+            actual_usd = bal if bal is not None and bal >= 0 else None
+        except Exception as exc:
+            logger.warn(f"[guard] could not read USDC balance: {exc}")
+
+        # How long since the detector last saw ANY trade. This is the input
+        # the stale-feed trigger needs and never had.
+        feed_stale_s = None
+        try:
+            from src.copy_trading import shadow_quote
+            rows = shadow_quote.load_rows()
+            if rows:
+                newest = max(float(r.get("detected_at") or 0) for r in rows)
+                if newest > 0:
+                    feed_stale_s = max(0.0, time.time() - newest)
+        except Exception:
+            pass
 
         try:
             out = live_guard.run_once(
-                positions=positions, pending_orders=pending,
-                crash_streak=crash_streak,
-                send=telegram_bot.send_message)
-            crash_streak = 0
+                pending_orders=pending, redeemable=redeemable,
+                actual_usd=actual_usd, feed_stale_s=feed_stale_s,
+                crash_streak=crash_streak, send=telegram_bot.send_message)
+            crash_streak = crash_streak + 1 if read_failed else 0
             if out.get("stuck_orders") or out.get("unredeemed"):
                 logger.info(f"[guard] {out['stuck_orders']} stuck order(s), "
                             f"{out['unredeemed']} unredeemed")

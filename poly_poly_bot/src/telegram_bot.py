@@ -1467,7 +1467,12 @@ def _handle_speed(text: str) -> None:
             pass
 
     since = _time.time() - days * 86400
-    rows = shadow_quote.load_rows(since_ts=since)
+    all_rows = shadow_quote.load_rows(since_ts=since)
+    # The headline describes the GLOBAL FEED only. Set Z is polled per-wallet
+    # and detected roughly 250x faster, so one median over both populations is
+    # bimodal and describes neither, on the number that gates the flip. The
+    # set-Z slice is reported separately further down.
+    rows = shadow_quote.by_source(all_rows, "feed")
     # ONE coverage decision for the whole panel, computed on the full set and
     # handed to every surface, rather than each deciding for its own slice.
     # Deciding locally broke the table twice: once by resurrecting rows the
@@ -1482,8 +1487,7 @@ def _handle_speed(text: str) -> None:
     if not rows:
         # Honest empty: say it is collecting, never print a zero that reads
         # like a measurement.
-        all_rows = shadow_quote.load_rows()
-        since_ts = shadow_quote.collecting_since(all_rows)
+        since_ts = shadow_quote.collecting_since(shadow_quote.load_rows())
         if since_ts:
             age_h = (_time.time() - since_ts) / 3600
             lines.append(f"Collecting, {len(all_rows)} sample(s) so far, "
@@ -1644,7 +1648,7 @@ def _handle_speed(text: str) -> None:
     # above. Z's wallets are polled per-wallet and detected in about a second;
     # everything else comes off the ~5-minute global feed. One number over both
     # describes neither, and Z's is the one that decides real money.
-    fast = shadow_quote.by_source(rows, shadow_quote.FAST_SOURCE)
+    fast = shadow_quote.by_source(all_rows, shadow_quote.FAST_SOURCE)
     fs = shadow_quote.summarize(fast, known=shadow_quote.coverage_known(fast))
     lines.append("<b>Set Z, detected per-wallet</b>")
     if fs["n_latency"] < 5 and fs["n_penalty"] < 5:
