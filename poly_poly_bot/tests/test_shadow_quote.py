@@ -654,32 +654,79 @@ def test_clustered_rows_are_disclosed_as_few_independent_observations():
     assert s["n_decay_moves"] == 2
 
 
-def test_the_decay_conclusion_is_gated_on_distinct_moves(monkeypatch, tmp_path):
-    """13 clones of one book move must not clear the 5-sample floor and read
-    as a settled answer about whether speed is worth paying for."""
+def test_the_decay_conclusion_is_gated_on_distinct_book_reads(monkeypatch, tmp_path):
+    """13 copies priced off ONE cached book read is one observation.
+
+    The first version of this test gave every row the same penalty value,
+    which was the only shape under which the old (token, penalty, penalty_t1)
+    key deduped, and the one shape production never writes: penalty_bps is
+    computed against each copy's OWN their_price, so one read yields 13
+    different penalties. Production showed 15 reads reported as 37 moves.
+    """
     import time as _t
     from unittest.mock import patch as _patch
     monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
     import src.telegram_bot as tb
     now = _t.time()
-    rows = [{"copy_id": f"c{i}", "target": "0xw", "token_id": "tokA",
-             "book_ts": 111.0, "category": "sports", "their_price": 0.5,
-             "our_price": 0.43, "penalty_bps": -1400, "penalty_bps_t1": -1600,
-             "t1_stale": False, "quote_lag_s": 1.0, "boot_flush": False,
-             "notify_latency_s": 120.0, "detected_at": now - 10}
-            for i in range(13)]
+    rows = []
+    for i in range(13):
+        their = 0.50 + i * 0.005          # each copy entered at its own price
+        rows.append({
+            "copy_id": f"c{i}", "target": "0xw", "token_id": "tokA",
+            "book_ts": 111.0,             # ...but ONE book read priced them all
+            "category": "sports", "their_price": their, "our_price": 0.43,
+            "penalty_bps": int((0.43 - their) / their * 10000),
+            "penalty_bps_t1": int((0.41 - their) / their * 10000),
+            "t1_stale": False, "quote_lag_s": 1.0, "boot_flush": False,
+            "notify_latency_s": 120.0, "detected_at": now - 10})
     with open(tmp_path / "shadow-quotes.jsonl", "w") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
+
+    s = shadow_quote.summarize(shadow_quote.load_rows())
+    assert s["n_penalty"] == 13
+    assert len({r["penalty_bps"] for r in rows}) == 13, "penalties really do differ"
+    assert s["n_book_reads"] == 1
+    assert s["n_decay_moves"] == 1, "one read cannot be thirteen moves"
+
     sent = []
     with _patch.object(tb, "_send_chunked", lambda x: sent.append(x)), \
          _patch.object(tb, "send_message", lambda x, **k: sent.append(x)):
         tb._handle_speed("/speed 7")
     out = sent[0]
-    assert "Does being faster help" not in out, (
-        "one book move cloned 13 times is not 13 samples")
-    assert "one market or one book read" in out, "the reader must be warned"
-    assert "1 market(s)" in out and "1 distinct book read(s)" in out
+    assert "Does being faster help" not in out
+    assert "1 distinct book read(s)" in out
+    assert "almost all one market" in out
+
+
+def test_unknown_independence_is_not_rendered_as_zero(monkeypatch, tmp_path):
+    """Rows predating book_ts must read as unmeasured, not as zero reads."""
+    import time as _t
+    from unittest.mock import patch as _patch
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    import src.telegram_bot as tb
+    now = _t.time()
+    rows = [{"copy_id": f"c{i}", "target": f"0xw{i}", "token_id": f"tok{i}",
+             "category": "sports", "their_price": 0.5, "our_price": 0.55,
+             "penalty_bps": 1000, "penalty_bps_t1": 1100, "t1_stale": False,
+             "quote_lag_s": 1.0, "boot_flush": False,
+             "notify_latency_s": 60.0, "detected_at": now - 10}
+            for i in range(8)]          # 8 markets, no book_ts anywhere
+    with open(tmp_path / "shadow-quotes.jsonl", "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    s = shadow_quote.summarize(shadow_quote.load_rows())
+    assert s["n_book_reads"] is None, "absent must not read as zero"
+    assert s["n_decay_moves"] is None
+    sent = []
+    with _patch.object(tb, "_send_chunked", lambda x: sent.append(x)), \
+         _patch.object(tb, "send_message", lambda x, **k: sent.append(x)):
+        tb._handle_speed("/speed 7")
+    out = sent[0]
+    assert "0 distinct book read" not in out
+    assert "independence not recorded" in out
+    # and the conclusion stays suppressed while independence is unknown
+    assert "Does being faster help" not in out
 
 
 def test_non_finite_penalties_cannot_render_as_a_measurement():
@@ -691,23 +738,74 @@ def test_non_finite_penalties_cannot_render_as_a_measurement():
     assert s["penalty_mean_bps"] == 200
 
 
-def test_no_user_facing_dash_in_this_runs_new_code():
-    """The owner's hardest style rule. Checks string literals only, so code
-    commentary is exempt, and only the modules this run authored."""
+def test_no_user_facing_dash_in_this_runs_code():
+    """The owner's hardest style rule, over every LINE this run authored.
+
+    The first version of this test listed only the four modules the run
+    created, and a dash shipped in main.py's boot log because that file was
+    merely edited, not created. So the file list is derived from the run's own
+    diff, and the check is per added-line, so pre-existing product text in a
+    file this run merely touched stays out of scope.
+    """
     import ast
-    for f in ("src/copy_trading/live_mode.py",
-              "src/copy_trading/shadow_quote.py",
-              "src/copy_trading/virtual_ledger.py",
-              "src/copy_trading/order_executor.py"):
-        tree = ast.parse(open(f, encoding="utf-8").read())
+    import subprocess
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    files = [
+        "main.py", "src/config.py", "src/models.py", "src/telegram_bot.py",
+        "src/copy_trading/copy_paper.py", "src/copy_trading/copy_paper_live.py",
+        "src/copy_trading/copy_paper_runner.py",
+        "src/copy_trading/data_api_source.py", "src/copy_trading/live_mode.py",
+        "src/copy_trading/market_price.py", "src/copy_trading/onchain_source.py",
+        "src/copy_trading/order_executor.py", "src/copy_trading/shadow_quote.py",
+        "src/copy_trading/trade_executor.py", "src/copy_trading/virtual_ledger.py",
+    ]
+    # Lines this run added, per file (empty set => whole file is in scope,
+    # which is the safe direction when git is unavailable).
+    added = {}
+    for f in files:
+        try:
+            diff = subprocess.run(
+                ["git", "diff", "-U0", "81540af..HEAD", "--", f],
+                cwd=repo, capture_output=True, text=True, timeout=20).stdout
+        except Exception:
+            diff = ""
+        lines = set()
+        n = 0
+        for ln in diff.splitlines():
+            if ln.startswith("@@"):
+                try:
+                    n = int(ln.split("+")[1].split(",")[0].split()[0])
+                except (IndexError, ValueError):
+                    n = 0
+            elif ln.startswith("+") and not ln.startswith("+++"):
+                lines.add(n)
+                n += 1
+            elif not ln.startswith("-"):
+                n += 1
+        added[f] = lines
+
+    offenders = []
+    for f in files:
+        path = os.path.join(repo, f)
+        if not os.path.exists(path):
+            continue
+        tree = ast.parse(open(path, encoding="utf-8").read())
         docstring_lines = set()
         for node in ast.walk(tree):
             if isinstance(node, (ast.Module, ast.FunctionDef,
                                  ast.AsyncFunctionDef, ast.ClassDef)):
                 if ast.get_docstring(node, clean=False) and node.body:
                     docstring_lines.add(node.body[0].lineno)
+        scope = added.get(f) or None
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                    and node.lineno not in docstring_lines):
-                assert "—" not in node.value and "–" not in node.value, (
-                    f"{f}:{node.lineno} has a dash in a user-facing string")
+            if not (isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)):
+                continue
+            if node.lineno in docstring_lines:
+                continue
+            if scope is not None and node.lineno not in scope:
+                continue
+            if "\u2014" in node.value or "\u2013" in node.value:
+                offenders.append(f"{f}:{node.lineno}: {node.value[:60]!r}")
+    assert not offenders, "dash in text this run wrote:\n" + "\n".join(offenders)

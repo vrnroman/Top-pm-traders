@@ -1531,11 +1531,21 @@ def _handle_speed(text: str) -> None:
         # Independence, next to the headline. A burst of copies on one market
         # priced from one cached book read is ONE observation wearing many row
         # numbers, and without this the reader has no way to discount it.
-        lines.append(f"  <i>across {s['n_markets']} market(s) and "
-                     f"{s['n_book_reads']} distinct book read(s)</i>")
-        if s["n_markets"] <= 2 or s["n_book_reads"] <= 4:
-            lines.append("  ⚠️ <i>almost all of one market or one book read. "
+        reads = s["n_book_reads"]
+        reads_txt = ("independence not recorded on these rows"
+                     if reads is None else f"{reads} distinct book read(s)")
+        lines.append(f"  <i>across {s['n_markets']} market(s), {reads_txt}</i>")
+        # Name the condition that actually fired. A warning whose stated
+        # reason is untrue teaches the reader to ignore the next one.
+        if reads is None:
+            lines.append("  ⚠️ <i>cannot tell how many independent book reads "
+                         "these came from, so the sign is unsettled.</i>")
+        elif s["n_markets"] <= 2:
+            lines.append(f"  ⚠️ <i>almost all one market ({s['n_markets']}). "
                          "Treat the sign as unsettled, not as an answer.</i>")
+        elif reads <= 4:
+            lines.append(f"  ⚠️ <i>only {reads} independent book read(s) behind "
+                         "this. Treat the sign as unsettled.</i>")
         if s["n_excluded_lag"]:
             lines.append(f"  <i>{s['n_excluded_lag']} sample(s) excluded: quoted "
                          f"over {shadow_quote.MAX_QUOTE_LAG_S:.0f}s after "
@@ -1553,7 +1563,9 @@ def _handle_speed(text: str) -> None:
     # Gated on DISTINCT book moves, not row count: 13 clones of one in-play
     # collapse would otherwise clear a 5-row floor and read as a settled
     # conclusion about whether speed is worth paying for.
-    if s.get("n_decay_moves", 0) >= 5:
+    # None (independence unmeasurable) suppresses the conclusion, same as too
+    # few: this line tells him whether speed is worth paying for.
+    if (s.get("n_decay_moves") or 0) >= 5:
         lines.append(f"<b>Does being faster help</b> "
                      f"({s['n_decay_moves']} distinct book moves)")
         lines.append(f"  entry drifts {_esc(_fmt_bps(s['decay_mean_bps']))} over "

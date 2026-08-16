@@ -70,7 +70,7 @@ def _get_shadow_observer():
                 observer, _stop = make_observer(create_clob_client)
                 _shadow_observer_cache = observer
                 logger.info("[shadow] pre-flip quote observer started "
-                            "(measurement only — never places an order)")
+                            "(measurement only, never places an order)")
             except Exception as exc:
                 logger.warn(f"[shadow] observer unavailable: {exc}")
                 return None

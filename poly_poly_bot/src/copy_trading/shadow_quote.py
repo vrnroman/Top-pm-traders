@@ -595,14 +595,25 @@ def summarize(rows: list[dict]) -> dict:
     # shared one identical ask. Row count alone would present that as a
     # settled distribution, which is the confident-and-wrong shape.
     n_markets = len({r.get("token_id") for r in pen_rows if r.get("token_id")})
-    n_reads = len({(r.get("token_id"), r.get("book_ts")) for r in pen_rows
-                   if r.get("token_id") and r.get("book_ts") is not None})
+    read_keys = {(r.get("token_id"), r.get("book_ts")) for r in pen_rows
+                 if r.get("token_id") and r.get("book_ts") is not None}
+    # None, not 0, when no row carries the field: "0 book reads behind 38
+    # samples" is not a low number, it is an unmeasured one, and rendering it
+    # as zero produced a correct-looking warning for an untrue reason.
+    n_reads = len(read_keys) if read_keys else None
     decay_rows = [r for r in pen_rows
                   if r.get("penalty_bps_t1") is not None
                   and r.get("penalty_bps") is not None
                   and not r.get("t1_stale", False)]
-    n_moves = len({(r.get("token_id"), r.get("penalty_bps"),
-                    r.get("penalty_bps_t1")) for r in decay_rows})
+    # Key on the READ that produced the move, never on the penalty values.
+    # penalty_bps is computed against each copy's OWN their_price, so 13
+    # copies priced off one cached book read yield 13 different penalties and
+    # would have counted as 13 independent moves. Production showed 15
+    # distinct reads reported as 37 moves, which is impossible by
+    # construction. Bounding moves by reads makes that unrepresentable.
+    move_keys = {(r.get("token_id"), r.get("book_ts")) for r in decay_rows
+                 if r.get("token_id") and r.get("book_ts") is not None}
+    n_moves = len(move_keys) if move_keys else None
     return {
         "n": len(rows),
         "n_markets": n_markets,
