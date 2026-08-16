@@ -86,7 +86,7 @@ def arm(reason: str = "", by: str = "telegram") -> tuple[bool, str]:
     decides otherwise.
     """
     if not CONFIG.live_arm_enabled:
-        return (False, "LIVE_ARM_ENABLED is not set on the VM — the owner's "
+        return (False, "LIVE_ARM_ENABLED is not set on the VM. The owner's "
                        "key is required before this command can do anything.")
     if CONFIG.preview_mode:
         return (False, "PREVIEW_MODE=true at the process level; arming alone "
@@ -116,7 +116,7 @@ def disarm(by: str = "telegram") -> bool:
     except OSError as exc:
         logger.warn(f"[live] disarm write failed: {exc}")
         return False
-    logger.warn(f"[live] DISARMED by {by} — back to paper")
+    logger.warn(f"[live] DISARMED by {by}, back to paper")
     return True
 
 

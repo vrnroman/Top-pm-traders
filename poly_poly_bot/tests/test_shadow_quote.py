@@ -629,3 +629,85 @@ def test_counterfactual_ignores_biased_quotes(tmp_path):
                "boot_flush": True}]
     out = virtual_ledger.replay(str(lp), quote_rows=biased)
     assert out["n_matched"] == 0, "a boot-flush quote must not price the book"
+
+
+# --------------------------------------------------------------------------- #
+# Round-6: n counts rows, not independent observations
+# --------------------------------------------------------------------------- #
+
+def test_clustered_rows_are_disclosed_as_few_independent_observations():
+    """Production had 27 penalty rows that were 4 tokens and 10 book reads,
+    with 14 sharing one cached ask. Row count alone presented one in-play
+    market collapsing as a settled distribution."""
+    rows = [{"target": "0xw", "token_id": "tokA", "book_ts": 111.0,
+             "penalty_bps": -1400, "penalty_bps_t1": -1600, "t1_stale": False,
+             "quote_lag_s": 1.0, "boot_flush": False} for _ in range(14)]
+    rows += [{"target": "0xw", "token_id": "tokB", "book_ts": 222.0,
+              "penalty_bps": 300, "penalty_bps_t1": 320, "t1_stale": False,
+              "quote_lag_s": 1.0, "boot_flush": False}]
+    s = shadow_quote.summarize(rows)
+    assert s["n_penalty"] == 15        # rows
+    assert s["n_markets"] == 2         # ...but only two markets
+    assert s["n_book_reads"] == 2      # ...and two book reads
+    # and the decay term counts distinct MOVES, not clones of one move
+    assert s["n_decay"] == 15
+    assert s["n_decay_moves"] == 2
+
+
+def test_the_decay_conclusion_is_gated_on_distinct_moves(monkeypatch, tmp_path):
+    """13 clones of one book move must not clear the 5-sample floor and read
+    as a settled answer about whether speed is worth paying for."""
+    import time as _t
+    from unittest.mock import patch as _patch
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    import src.telegram_bot as tb
+    now = _t.time()
+    rows = [{"copy_id": f"c{i}", "target": "0xw", "token_id": "tokA",
+             "book_ts": 111.0, "category": "sports", "their_price": 0.5,
+             "our_price": 0.43, "penalty_bps": -1400, "penalty_bps_t1": -1600,
+             "t1_stale": False, "quote_lag_s": 1.0, "boot_flush": False,
+             "notify_latency_s": 120.0, "detected_at": now - 10}
+            for i in range(13)]
+    with open(tmp_path / "shadow-quotes.jsonl", "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    sent = []
+    with _patch.object(tb, "_send_chunked", lambda x: sent.append(x)), \
+         _patch.object(tb, "send_message", lambda x, **k: sent.append(x)):
+        tb._handle_speed("/speed 7")
+    out = sent[0]
+    assert "Does being faster help" not in out, (
+        "one book move cloned 13 times is not 13 samples")
+    assert "one market or one book read" in out, "the reader must be warned"
+    assert "1 market(s)" in out and "1 distinct book read(s)" in out
+
+
+def test_non_finite_penalties_cannot_render_as_a_measurement():
+    rows = [{"penalty_bps": float("nan"), "quote_lag_s": 1.0},
+            {"penalty_bps": float("inf"), "quote_lag_s": 1.0},
+            {"penalty_bps": 200, "quote_lag_s": 1.0}]
+    s = shadow_quote.summarize(rows)
+    assert s["penalty_p50_bps"] == 200
+    assert s["penalty_mean_bps"] == 200
+
+
+def test_no_user_facing_dash_in_this_runs_new_code():
+    """The owner's hardest style rule. Checks string literals only, so code
+    commentary is exempt, and only the modules this run authored."""
+    import ast
+    for f in ("src/copy_trading/live_mode.py",
+              "src/copy_trading/shadow_quote.py",
+              "src/copy_trading/virtual_ledger.py",
+              "src/copy_trading/order_executor.py"):
+        tree = ast.parse(open(f, encoding="utf-8").read())
+        docstring_lines = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef,
+                                 ast.AsyncFunctionDef, ast.ClassDef)):
+                if ast.get_docstring(node, clean=False) and node.body:
+                    docstring_lines.add(node.body[0].lineno)
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and node.lineno not in docstring_lines):
+                assert "—" not in node.value and "–" not in node.value, (
+                    f"{f}:{node.lineno} has a dash in a user-facing string")

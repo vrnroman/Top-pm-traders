@@ -1528,6 +1528,14 @@ def _handle_speed(text: str) -> None:
             lines.append(f"  paid more than they did on {worse * 100:.0f}% of trades")
         lines.append("  <i>our postable price vs their fill, same pricing rule "
                      "the live executor uses</i>")
+        # Independence, next to the headline. A burst of copies on one market
+        # priced from one cached book read is ONE observation wearing many row
+        # numbers, and without this the reader has no way to discount it.
+        lines.append(f"  <i>across {s['n_markets']} market(s) and "
+                     f"{s['n_book_reads']} distinct book read(s)</i>")
+        if s["n_markets"] <= 2 or s["n_book_reads"] <= 4:
+            lines.append("  ⚠️ <i>almost all of one market or one book read. "
+                         "Treat the sign as unsettled, not as an answer.</i>")
         if s["n_excluded_lag"]:
             lines.append(f"  <i>{s['n_excluded_lag']} sample(s) excluded: quoted "
                          f"over {shadow_quote.MAX_QUOTE_LAG_S:.0f}s after "
@@ -1542,8 +1550,12 @@ def _handle_speed(text: str) -> None:
     # Same thin-sample bar as the counterfactual: this line draws a conclusion
     # about whether speed is worth paying for, so it does not get to speak off
     # a handful of rows.
-    if s.get("n_decay", 0) >= 5:
-        lines.append(f"<b>Does being faster help</b> ({s['n_decay']} samples)")
+    # Gated on DISTINCT book moves, not row count: 13 clones of one in-play
+    # collapse would otherwise clear a 5-row floor and read as a settled
+    # conclusion about whether speed is worth paying for.
+    if s.get("n_decay_moves", 0) >= 5:
+        lines.append(f"<b>Does being faster help</b> "
+                     f"({s['n_decay_moves']} distinct book moves)")
         lines.append(f"  entry drifts {_esc(_fmt_bps(s['decay_mean_bps']))} over "
                      f"the next {shadow_quote.SECOND_SAMPLE_DELAY_S:.0f}s")
         lines.append("  <i>near zero = latency is not what is costing you</i>")

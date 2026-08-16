@@ -33,6 +33,7 @@ decision, which is why one sample was not enough.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from typing import Optional
@@ -245,6 +246,10 @@ def _build_row(trade: dict, t0: dict, t1: Optional[dict], quoted_at: float) -> d
         "spread_bps": t0["spread_bps"],
         # t1 — the same measurement SECOND_SAMPLE_DELAY_S later. The delta is
         # the decay term: how much the entry degrades per extra second of lag.
+        # When the book underlying t0 was actually read. Two rows sharing a
+        # (token_id, book_ts) came from ONE read served twice out of
+        # market_price's 5s cache, so they are one observation, not two.
+        "book_ts": t0.get("fetched_at"),
         "delay_s": SECOND_SAMPLE_DELAY_S,
         "our_price_t1": (t1 or {}).get("our_price"),
         "penalty_bps_t1": (t1 or {}).get("penalty_bps"),
@@ -567,19 +572,42 @@ def summarize(rows: list[dict]) -> dict:
     """
     lat_rows = [r for r in rows if valid_for_latency(r)]
     pen_rows = [r for r in rows if valid_for_penalty(r)]
-    lat = [float(r["notify_latency_s"]) for r in lat_rows]
-    pen = [float(r["penalty_bps"]) for r in pen_rows]
+    def _finite(vals):
+        # A NaN or Inf sorts unpredictably and poisons every percentile. Not
+        # reachable from the live writer, but a hand-edited or truncated line
+        # must not be able to render "+nanbps" as a measurement.
+        return [v for v in vals if math.isfinite(v)]
+
+    lat = _finite([float(r["notify_latency_s"]) for r in lat_rows])
+    pen = _finite([float(r["penalty_bps"]) for r in pen_rows])
     # The decay term drives one specific conclusion ("does being faster buy
     # anything"), so it takes the same filtered rows AND drops any second
     # sample that was a cache replay rather than a fresh read — that would
     # report a guaranteed zero drift and argue against speed for free.
-    decay = [float(r["penalty_bps_t1"]) - float(r["penalty_bps"])
-             for r in pen_rows
-             if r.get("penalty_bps_t1") is not None
-             and r.get("penalty_bps") is not None
-             and not r.get("t1_stale", False)]
+    decay = _finite([float(r["penalty_bps_t1"]) - float(r["penalty_bps"])
+                     for r in pen_rows
+                     if r.get("penalty_bps_t1") is not None
+                     and r.get("penalty_bps") is not None
+                     and not r.get("t1_stale", False)])
+    # How much of the sample is INDEPENDENT. A burst of copies on one market
+    # priced from one cached book read is one observation wearing many row
+    # numbers: in production 23 of 27 rows were a single in-play match and 14
+    # shared one identical ask. Row count alone would present that as a
+    # settled distribution, which is the confident-and-wrong shape.
+    n_markets = len({r.get("token_id") for r in pen_rows if r.get("token_id")})
+    n_reads = len({(r.get("token_id"), r.get("book_ts")) for r in pen_rows
+                   if r.get("token_id") and r.get("book_ts") is not None})
+    decay_rows = [r for r in pen_rows
+                  if r.get("penalty_bps_t1") is not None
+                  and r.get("penalty_bps") is not None
+                  and not r.get("t1_stale", False)]
+    n_moves = len({(r.get("token_id"), r.get("penalty_bps"),
+                    r.get("penalty_bps_t1")) for r in decay_rows})
     return {
         "n": len(rows),
+        "n_markets": n_markets,
+        "n_book_reads": n_reads,
+        "n_decay_moves": n_moves,
         "n_excluded_boot": sum(1 for r in rows if r.get("boot_flush")),
         "n_excluded_lag": sum(
             1 for r in rows
