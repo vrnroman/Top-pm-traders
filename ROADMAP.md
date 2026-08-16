@@ -1052,8 +1052,8 @@ A sample here is one detected trade priced against one book read. When several
 copies of the same market arrive in one burst they are priced off one cached
 read, so they are one observation wearing several row numbers. `/speed` counts
 the distinct book reads next to the headline and stays silent on whether speed
-is worth paying for until there are at least 5 of them across more than 2
-markets.
+is worth paying for until there are at least 5 distinct book reads. The market
+count gates the warning above that line, not the line itself.
 
 Two things follow. First, the sign of the entry penalty is a reading, not a
 settled answer, until the distinct-read count is in the dozens. Second, rows
