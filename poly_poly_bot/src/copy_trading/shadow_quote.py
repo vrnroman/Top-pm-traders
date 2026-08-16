@@ -312,6 +312,48 @@ def _pct(values: list[float], q: float) -> Optional[float]:
     return s[lo] * (1 - frac) + s[hi] * frac
 
 
+def by_wallet(rows: list[dict], min_n: int = 3) -> list[dict]:
+    """Per-wallet latency and entry-penalty, worst penalty first.
+
+    The averaged figure answers "how bad is it"; this answers the question
+    that actually decides the flip — *which* wallets are copyable at a price
+    worth paying, and which bleed their edge into the spread before we can
+    reach them. Wallets under ``min_n`` samples are returned too, flagged
+    thin: hiding them would make a sparse sample look like a complete one.
+    """
+    groups: dict = {}
+    for r in rows:
+        w = (r.get("target") or "").lower()
+        if not w:
+            continue
+        groups.setdefault(w, []).append(r)
+    out = []
+    for w, rs in groups.items():
+        s = summarize(rs)
+        out.append({
+            "wallet": w,
+            "n": s["n"],
+            "thin": s["n"] < min_n,
+            "latency_p50_s": s["latency_p50_s"],
+            "penalty_p50_bps": s["penalty_p50_bps"],
+            "penalty_p90_bps": s["penalty_p90_bps"],
+            "decay_mean_bps": s["decay_mean_bps"],
+            "top_category": max(
+                {r.get("category") or "other" for r in rs},
+                key=lambda c: sum(1 for r in rs if (r.get("category") or "other") == c),
+            ),
+        })
+    # Worst entry penalty first — the wallets whose edge is hardest to reach.
+    out.sort(key=lambda d: (d["penalty_p50_bps"] is None, -(d["penalty_p50_bps"] or 0)))
+    return out
+
+
+def collecting_since(rows: list[dict]) -> Optional[float]:
+    """Oldest sample's detection time, for an honest empty/partial state."""
+    stamps = [float(r["detected_at"]) for r in rows if r.get("detected_at")]
+    return min(stamps) if stamps else None
+
+
 def summarize(rows: list[dict]) -> dict:
     """Latency and entry-penalty distributions over shadow-quote rows."""
     lat = [float(r["notify_latency_s"]) for r in rows

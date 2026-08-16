@@ -1470,14 +1470,32 @@ def _handle_speed(text: str) -> None:
     lines = [f"⏱ <b>Pre-flip speed &amp; price</b> — last {days:g}d", ""]
 
     if not rows:
-        lines.append("No shadow quotes recorded yet.")
-        lines.append("")
-        lines.append("The observer samples each newly detected trade against "
-                     "the live book. If this stays empty, check "
-                     "<code>SHADOW_QUOTE_ENABLED</code> and that the CLOB "
-                     "client is available.")
+        # Honest empty: say it is collecting, never print a zero that reads
+        # like a measurement.
+        all_rows = shadow_quote.load_rows()
+        since_ts = shadow_quote.collecting_since(all_rows)
+        if since_ts:
+            age_h = (_time.time() - since_ts) / 3600
+            lines.append(f"Collecting — {len(all_rows)} sample(s) so far, "
+                         f"oldest {age_h:.1f}h old, none inside the last "
+                         f"{days:g}d window.")
+        else:
+            lines.append("Collecting — <b>no samples yet</b>. Nothing here is "
+                         "a measurement; it is an empty file.")
+            lines.append("")
+            lines.append("The observer quotes each newly detected trade against "
+                         "the live book. If this stays empty, check "
+                         "<code>SHADOW_QUOTE_ENABLED</code> and that the CLOB "
+                         "client is available.")
         _send_chunked("\n".join(lines))
         return
+
+    since_ts = shadow_quote.collecting_since(rows)
+    if since_ts:
+        lines.append(f"<i>collecting since "
+                     f"{_time.strftime('%Y-%m-%d %H:%M UTC', _time.gmtime(since_ts))} "
+                     f"· {s['n']} samples</i>")
+        lines.append("")
 
     lines.append(f"<b>How fast am I told</b> ({s['n_latency']} samples)")
     lines.append(f"  median <b>{_esc(_fmt_secs(s['latency_p50_s']))}</b> · "
@@ -1502,6 +1520,39 @@ def _handle_speed(text: str) -> None:
         lines.append(f"  entry drifts {_esc(_fmt_bps(s['decay_mean_bps']))} over "
                      f"the next {shadow_quote.SECOND_SAMPLE_DELAY_S:.0f}s")
         lines.append("  <i>near zero = latency is not what is costing you</i>")
+        lines.append("")
+
+    # Per-wallet: which wallets are reachable at a price worth paying.
+    per = shadow_quote.by_wallet(rows)
+    if per:
+        lines.append("<b>Worst entry penalty by wallet</b>")
+        for d in per[:8]:
+            thin = " <i>(thin)</i>" if d["thin"] else ""
+            lines.append(
+                f"  <code>{_esc(d['wallet'][:10])}…</code> "
+                f"{_esc(_fmt_bps(d['penalty_p50_bps']))} med · "
+                f"{_esc(_fmt_secs(d['latency_p50_s']))} · "
+                f"n={d['n']} · {_esc(d['top_category'])}{thin}")
+        if len(per) > 8:
+            lines.append(f"  <i>… and {len(per) - 8} more wallet(s)</i>")
+        lines.append("")
+
+    # The counterfactual book, if any settled copies have a quote to re-price.
+    try:
+        from src.copy_trading import virtual_ledger
+        vl = virtual_ledger.replay(CONFIG.copy_paper_b_ledger, quote_rows=rows)
+        if vl["n_matched"]:
+            lines.append("<b>If those prices had been real</b> (book B, "
+                         "counterfactual)")
+            lines.append(f"  paper {(vl['paper_roi'] or 0) * 100:+.1f}% → "
+                         f"at real quotes <b>{(vl['real_roi'] or 0) * 100:+.1f}%</b>"
+                         f" (net {(vl['real_roi_net'] or 0) * 100:+.1f}%)")
+            lines.append(f"  on {vl['n_matched']} of {vl['n_settled']} settled "
+                         f"copies that carry a quote")
+            lines.append("  <i>never merged into book figures or the §7 memo</i>")
+            lines.append("")
+    except Exception as exc:
+        lines.append(f"<i>counterfactual unavailable: {_esc(str(exc))}</i>")
         lines.append("")
 
     lines.append("<i>Measurement only — no order was placed. Book A models a "
