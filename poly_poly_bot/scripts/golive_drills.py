@@ -136,9 +136,9 @@ def drill_self_disarm_triggers() -> None:
         fires, why = live_guard.should_self_disarm(**kw)
         check(f"{label} disarms", fires is True, why[:70])
     fires, _ = live_guard.should_self_disarm(
-        crash_streak=0, drift=0.01, unredeemed=0, feed_stale_s=60)
+        crash_streak=0, unredeemed=0, feed_stale_s=60)
     check("a healthy session does NOT disarm", fires is False)
-    fires, _ = live_guard.should_self_disarm(crash_streak=0, drift=None)
+    fires, _ = live_guard.should_self_disarm(crash_streak=0)
     check("a LOSING session is not a disarm condition", fires is False,
           "losing money is a strategy question, not a trust question")
 

@@ -614,3 +614,23 @@ def test_neg_risk_positions_do_not_disarm_the_session(monkeypatch, tmp_path):
     import inspect
     src = inspect.getsource(live_guard.redeemable_positions)
     assert "_is_neg_risk" in src
+
+
+def test_the_drills_themselves_still_run(tmp_path, monkeypatch, capsys):
+    """The drills are a script, so CI never ran them and they rotted: deleting
+    a guard kwarg left the suite green while `golive_drills.py` died with a
+    TypeError on the deployed image. A check that nothing gates is a check
+    that decays. This gates it.
+    """
+    import importlib
+    import sys
+
+    sys.path.insert(0, "scripts")
+    drills = importlib.import_module("golive_drills")
+    importlib.reload(drills)
+    monkeypatch.setattr(drills.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(drills, "_results", [])
+    rc = drills.main()
+    out = capsys.readouterr().out
+    assert "drills passed" in out
+    assert rc == 0, out
