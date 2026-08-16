@@ -17,6 +17,7 @@ from typing import Optional
 from py_clob_client_v2 import ClobClient
 
 from src.config import CONFIG
+from src.copy_trading import live_mode
 from src.logger import logger
 from src.models import (
     DetectedTrade,
@@ -231,19 +232,17 @@ async def _execute_copy_order(
     Returns OrderResult or None on failure.
     """
     try:
-        if trade.side == "BUY":
-            order_price = snapshot["best_ask"] if snapshot else trade.price
-        else:
-            order_price = snapshot["best_bid"] if snapshot else trade.price
+        # One pricing rule for the whole repo (see order_executor's docstring):
+        # the same function the shadow-quote measurement runs, so "what we'd
+        # pay" and "what we measured we'd pay" can never drift apart.
+        from src.copy_trading.order_executor import quote_copy_order, shares_for
 
-        # Round price to 2 decimal places
-        order_price = round(order_price, 2)
-        if order_price <= 0 or order_price >= 1:
-            logger.warn(f"[exec] Invalid order price {order_price} for {trade.market}")
+        order_price = quote_copy_order(trade.side, trade.price, snapshot)
+        if order_price is None:
+            logger.warn(f"[exec] Invalid order price for {trade.market}")
             return None
 
-        # Calculate shares from USD size
-        shares = copy_size / order_price if order_price > 0 else 0
+        shares = shares_for(copy_size, order_price)
         if shares <= 0:
             return None
 
@@ -521,7 +520,14 @@ async def place_trade_orders(
                 continue
 
             # --- Preview mode ---
-            if CONFIG.preview_mode:
+            # The single gate between this loop and real money. It reads the
+            # two-key interlock (live_mode), not CONFIG.preview_mode directly:
+            # PREVIEW_MODE=false alone is NOT enough — the owner's env key and
+            # a runtime /live CONFIRM are both required, and it fails closed on
+            # any error. Startup-time guards elsewhere still read
+            # CONFIG.preview_mode: a live boot prepares (approvals, inventory
+            # sync), the arm releases.
+            if live_mode.is_preview():
                 logger.trade(
                     f"[PREVIEW] {trade.side} ${copy_size:.2f} on '{trade.market[:40]}' "
                     f"@ {trade.price:.4f} (from {short_address(trade.trader_address)})"

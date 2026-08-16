@@ -479,9 +479,16 @@ class CopyPaperEngine:
         cost_model: Optional[CostModel] = None,
         gas_usd_per_trade: float = 0.0,
         trade_fee_bps: float = 0.0,
+        # Pure observation of the RAW detected list, before any admission
+        # rule. Used by the shadow-quote measurement to price the trades this
+        # engine refuses as well as the ones it takes. None = engine
+        # unchanged; it must never mutate the list, and an exception in it is
+        # swallowed so a measurement can never break the book.
+        observer: Optional[Callable[[list], None]] = None,
     ):
         self.ledger = ledger
         self.detector = detector
+        self.observer = observer
         self.book_fetcher = book_fetcher
         self.resolver = resolver
         self.copy_pct = copy_pct
@@ -620,6 +627,18 @@ class CopyPaperEngine:
             cat_evidence, bucket_evidence = self._evidence_maps()
 
         trades = list(self.detector())
+        # Observation hook (default None = engine unchanged). It is handed the
+        # RAW detected list before a single admission rule runs, which is the
+        # whole point: the trades this engine is about to refuse are exactly
+        # the ones whose entry price ran away, so a measurement taken after
+        # the gates would be a survivor's average. It may never mutate the
+        # list or raise into the cycle.
+        if self.observer is not None:
+            try:
+                self.observer(list(trades))
+            except Exception as exc:
+                from src.logger import logger
+                logger.warn(f"[paper] observer failed (ignored): {exc}")
         if self.starved_priority:
             # coldest wallet first — stable sort keeps each wallet's own trades
             # in feed (chronological) order, so only cross-wallet priority moves.

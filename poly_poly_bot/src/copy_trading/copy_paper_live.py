@@ -73,6 +73,11 @@ def make_detector(
         cutoff = time.time() - max_age_s
         for w in wallets:
             acts = _get(DATA, "/activity", user=w, limit=30) or []
+            # Stamped per wallet, right after ITS fetch returns: a sweep over
+            # ~400 wallets takes minutes, so a single stamp taken at the top
+            # of detect() would credit the last wallet with the first one's
+            # freshness and understate real latency by most of the sweep.
+            now_wall = time.time()
             for a in acts:
                 stats["rows"] += 1
                 if a.get("type") != "TRADE" or a.get("side") != "BUY":
@@ -125,6 +130,15 @@ def make_detector(
                     "horizon_days": horizon_days,
                     "their_price": price,
                     "their_usd": usd,
+                    # --- latency witnesses (additive; no filter reads these) ---
+                    # their_ts: when the TARGET traded, per the data-api row.
+                    # detected_at: when THIS poll actually saw it. The gap is
+                    # the notify latency a real copier would be racing, and
+                    # it is measured here rather than modeled because every
+                    # other surface in this repo only had the target's own
+                    # timestamp to work with.
+                    "their_ts": float(a.get("timestamp") or 0),
+                    "detected_at": now_wall,
                 })
                 stats["emitted"] += 1
         return out
@@ -283,7 +297,8 @@ def make_feed_detector(
         # global feed can't drown the signal ("our wallets trade but nothing
         # opens" must be attributable to a reason, 2026-07 A-book stall RCA).
         stats = detect.stats = _blank_reject_stats()
-        cutoff = time.time() - max_age_s
+        now_wall = time.time()
+        cutoff = now_wall - max_age_s
         for t in feed.recent(floor, max_age_s):
             w = t.get("proxyWallet") or t.get("user") or ""
             if w.lower() not in watched:
@@ -328,6 +343,11 @@ def make_feed_detector(
                 "horizon_days": horizon_days,
                 "their_price": price,
                 "their_usd": usd,
+                # latency witnesses — see make_detector. The feed carries the
+                # target's own trade timestamp; now_wall is when this sweep
+                # read it out of the feed.
+                "their_ts": float(t.get("timestamp") or 0),
+                "detected_at": now_wall,
             })
             stats["emitted"] += 1
         return out

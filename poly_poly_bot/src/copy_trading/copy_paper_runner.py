@@ -120,7 +120,12 @@ class CopyPaperRunner:
         bid_fetcher: Optional[Callable[[str], list[tuple[float, float]]]] = None,
         horizon_resolver: Optional[Callable[[str], Optional[float]]] = None,
         on_cycle: Optional[Callable[[CycleSummary, "PaperCopyLedger"], None]] = None,
+        # Pure observation of the raw detected list before any admission rule
+        # (see CopyPaperEngine.observer). Carries the shadow-quote measurement;
+        # None leaves the book's behaviour bit-for-bit unchanged.
+        observer: Optional[Callable[[list], None]] = None,
     ):
+        self._observer = observer
         self.ledger = PaperCopyLedger(ledger_path)
         self.watchlist_path = watchlist_path
         self._explicit_wallets = wallets
@@ -315,6 +320,7 @@ class CopyPaperRunner:
             cost_model=self._cost_model,
             gas_usd_per_trade=self.gas_usd_per_trade,
             trade_fee_bps=self.trade_fee_bps,
+            observer=self._observer,
         )
         summary = engine.run_cycle()
         # starvation autopsy: surface the detector's own reject mix (rows the

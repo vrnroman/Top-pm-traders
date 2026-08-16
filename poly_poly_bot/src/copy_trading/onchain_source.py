@@ -282,13 +282,21 @@ class OnchainSource:
                             from src.models import QueuedTrade
                             if not is_seen_trade(trade.id) and not is_max_retries(trade.id):
                                 from datetime import datetime
+                                from src.copy_trading.trade_store import (
+                                    record_reaction_latency)
                                 ts_ms = datetime.fromisoformat(
                                     trade.timestamp.replace("Z", "+00:00")
                                 ).timestamp() * 1000
+                                # ts_ms = the target's trade time; now = when
+                                # we saw it. Same latency contract as the
+                                # data-api source (see QueuedTrade).
+                                received_ms = time.time() * 1000
+                                record_reaction_latency(received_ms - ts_ms)
                                 enqueue_trade(QueuedTrade(
                                     trade=trade,
                                     enqueued_at=ts_ms,
                                     source_detected_at=ts_ms,
+                                    received_at_ms=received_ms,
                                     source="onchain",
                                 ))
                         except Exception as exc:

@@ -1,126 +1,92 @@
-"""Order execution with adaptive pricing for copy trades."""
+"""The single source of truth for what price a copy order would take.
+
+There used to be two pricing paths in this repo and they disagreed. This
+module held an "adaptive" one that capped the fill at ``trader_price * 1.02``
+and posted via ``create_order``/``post_order``; the path that actually runs
+(``trade_executor._execute_copy_order``) takes the raw ``best_ask`` with no cap
+at all and posts via ``create_and_post_order``. Nothing imported this module
+outside a smoke-test's import list, so the capped variant was dead code that
+read like the live one — the worst kind, because the two answer "how much
+worse is my entry price than the wallet I copied" in opposite directions
+(cap = never chase, raw = always chase).
+
+So this module is now the *pricing decision only*, extracted verbatim from the
+live path, and both callers use it:
+
+  * ``trade_executor._execute_copy_order`` — builds and posts the real order;
+  * ``shadow_quote`` — measures what that order WOULD have paid, without
+    placing it (PREVIEW measurement, ROADMAP §9.7 / the pre-flip question).
+
+Keeping them on one function is the point: a shadow measurement that models
+different pricing than the live executor is worse than no measurement, because
+it reads as evidence. Change the pricing here and both move together.
+"""
 
 from __future__ import annotations
 
 from typing import Optional
 
-from py_clob_client_v2 import ClobClient, OrderArgs, OrderType
-from py_clob_client_v2.order_builder.constants import BUY, SELL
+from src.models import DetectedTrade
 
-from src.logger import logger
-from src.models import DetectedTrade, MarketSnapshot, OrderResult
-from src.utils import ceil_cents, error_message, round_cents
-
-# Price buffers: allow up to 2% slippage from trader price
-BUY_BUFFER = 1.02
-SELL_BUFFER = 0.98
+# A CLOB limit price must sit strictly inside (0, 1) and is quoted in cents.
+PRICE_MIN = 0.01
+PRICE_MAX = 0.99
+PRICE_DP = 2
 
 
-def _clamp(value: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, value))
+def quote_copy_order(
+    side: str,
+    trader_price: float,
+    snapshot: Optional[dict],
+) -> Optional[float]:
+    """The limit price a copy order would be posted at, or None if unusable.
 
+    Mirrors the live executor exactly: BUY lifts the current ``best_ask``,
+    SELL hits the current ``best_bid``, and with no snapshot we fall back to
+    the target's own price. Rounded to whole cents, then validated — a price
+    at or outside (0, 1) is not postable and returns None, which is the same
+    branch the live path treats as "skip this trade".
 
-def execute_copy_order(
-    clob_client: ClobClient,
-    trade: DetectedTrade,
-    copy_size: float,
-    snapshot: Optional[MarketSnapshot] = None,
-) -> OrderResult:
-    """Execute a copy order on the CLOB with adaptive pricing.
-
-    For BUY orders:
-        - Use bestAsk from snapshot, capped at trader_price * 1.02
-        - If no snapshot, use trader_price * 1.02
-        - Shares = ceil_cents(copy_size / order_price)
-
-    For SELL orders:
-        - Use bestBid from snapshot, floored at trader_price * 0.98
-        - If no snapshot, use trader_price * 0.98
-        - Shares = round_cents(copy_size / order_price), capped at position size
-
-    Args:
-        clob_client: Authenticated CLOB client.
-        trade: The detected trade to copy.
-        copy_size: USDC size for this copy order.
-        snapshot: Optional live market snapshot for adaptive pricing.
-
-    Returns:
-        OrderResult with order_id, shares, and order_price.
-
-    Raises:
-        RuntimeError: If the order creation or posting fails.
+    ``snapshot`` is the plain dict shape ``market_price.fetch_market_snapshot``
+    returns (``best_bid`` / ``best_ask``), not the pydantic MarketSnapshot.
     """
-    side = trade.side
-    trader_price = trade.price
-
     if side == "BUY":
-        # Adaptive pricing: use best ask, capped at trader_price * buffer
-        if snapshot is not None and snapshot.best_ask > 0:
-            max_price = trader_price * BUY_BUFFER if trader_price > 0 else 1.0
-            order_price = min(snapshot.best_ask, max_price)
-        else:
-            # Fallback: fixed 2% buffer above trader price
-            order_price = trader_price * BUY_BUFFER if trader_price > 0 else 0.50
+        raw = snapshot.get("best_ask") if snapshot else None
+    else:
+        raw = snapshot.get("best_bid") if snapshot else None
 
-        order_price = _clamp(round_cents(order_price), 0.01, 0.99)
-        shares = ceil_cents(copy_size / order_price) if order_price > 0 else 0.0
-        clob_side = BUY
-
-    else:  # SELL
-        # Adaptive pricing: use best bid, floored at trader_price * buffer
-        if snapshot is not None and snapshot.best_bid > 0:
-            min_price = trader_price * SELL_BUFFER if trader_price > 0 else 0.0
-            order_price = max(snapshot.best_bid, min_price)
-        else:
-            # Fallback: fixed 2% buffer below trader price
-            order_price = trader_price * SELL_BUFFER if trader_price > 0 else 0.50
-
-        order_price = _clamp(round_cents(order_price), 0.01, 0.99)
-        shares = round_cents(copy_size / order_price) if order_price > 0 else 0.0
-        clob_side = SELL
-
-    if shares <= 0:
-        raise RuntimeError(
-            f"Computed non-positive shares ({shares}) for {side} "
-            f"copy_size={copy_size}, order_price={order_price}"
-        )
-
-    logger.info(
-        f"Placing {side} order: {shares} shares @ {order_price} "
-        f"(copy_size=${copy_size:.2f}, trader_price={trader_price}, "
-        f"token={trade.token_id[:12]}...)"
-    )
+    if raw is None or float(raw) <= 0:
+        raw = trader_price
 
     try:
-        order = clob_client.create_order(
-            OrderArgs(
-                price=order_price,
-                size=shares,
-                side=clob_side,
-                token_id=trade.token_id,
-            )
-        )
-        resp = clob_client.post_order(order, OrderType.GTC)
-    except Exception as exc:
-        raise RuntimeError(f"CLOB order failed: {error_message(exc)}") from exc
+        order_price = round(float(raw), PRICE_DP)
+    except (TypeError, ValueError):
+        return None
 
-    # Extract order ID from response
-    order_id = ""
-    if isinstance(resp, dict):
-        order_id = resp.get("orderID", "") or resp.get("order_id", "") or resp.get("id", "")
-    elif isinstance(resp, str):
-        order_id = resp
+    if order_price <= 0 or order_price >= 1:
+        return None
+    return order_price
 
-    if not order_id:
-        logger.warn(f"Order posted but no order_id in response: {resp}")
 
-    logger.trade(
-        f"Order placed: {order_id} | {side} {shares}@{order_price} | "
-        f"market={trade.market[:40]}"
-    )
+def shares_for(copy_size: float, order_price: float) -> float:
+    """Share count for a USD copy size at ``order_price`` (live path's rule)."""
+    if order_price <= 0:
+        return 0.0
+    return copy_size / order_price
 
-    return OrderResult(
-        order_id=order_id,
-        shares=shares,
-        order_price=order_price,
-    )
+
+def entry_penalty_bps(our_price: float, their_price: float) -> Optional[int]:
+    """How much worse our entry is than the copied wallet's, in bps.
+
+    Positive = we paid MORE than they did (the normal, bad direction for a
+    BUY); negative = we got in cheaper. Returns None when their price is
+    unusable, so a missing input can never be silently scored as "no penalty".
+    """
+    if not their_price or their_price <= 0 or our_price <= 0:
+        return None
+    return int(round((our_price - their_price) / their_price * 10000))
+
+
+def would_post(trade: DetectedTrade, snapshot: Optional[dict]) -> Optional[float]:
+    """Convenience wrapper: the price this DetectedTrade would be posted at."""
+    return quote_copy_order(trade.side, trade.price, snapshot)

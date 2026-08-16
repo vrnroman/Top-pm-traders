@@ -44,6 +44,39 @@ def refresh_clob_client() -> None:
     create_clob_client()  # may be None if key was cleared
 
 
+_shadow_observer_cache = None
+_shadow_observer_lock = threading.Lock()
+
+
+def _get_shadow_observer():
+    """One shared shadow-quote observer for BOTH paper books, or None if off.
+
+    Shared on purpose: A and B watch overlapping wallet sets, and the
+    observer dedupes by ``copy_id``, so a single instance measures the union
+    of both watchlists exactly once. Two instances would double-count every
+    wallet the books have in common.
+
+    Never raises into a book loop — a measurement that can break the paper
+    harness is worse than no measurement.
+    """
+    global _shadow_observer_cache
+    if not CONFIG.shadow_quote_enabled:
+        return None
+    with _shadow_observer_lock:
+        if _shadow_observer_cache is None:
+            try:
+                from src.copy_trading.clob_client import create_clob_client
+                from src.copy_trading.shadow_quote import make_observer
+                observer, _stop = make_observer(create_clob_client)
+                _shadow_observer_cache = observer
+                logger.info("[shadow] pre-flip quote observer started "
+                            "(measurement only — never places an order)")
+            except Exception as exc:
+                logger.warn(f"[shadow] observer unavailable: {exc}")
+                return None
+    return _shadow_observer_cache
+
+
 def _log_copy_cycle_diagnostics(tag: str, summary) -> None:
     """One line of guardrail skips + one of detection-funnel rejects per cycle
     (only when nonzero) — shared by the A and B paper loops so the two books
@@ -364,6 +397,14 @@ def _copy_paper_loop():
         detector_factory=detector_factory,
         exit_detector_factory=exit_detector_factory,
         on_cycle=_on_cycle,
+        # Pre-flip measurement (PREVIEW): shadow-quotes every DETECTED trade —
+        # including the ones this book refuses — against the live order book,
+        # using the live executor's own pricing function. Answers "how fast am
+        # I told" and "how much worse is my entry than theirs" from measured
+        # data instead of the books' modeled fills. Never places an order,
+        # runs on its own thread, and is None-safe: with it off the book is
+        # bit-for-bit unchanged.
+        observer=_get_shadow_observer(),
     )
     n = len(runner.wallets())
     logger.info(
@@ -719,6 +760,14 @@ def _copy_paper_b_loop():
         detector_factory=detector_factory,
         exit_detector_factory=exit_detector_factory,
         on_cycle=_on_cycle,
+        # Pre-flip measurement (PREVIEW): shadow-quotes every DETECTED trade —
+        # including the ones this book refuses — against the live order book,
+        # using the live executor's own pricing function. Answers "how fast am
+        # I told" and "how much worse is my entry than theirs" from measured
+        # data instead of the books' modeled fills. Never places an order,
+        # runs on its own thread, and is None-safe: with it off the book is
+        # bit-for-bit unchanged.
+        observer=_get_shadow_observer(),
     )
     n = len(runner.wallets())
     logger.info(

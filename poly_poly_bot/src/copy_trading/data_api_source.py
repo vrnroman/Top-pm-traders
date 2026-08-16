@@ -1,8 +1,10 @@
 """Data API polling source -- wraps fetchAllTraderActivities with circuit breaker."""
 
 import asyncio
+import time
 from src.copy_trading.trade_monitor import fetch_all_trader_activities
-from src.copy_trading.trade_store import is_seen_trade, is_max_retries
+from src.copy_trading.trade_store import (
+    is_seen_trade, is_max_retries, record_reaction_latency)
 from src.copy_trading.trade_queue import enqueue_trade
 from src.config import CONFIG
 from src.logger import logger
@@ -32,6 +34,9 @@ class DataApiSource:
                     t for t in trades
                     if not is_seen_trade(t.id) and not is_max_retries(t.id)
                 ]
+                # One wall-clock read for the whole batch: every trade in it
+                # was returned by the same poll, so they were all "seen" now.
+                received_ms = time.time() * 1000
                 for trade in new_trades:
                     from datetime import datetime
                     ts_ms = (
@@ -40,10 +45,16 @@ class DataApiSource:
                         ).timestamp()
                         * 1000
                     )
+                    # ts_ms is the TARGET'S trade time; received_ms is when we
+                    # saw it. The gap between them is the number that decides
+                    # whether copying is fast enough to be worth real money,
+                    # and until now it was recorded nowhere.
+                    record_reaction_latency(received_ms - ts_ms)
                     enqueue_trade(QueuedTrade(
                         trade=trade,
                         enqueued_at=ts_ms,
                         source_detected_at=ts_ms,
+                        received_at_ms=received_ms,
                         source="data-api",
                     ))
                 consecutive_failures = 0

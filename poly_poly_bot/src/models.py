@@ -69,7 +69,16 @@ class QueuedTrade(BaseModel):
     """Trade in the detection → execution queue."""
     trade: DetectedTrade
     enqueued_at: float  # epoch ms
-    source_detected_at: float  # epoch ms
+    # NOTE the name is historical and misleading: this is the TARGET'S OWN
+    # trade timestamp as reported by the source, NOT the moment we detected
+    # it. The execution queue sorts on it (oldest target trade first), so its
+    # meaning is load-bearing and is deliberately left alone.
+    source_detected_at: float  # epoch ms — the target's trade time
+    # The moment OUR poller actually saw the trade (wall clock, epoch ms).
+    # This is the one that makes reaction latency measurable:
+    #   notify_latency_ms = received_at_ms - source_detected_at
+    # Optional/default-safe so queue rows built by older code still validate.
+    received_at_ms: Optional[float] = None
     source: str = "data-api"
 
 
@@ -109,6 +118,10 @@ class TradeRecord(BaseModel):
     trader_price: Optional[float] = None
     source_detected_at: Optional[float] = None
     enqueued_at: Optional[float] = None
+    # Wall-clock detection stamp (see QueuedTrade.received_at_ms). Without it
+    # the audit trail cannot answer "how fast were we told", because
+    # source_detected_at holds the target's own trade time.
+    received_at_ms: Optional[float] = None
     order_submitted_at: Optional[float] = None
     first_fill_seen_at: Optional[float] = None
     source: Optional[str] = None

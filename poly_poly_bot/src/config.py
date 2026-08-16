@@ -286,6 +286,20 @@ class Config:
     copy_paper_costs_enabled: bool = _opt_bool("COPY_PAPER_COSTS_ENABLED", True)
     copy_paper_gas_usd: float = _opt_float("COPY_PAPER_GAS_USD", 0.02)
     copy_paper_trade_fee_bps: float = _opt_float("COPY_PAPER_TRADE_FEE_BPS", 0.0)
+    # --- pre-flip measurement (shadow quotes) ---
+    # Prices every DETECTED trade against the live book with the live
+    # executor's own pricing function, including the trades the paper books
+    # refuse — those are exactly the ones whose entry ran away, so a fill
+    # measurement taken after the gates is a survivor's average. Reads public
+    # book prices only: it never signs, posts or spends. Observation-only, so
+    # it cannot change what the 2026-08-22 verdict measures.
+    shadow_quote_enabled: bool = _opt_bool("SHADOW_QUOTE_ENABLED", True)
+    # --- the live-arm safety interlock (see copy_trading/live_mode.py) ---
+    # Real orders need BOTH: PREVIEW_MODE=false at the process level AND this
+    # env permission. Default false means the Telegram /live command is built,
+    # wired and tested but CANNOT fire — flipping this is the owner's action,
+    # deliberately not something an agent or a chat message can do alone.
+    live_arm_enabled: bool = _opt_bool("LIVE_ARM_ENABLED", False)
 
     # --- Strategy B: the borrowed-clock (instant-copy) paper book ---
     # A SECOND paper book racing the one above (the 2026-07 A-vs-B experiment).

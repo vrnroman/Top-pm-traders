@@ -49,6 +49,8 @@ BOT_MENU_COMMANDS: list[dict] = [
     {"command": "gate", "description": "Gate picture: shortlist admit/reject + promotion offers/holds/demotes"},
     {"command": "history", "description": "Last 10 copy trades"},
     {"command": "check", "description": "Verify trading setup (read-only, no orders)"},
+    {"command": "speed", "description": "Pre-flip: how fast am I told + how much worse is my entry price"},
+    {"command": "live", "description": "The real-money interlock: status, or /live CONFIRM to arm"},
     {"command": "setkey", "description": "Rotate/clear in-memory private key (e.g. /setkey clear CONFIRM)"},
     {"command": "slice", "description": "Cost-slice @net table for a paper book (/slice A|B)"},
     {"command": "verdict", "description": "One-word era decision after the §7 memo (arms 2026-08-22)"},
@@ -295,6 +297,10 @@ def _handle_command(text: str):
         _handle_gate()
     elif text.startswith("/check"):
         _handle_check()
+    elif text.startswith("/speed"):
+        _handle_speed(text)
+    elif text.startswith("/live"):
+        _handle_live(text)
     elif text.startswith("/setkey"):
         _handle_setkey(text)
     elif text.startswith("/reset"):
@@ -1418,6 +1424,144 @@ def _wallet_ledger_view(wallet: str):
         if getattr(p, "closed", False) and not is_dust_fill(p):
             settled.append(p)
     return settled, (last_ts or None), list(ledger.positions.values())
+
+
+def _fmt_secs(v) -> str:
+    """Human seconds. Never emits a bare '<' — Telegram HTML rejects it, which
+    is exactly what made the 08-22 verdict memo undeliverable."""
+    if v is None:
+        return "n/a"
+    v = float(v)
+    if v < 1:
+        return f"{v * 1000:.0f}ms"
+    if v < 90:
+        return f"{v:.1f}s"
+    if v < 5400:
+        return f"{v / 60:.1f}min"
+    return f"{v / 3600:.1f}h"
+
+
+def _fmt_bps(v) -> str:
+    return "n/a" if v is None else f"{v:+.0f}bps"
+
+
+def _handle_speed(text: str) -> None:
+    """/speed [days] — the two pre-flip numbers, measured, not modeled.
+
+    How fast we are told a copied wallet traded, and how much worse our entry
+    price would be than theirs if we had acted the moment we were told.
+    """
+    import time as _time
+
+    from src.copy_trading import shadow_quote
+
+    parts = text.split()
+    days = 7.0
+    if len(parts) > 1:
+        try:
+            days = max(0.1, min(90.0, float(parts[1])))
+        except ValueError:
+            pass
+
+    since = _time.time() - days * 86400
+    rows = shadow_quote.load_rows(since_ts=since)
+    s = shadow_quote.summarize(rows)
+
+    lines = [f"⏱ <b>Pre-flip speed &amp; price</b> — last {days:g}d", ""]
+
+    if not rows:
+        lines.append("No shadow quotes recorded yet.")
+        lines.append("")
+        lines.append("The observer samples each newly detected trade against "
+                     "the live book. If this stays empty, check "
+                     "<code>SHADOW_QUOTE_ENABLED</code> and that the CLOB "
+                     "client is available.")
+        _send_chunked("\n".join(lines))
+        return
+
+    lines.append(f"<b>How fast am I told</b> ({s['n_latency']} samples)")
+    lines.append(f"  median <b>{_esc(_fmt_secs(s['latency_p50_s']))}</b> · "
+                 f"p90 {_esc(_fmt_secs(s['latency_p90_s']))} · "
+                 f"worst {_esc(_fmt_secs(s['latency_max_s']))}")
+    lines.append("  <i>from their trade timestamp to our detection</i>")
+    lines.append("")
+
+    worse = s.get("penalty_worse_frac")
+    lines.append(f"<b>How much worse is my entry</b> ({s['n_penalty']} samples)")
+    lines.append(f"  median <b>{_esc(_fmt_bps(s['penalty_p50_bps']))}</b> · "
+                 f"p90 {_esc(_fmt_bps(s['penalty_p90_bps']))} · "
+                 f"mean {_esc(_fmt_bps(s['penalty_mean_bps']))}")
+    if worse is not None:
+        lines.append(f"  paid more than they did on {worse * 100:.0f}% of trades")
+    lines.append("  <i>our postable price vs their fill, same pricing rule "
+                 "the live executor uses</i>")
+    lines.append("")
+
+    if s.get("n_decay"):
+        lines.append(f"<b>Does being faster help</b> ({s['n_decay']} samples)")
+        lines.append(f"  entry drifts {_esc(_fmt_bps(s['decay_mean_bps']))} over "
+                     f"the next {shadow_quote.SECOND_SAMPLE_DELAY_S:.0f}s")
+        lines.append("  <i>near zero = latency is not what is costing you</i>")
+        lines.append("")
+
+    lines.append("<i>Measurement only — no order was placed. Book A models a "
+                 "lagged fill and censors the copies whose price ran away; "
+                 "these rows price every detected trade, including those.</i>")
+    _send_chunked("\n".join(lines))
+
+
+def _handle_live(text: str) -> None:
+    """/live — the real-money interlock. Status by default; CONFIRM to arm.
+
+    Advisory-by-default on purpose: the owner's env key (LIVE_ARM_ENABLED)
+    must already be set on the VM for this command to be able to do anything
+    at all, so the path is fully wired and fully inert until they decide.
+    """
+    from src.copy_trading import live_mode
+
+    parts = text.split()
+    st = live_mode.status()
+
+    if len(parts) > 1 and parts[1].upper() == "DISARM":
+        live_mode.disarm(by="telegram")
+        send_message("🛑 <b>Disarmed</b> — back to paper. No real orders can be placed.")
+        return
+
+    if len(parts) > 1 and parts[1].upper() == "CONFIRM":
+        ok, detail = live_mode.arm(reason=" ".join(parts[2:])[:200], by="telegram")
+        if ok:
+            send_message(
+                "🔴 <b>ARMED for real orders.</b>\n"
+                "Both interlock keys are turned. Copies from here place real "
+                "money.\n\n<code>/live DISARM</code> to stop.")
+        else:
+            send_message(f"⏸ <b>Not armed.</b> {_esc(detail)}")
+        return
+
+    head = ("🔴 <b>LIVE — real orders enabled</b>" if not st["preview"]
+            else "🟢 <b>PREVIEW — no real money at risk</b>")
+    lines = [head, ""]
+    lines.append("<b>Interlock</b> (both keys needed for a real order)")
+    lines.append(f"  {'✅' if st['process_live'] else '❌'} process: "
+                 f"PREVIEW_MODE={'false' if st['process_live'] else 'true'}")
+    lines.append(f"  {'✅' if st['env_key'] else '❌'} owner key: LIVE_ARM_ENABLED")
+    lines.append(f"  {'✅' if st['runtime_armed'] else '❌'} runtime arm: /live CONFIRM")
+
+    blockers = live_mode.blocking_reasons()
+    if blockers:
+        lines.append("")
+        lines.append("<b>Blocking right now</b>")
+        for b in blockers:
+            lines.append(f"  • {_esc(b)}")
+
+    lines.append("")
+    lines.append("<b>Before you flip</b>")
+    lines.append(f"  ⚠️ {_esc(live_mode.approvals_warning())}")
+    lines.append("  • <code>/check</code> — key, proxy, CLOB auth, balance, approvals")
+    lines.append("  • <code>/speed</code> — how fast you are told, how much worse your entry is")
+    lines.append("  • <code>/golive &lt;wallet&gt;</code> — the per-wallet bar")
+    lines.append("  • ROADMAP §9.7 — what the gate does NOT check")
+    _send_chunked("\n".join(lines))
 
 
 def _handle_golive(text: str) -> None:
