@@ -739,73 +739,67 @@ def test_non_finite_penalties_cannot_render_as_a_measurement():
 
 
 def test_no_user_facing_dash_in_this_runs_code():
-    """The owner's hardest style rule, over every LINE this run authored.
+    """The owner's hardest style rule, over the text this run authored.
 
-    The first version of this test listed only the four modules the run
-    created, and a dash shipped in main.py's boot log because that file was
-    merely edited, not created. So the file list is derived from the run's own
-    diff, and the check is per added-line, so pre-existing product text in a
-    file this run merely touched stays out of scope.
+    Two earlier versions of this test were wrong in opposite directions. The
+    first listed only the four modules the run CREATED, so an em-dash shipped
+    in main.py's boot log, a file the run merely edited. The second scoped by
+    `git diff`, which returns nothing under CI's shallow clone, so it flagged
+    every pre-existing string in the repo and turned the deploy gate red: a
+    false positive in a gate is worse than the bug it guards.
+
+    So the scope is defined by ownership markers instead, which need no git
+    and cannot over-reach: every string in the modules this run wrote, plus
+    every string anywhere that carries this run's own log prefixes.
     """
     import ast
-    import subprocess
 
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    files = [
+    OWNED_FILES = (
+        "src/copy_trading/live_mode.py",
+        "src/copy_trading/shadow_quote.py",
+        "src/copy_trading/virtual_ledger.py",
+        "src/copy_trading/order_executor.py",
+    )
+    # Files this run only edited: just the lines it owns, found by its prefixes.
+    MARKERS = ("[shadow]", "[live]", "PREVIEW_MODE=false starts real")
+    EDITED_FILES = (
         "main.py", "src/config.py", "src/models.py", "src/telegram_bot.py",
         "src/copy_trading/copy_paper.py", "src/copy_trading/copy_paper_live.py",
         "src/copy_trading/copy_paper_runner.py",
-        "src/copy_trading/data_api_source.py", "src/copy_trading/live_mode.py",
-        "src/copy_trading/market_price.py", "src/copy_trading/onchain_source.py",
-        "src/copy_trading/order_executor.py", "src/copy_trading/shadow_quote.py",
-        "src/copy_trading/trade_executor.py", "src/copy_trading/virtual_ledger.py",
-    ]
-    # Lines this run added, per file (empty set => whole file is in scope,
-    # which is the safe direction when git is unavailable).
-    added = {}
-    for f in files:
-        try:
-            diff = subprocess.run(
-                ["git", "diff", "-U0", "81540af..HEAD", "--", f],
-                cwd=repo, capture_output=True, text=True, timeout=20).stdout
-        except Exception:
-            diff = ""
-        lines = set()
-        n = 0
-        for ln in diff.splitlines():
-            if ln.startswith("@@"):
-                try:
-                    n = int(ln.split("+")[1].split(",")[0].split()[0])
-                except (IndexError, ValueError):
-                    n = 0
-            elif ln.startswith("+") and not ln.startswith("+++"):
-                lines.add(n)
-                n += 1
-            elif not ln.startswith("-"):
-                n += 1
-        added[f] = lines
+        "src/copy_trading/data_api_source.py", "src/copy_trading/market_price.py",
+        "src/copy_trading/onchain_source.py", "src/copy_trading/trade_executor.py",
+    )
 
-    offenders = []
-    for f in files:
-        path = os.path.join(repo, f)
-        if not os.path.exists(path):
-            continue
+    def _strings(path):
         tree = ast.parse(open(path, encoding="utf-8").read())
-        docstring_lines = set()
+        docs = set()
         for node in ast.walk(tree):
             if isinstance(node, (ast.Module, ast.FunctionDef,
                                  ast.AsyncFunctionDef, ast.ClassDef)):
                 if ast.get_docstring(node, clean=False) and node.body:
-                    docstring_lines.add(node.body[0].lineno)
-        scope = added.get(f) or None
+                    docs.add(node.body[0].lineno)
         for node in ast.walk(tree):
-            if not (isinstance(node, ast.Constant)
-                    and isinstance(node.value, str)):
+            if (isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and node.lineno not in docs):
+                yield node.lineno, node.value
+
+    offenders = []
+    for rel in OWNED_FILES:
+        path = os.path.join(repo, rel)
+        if os.path.exists(path):
+            for lineno, val in _strings(path):
+                if "\u2014" in val or "\u2013" in val:
+                    offenders.append(f"{rel}:{lineno}: {val[:60]!r}")
+    for rel in EDITED_FILES:
+        path = os.path.join(repo, rel)
+        if not os.path.exists(path):
+            continue
+        for lineno, val in _strings(path):
+            if not any(m in val for m in MARKERS):
                 continue
-            if node.lineno in docstring_lines:
-                continue
-            if scope is not None and node.lineno not in scope:
-                continue
-            if "\u2014" in node.value or "\u2013" in node.value:
-                offenders.append(f"{f}:{node.lineno}: {node.value[:60]!r}")
+            if "\u2014" in val or "\u2013" in val:
+                offenders.append(f"{rel}:{lineno}: {val[:60]!r}")
+
     assert not offenders, "dash in text this run wrote:\n" + "\n".join(offenders)
