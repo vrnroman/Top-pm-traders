@@ -1090,10 +1090,21 @@ The order-placement gate reads the interlock; **startup** guards still read
 gate (300bps) and spread gate (500bps) sat downstream of the snapshot function
 that returned `None` on every live call (§10.2), so every copy was rejected
 before either threshold was consulted. They are untested against production
-books, not tuned. On nine live books sampled 2026-08-16, two were above the
-500bps spread gate. Expect the first live session to admit a different number
-of copies than you assume, in either direction, and watch these two numbers
-before you conclude anything about the strategy from the fill count.
+books, not tuned. A first look says the spread gate is the live one: a
+meaningful minority of real book reads sit above 500bps. Re-derive rather than
+trusting a figure written here (the §9 rule applies):
+
+```
+docker exec poly-poly-bot python -c "
+from src.copy_trading import shadow_quote
+reads = {(r.get('token_id'), r.get('book_ts')): r['spread_bps']
+         for r in shadow_quote.load_rows() if r.get('spread_bps') is not None}
+print(len(reads), 'reads;', sum(1 for v in reads.values() if v > 500), 'over 500bps')"
+```
+
+Expect the first live session to admit a different number of copies than you
+assume, in either direction, and watch both gates before you conclude anything
+about the strategy from the fill count.
 
 **The genuinely irreversible step is the boot, not the order.** With
 `PREVIEW_MODE=false`, `runner.py` fires `check_and_set_approvals`, the
