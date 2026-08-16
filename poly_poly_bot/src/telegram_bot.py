@@ -1539,7 +1539,10 @@ def _handle_speed(text: str) -> None:
                          f"(the instrument's own delay)</i>")
         lines.append("")
 
-    if s.get("n_decay"):
+    # Same thin-sample bar as the counterfactual: this line draws a conclusion
+    # about whether speed is worth paying for, so it does not get to speak off
+    # a handful of rows.
+    if s.get("n_decay", 0) >= 5:
         lines.append(f"<b>Does being faster help</b> ({s['n_decay']} samples)")
         lines.append(f"  entry drifts {_esc(_fmt_bps(s['decay_mean_bps']))} over "
                      f"the next {shadow_quote.SECOND_SAMPLE_DELAY_S:.0f}s")
@@ -1552,11 +1555,12 @@ def _handle_speed(text: str) -> None:
         lines.append("<b>Worst entry penalty by wallet</b>")
         for d in per[:8]:
             thin = " <i>(thin)</i>" if d["thin"] else ""
+            lat = (f" · {_esc(_fmt_secs(d['latency_p50_s']))} "
+                   f"(n={d['n_latency']})" if d.get("n_latency") else "")
             lines.append(
                 f"  <code>{_esc(d['wallet'][:10])}…</code> "
-                f"{_esc(_fmt_bps(d['penalty_p50_bps']))} med · "
-                f"{_esc(_fmt_secs(d['latency_p50_s']))} · "
-                f"n={d['n']} · {_esc(d['top_category'])}{thin}")
+                f"{_esc(_fmt_bps(d['penalty_p50_bps']))} med "
+                f"(n={d['n']}){lat} · {_esc(d['top_category'])}{thin}")
         if len(per) > 8:
             lines.append(f"  <i>… and {len(per) - 8} more wallet(s)</i>")
         lines.append("")
@@ -1585,6 +1589,12 @@ def _handle_speed(text: str) -> None:
             lines.append("")
     except Exception as exc:
         lines.append(f"<i>counterfactual unavailable: {_esc(str(exc))}</i>")
+        lines.append("")
+
+    if s.get("n_unquotable"):
+        lines.append(f"<i>{s['n_unquotable']} detected trade(s) had no usable "
+                     f"book to price against (one-sided or empty). Recorded, "
+                     f"not dropped: those are the expensive ones to copy.</i>")
         lines.append("")
 
     lines.append("<i>Measurement only, no order was placed. Book A models a "

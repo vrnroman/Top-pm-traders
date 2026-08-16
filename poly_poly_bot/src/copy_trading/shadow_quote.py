@@ -86,6 +86,7 @@ def _snapshot_dict(clob_client, token_id: str) -> Optional[dict]:
         "best_ask": snap.best_ask,
         "midpoint": snap.midpoint,
         "spread_bps": snap.spread_bps,
+        "fetched_at": snap.fetched_at,
     }
 
 
@@ -104,6 +105,10 @@ def quote_once(clob_client, token_id: str, their_price: float,
         "best_ask": snap["best_ask"],
         "spread_bps": snap["spread_bps"],
         "penalty_bps": entry_penalty_bps(our_price, their_price),
+        # When the book read fails, market_price hands back an EXPIRED cached
+        # snapshot rather than nothing. Carried through so a second sample can
+        # tell a genuine re-read from a replay of the first one.
+        "fetched_at": snap.get("fetched_at"),
     }
 
 
@@ -154,8 +159,15 @@ def load_rows(path: Optional[str] = None, since_ts: Optional[float] = None) -> l
                     continue
                 if not isinstance(d, dict):
                     continue
-                if since_ts is not None and float(d.get("detected_at") or 0) < since_ts:
-                    continue
+                if since_ts is not None:
+                    try:
+                        seen_at = float(d.get("detected_at") or 0)
+                    except (TypeError, ValueError):
+                        # A malformed stamp must skip its row, never take down
+                        # the whole read (and with it the /speed command).
+                        continue
+                    if seen_at < since_ts:
+                        continue
                 out.append(d)
     except OSError:
         return []
@@ -237,6 +249,37 @@ def _build_row(trade: dict, t0: dict, t1: Optional[dict], quoted_at: float) -> d
         "our_price_t1": (t1 or {}).get("our_price"),
         "penalty_bps_t1": (t1 or {}).get("penalty_bps"),
         "spread_bps_t1": (t1 or {}).get("spread_bps"),
+        # True when the second look was served from the same (expired) cached
+        # snapshot as the first, i.e. a replay, not a re-read. Such a row would
+        # report exactly zero drift and quietly argue that speed does not
+        # matter.
+        "t1_stale": bool(
+            t1 is not None and t0.get("fetched_at") is not None
+            and t1.get("fetched_at") == t0.get("fetched_at")),
+    }
+    record(row)
+    return row
+
+
+def record_unquotable(trade: dict, reason: str = "no usable book") -> dict:
+    """Log a detected trade we could NOT price, so the drop is never silent.
+
+    One-sided and empty books are exactly the expensive-to-copy cases, so
+    dropping them without a trace would reproduce book A's survivor bias one
+    layer down: the sample would quietly become "trades that were easy to
+    price". The row carries no prices, so every statistic skips it by
+    construction, and `summarize` counts it as `n_unquotable`.
+    """
+    row = {
+        "copy_id": trade.get("copy_id", ""),
+        "target": trade.get("target", ""),
+        "token_id": trade.get("token_id", ""),
+        "category": trade.get("category", ""),
+        "their_price": float(trade.get("their_price") or 0),
+        "their_ts": float(trade.get("their_ts") or 0),
+        "detected_at": float(trade.get("detected_at") or 0),
+        "unquotable": True,
+        "reason": reason,
     }
     record(row)
     return row
@@ -335,8 +378,13 @@ def make_observer(clob_client_factory, queue_max: int = 500):
                         pending.append(
                             (time.time() + SECOND_SAMPLE_DELAY_S, trade, t0,
                              time.time()))
+                    else:
+                        # Unpriceable book. Recorded, not dropped: see
+                        # record_unquotable.
+                        record_unquotable(trade)
                 except Exception as exc:
                     logger.warn(f"[shadow] t0 quote failed: {exc}")
+                    record_unquotable(trade, reason=str(exc)[:120])
             # Stage 2 — anything whose delay has elapsed gets its second look.
             now = time.time()
             ready = [p for p in pending if p[0] <= now]
@@ -433,6 +481,10 @@ def by_wallet(rows: list[dict], min_n: int = 3) -> list[dict]:
             "wallet": w,
             "n": n_used,
             "thin": n_used < min_n,
+            # Its own count: the latency median comes from a different valid
+            # subset than the penalty median, so one shared n would misstate
+            # whichever of the two it is not describing.
+            "n_latency": s["n_latency"],
             "latency_p50_s": s["latency_p50_s"],
             "penalty_p50_bps": s["penalty_p50_bps"],
             "penalty_p90_bps": s["penalty_p90_bps"],
@@ -442,7 +494,10 @@ def by_wallet(rows: list[dict], min_n: int = 3) -> list[dict]:
                 key=lambda c: sum(1 for r in rs if (r.get("category") or "other") == c),
             ),
         })
-    # Worst entry penalty first — the wallets whose edge is hardest to reach.
+    # A wallet whose every sample was excluded has nothing to say; listing it
+    # with an "n/a" would pad the table and imply coverage that is not there.
+    out = [d for d in out if d["n"] > 0]
+    # Worst entry penalty first: the wallets whose edge is hardest to reach.
     out.sort(key=lambda d: (d["penalty_p50_bps"] is None, -(d["penalty_p50_bps"] or 0)))
     return out
 
@@ -467,17 +522,39 @@ def valid_for_latency(r: dict) -> bool:
     return not r.get("boot_flush", False)
 
 
+def usable_quote(r: dict) -> bool:
+    """Is this row's PRICE trustworthy, regardless of what is derived from it?
+
+    Split out from `valid_for_penalty` so the counterfactual book can reuse
+    the bias rules without also requiring a computed penalty field. Same two
+    exclusions: the restart backlog, and quotes taken long after detection.
+    """
+    if r.get("boot_flush", False):
+        return False
+    lag = r.get("quote_lag_s")
+    try:
+        return lag is None or float(lag) <= MAX_QUOTE_LAG_S
+    except (TypeError, ValueError):
+        return False
+
+
 def valid_for_penalty(r: dict) -> bool:
     """A row whose quote still describes the moment we were told.
 
-    A row priced long after detection carries our own queue delay, not the
-    market's move. Rows written before `quote_lag_s` existed are admitted —
-    the field is absent, not large — and the count is reported either way.
+    Excludes BOTH biases, not just one. The restart backlog is disqualifying
+    here for the same reason it is for latency, and more obviously: a trade
+    detected 26 minutes late is priced against a book that has had 26 minutes
+    to move, so the "penalty" is drift, not what we would have paid. Declining
+    to give a latency number off those rows and then reporting a bold penalty
+    median off the very same rows is the contradiction this guards.
+
+    Also excludes rows priced long after detection, which carry our own queue
+    delay rather than the market's move. Rows written before these fields
+    existed are admitted; the fields are absent, not large.
     """
     if r.get("penalty_bps") is None:
         return False
-    lag = r.get("quote_lag_s")
-    return lag is None or float(lag) <= MAX_QUOTE_LAG_S
+    return usable_quote(r)
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -492,16 +569,28 @@ def summarize(rows: list[dict]) -> dict:
     pen_rows = [r for r in rows if valid_for_penalty(r)]
     lat = [float(r["notify_latency_s"]) for r in lat_rows]
     pen = [float(r["penalty_bps"]) for r in pen_rows]
+    # The decay term drives one specific conclusion ("does being faster buy
+    # anything"), so it takes the same filtered rows AND drops any second
+    # sample that was a cache replay rather than a fresh read — that would
+    # report a guaranteed zero drift and argue against speed for free.
     decay = [float(r["penalty_bps_t1"]) - float(r["penalty_bps"])
              for r in pen_rows
              if r.get("penalty_bps_t1") is not None
-             and r.get("penalty_bps") is not None]
+             and r.get("penalty_bps") is not None
+             and not r.get("t1_stale", False)]
     return {
         "n": len(rows),
         "n_excluded_boot": sum(1 for r in rows if r.get("boot_flush")),
         "n_excluded_lag": sum(
             1 for r in rows
-            if r.get("penalty_bps") is not None and not valid_for_penalty(r)),
+            if r.get("penalty_bps") is not None
+            and not r.get("boot_flush", False)
+            and not valid_for_penalty(r)),
+        # Detected trades we could not price at all (one-sided or empty books).
+        # Named, because those are disproportionately the expensive-to-copy
+        # ones: dropping them silently would move book A's survivor bias out
+        # of the fill gate and into the book read.
+        "n_unquotable": sum(1 for r in rows if r.get("unquotable")),
         "quote_lag_p50_s": _pct(
             [float(r["quote_lag_s"]) for r in rows
              if r.get("quote_lag_s") is not None], 0.50),

@@ -53,7 +53,11 @@ def replay(ledger_path: str, quote_rows: Optional[list[dict]] = None,
     for r in rows:
         cid = r.get("copy_id")
         price = r.get("our_price")
-        if cid and price:
+        # Same validity filter the headline figures use. A quote taken long
+        # after detection, or one from the backlog flushed after a restart,
+        # prices a book that has had minutes to move — re-settling the book at
+        # those entries would report drift as execution cost.
+        if cid and price and shadow_quote.usable_quote(r):
             quotes[cid] = float(price)
 
     positions = list(PaperCopyLedger(ledger_path).positions.values())

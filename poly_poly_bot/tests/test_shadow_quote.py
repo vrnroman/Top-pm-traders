@@ -136,7 +136,9 @@ def _patch_snapshot(monkeypatch, sequence):
         return MarketSnapshot(best_bid=bid, best_ask=ask, midpoint=mid,
                               spread=ask - bid,
                               spread_bps=int((ask - bid) / mid * 10000),
-                              fetched_at=0.0)
+                              # distinct per call, so a genuine re-read is
+                              # distinguishable from a cache replay
+                              fetched_at=float(calls["n"]))
 
     monkeypatch.setattr("src.copy_trading.market_price.fetch_market_snapshot", fake)
 
@@ -502,3 +504,128 @@ def test_a_real_true_still_arms(monkeypatch, tmp_path):
     (tmp_path / "live_arm.json").write_text(_json.dumps({"armed": True}))
     assert live_mode.is_armed() is True
     assert live_mode.status()["runtime_armed"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Round-5: the exclusion must apply to BOTH numbers, and drops must be counted
+# --------------------------------------------------------------------------- #
+
+def test_boot_flush_is_excluded_from_the_penalty_too():
+    """The shipped bug: latency was withheld as unusable while a bold penalty
+    median was reported off the very same rows. A trade detected 26 minutes
+    late is priced against a book that has had 26 minutes to move."""
+    boot = {"boot_flush": True, "penalty_bps": 6000, "notify_latency_s": 1565,
+            "quote_lag_s": 0.7}
+    assert shadow_quote.valid_for_latency(boot) is False
+    assert shadow_quote.valid_for_penalty(boot) is False
+    s = shadow_quote.summarize([boot])
+    assert s["n"] == 1
+    assert s["n_latency"] == 0
+    assert s["n_penalty"] == 0, "both numbers must decline, not just one"
+    assert s["penalty_p50_bps"] is None
+    # and it is not double-counted as a lag exclusion
+    assert s["n_excluded_boot"] == 1
+    assert s["n_excluded_lag"] == 0
+
+
+def test_a_wallet_with_no_usable_samples_is_not_listed():
+    rows = [{"target": "0xA", "boot_flush": True, "penalty_bps": 500,
+             "notify_latency_s": 900, "category": "sports"}]
+    assert shadow_quote.by_wallet(rows) == []
+
+
+def test_per_wallet_carries_its_own_latency_count():
+    rows = [
+        {"target": "0xA", "penalty_bps": 100, "notify_latency_s": 30,
+         "category": "sports", "quote_lag_s": 1.0},
+        # penalty usable, latency missing
+        {"target": "0xA", "penalty_bps": 200, "category": "sports",
+         "quote_lag_s": 1.0},
+    ]
+    d = shadow_quote.by_wallet(rows, min_n=1)[0]
+    assert d["n"] == 2          # penalty samples
+    assert d["n_latency"] == 1  # latency samples, its own count
+
+
+def test_unquotable_trades_are_recorded_and_counted(tmp_path, monkeypatch):
+    """One-sided books are the expensive-to-copy ones. Dropping them silently
+    moves book A's survivor bias from the fill gate into the book read."""
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    row = shadow_quote.record_unquotable(
+        {"copy_id": "c9", "target": "0xw", "token_id": "t",
+         "their_price": 0.5, "their_ts": 1.0, "detected_at": 2.0})
+    assert row["unquotable"] is True
+    # carries no prices, so every statistic skips it by construction
+    assert "penalty_bps" not in row
+    s = shadow_quote.summarize(shadow_quote.load_rows())
+    assert s["n_unquotable"] == 1
+    assert s["n_penalty"] == 0
+
+
+def test_a_replayed_second_sample_does_not_count_as_zero_drift(monkeypatch, tmp_path):
+    """market_price hands back an EXPIRED cached snapshot when a read fails,
+    so a failed t1 is a byte-identical replay of t0 and would report a
+    guaranteed zero decay, arguing for free that speed does not matter."""
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(shadow_quote, "SECOND_SAMPLE_DELAY_S", 0.0)
+    from src.models import MarketSnapshot
+
+    frozen = MarketSnapshot(best_bid=0.60, best_ask=0.62, midpoint=0.61,
+                            spread=0.02, spread_bps=328, fetched_at=111.0)
+    monkeypatch.setattr("src.copy_trading.market_price.fetch_market_snapshot",
+                        lambda c, t: frozen)
+    import time as _t
+    now = _t.time()
+    monkeypatch.setattr(shadow_quote, "PROCESS_START_TS", now - 3600)
+    row = shadow_quote.sample_trade(object(), {
+        "copy_id": "c", "token_id": "tok", "their_price": 0.5,
+        "their_ts": now - 60, "detected_at": now})
+    assert row["t1_stale"] is True
+    # and it is excluded for staleness, not merely for queue lag
+    assert shadow_quote.valid_for_penalty(row) is True
+    s = shadow_quote.summarize([row])
+    assert s["n_decay"] == 0, "a replayed sample must not become a decay reading"
+
+
+def test_a_fresh_second_sample_still_counts(monkeypatch, tmp_path):
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(shadow_quote, "SECOND_SAMPLE_DELAY_S", 0.0)
+    _patch_snapshot(monkeypatch, [(0.60, 0.62), (0.63, 0.65)])
+    import time as _t
+    now = _t.time()
+    monkeypatch.setattr(shadow_quote, "PROCESS_START_TS", now - 3600)
+    row = shadow_quote.sample_trade(object(), {
+        "copy_id": "c", "token_id": "tok", "their_price": 0.5,
+        "their_ts": now - 60, "detected_at": now})
+    assert row["t1_stale"] is False
+    assert shadow_quote.summarize([row])["n_decay"] == 1
+
+
+def test_load_rows_survives_a_malformed_stamp(tmp_path, monkeypatch):
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    p = tmp_path / "shadow-quotes.jsonl"
+    p.write_text('{"copy_id":"a","detected_at":"abc"}\n'
+                 '{"copy_id":"b","detected_at":500}\n')
+    rows = shadow_quote.load_rows(since_ts=100)
+    assert [r["copy_id"] for r in rows] == ["b"]
+
+
+def test_counterfactual_ignores_biased_quotes(tmp_path):
+    """Re-settling the book at a stale entry would report drift as execution
+    cost."""
+    from src.copy_trading import virtual_ledger
+    import json as _json
+    lp = tmp_path / "l.jsonl"
+    shares = 50.0 / 0.5
+    lp.write_text(_json.dumps({
+        "copy_id": "c1", "target": "0xw", "condition_id": "0xc",
+        "token_id": "t", "outcome_index": 0, "category": "sports",
+        "their_price": 0.5, "entry_price": 0.5, "shares": shares,
+        "spent": 50.0, "drag_bps": 0, "opened_ts": 1.0, "closed": True,
+        "won": True, "pnl": shares - 50.0, "ideal_pnl": 0.0,
+        "closed_ts": 2.0, "exited_early": False, "cost_usd": 0.0,
+        "ideal_cost_usd": 0.0}) + "\n")
+    biased = [{"copy_id": "c1", "our_price": 0.9, "penalty_bps": 8000,
+               "boot_flush": True}]
+    out = virtual_ledger.replay(str(lp), quote_rows=biased)
+    assert out["n_matched"] == 0, "a boot-flush quote must not price the book"

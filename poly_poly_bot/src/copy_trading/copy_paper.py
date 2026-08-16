@@ -813,7 +813,13 @@ class CopyPaperEngine:
                 if self.bid_fetcher is not None:
                     book = self.bid_fetcher(pos.token_id)
                     if book:
-                        exit_price = book[0][0]  # best bid
+                        # Best = highest bid, taken explicitly rather than
+                        # trusting the fetcher's ordering. Behaviour-identical
+                        # today (fetch_bids sorts descending), but the live
+                        # order path shipped a real bug from exactly this
+                        # assumption: the CLOB returns bids ASCENDING, so an
+                        # index-0 read there took the WORST bid.
+                        exit_price = max(p for p, _ in book)
                 if exit_price is None:
                     continue
                 pos.realize_exit(float(exit_price), now=now)
