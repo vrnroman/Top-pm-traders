@@ -23,13 +23,20 @@ def clear_cache():
 
 class TestFetchMarketSnapshot:
     def test_valid_snapshot(self):
+        # Keyed by SIDE, not by call order. A positional side_effect list
+        # cannot tell a correct mapping from an inverted one — which is why
+        # this file stayed green while the live function returned None on
+        # every real call. See tests/test_clob_contract.py for the wire shapes.
+        from py_clob_client_v2.order_builder.constants import BUY, SELL
         mock_client = MagicMock()
-        mock_client.get_price.side_effect = ["0.45", "0.55"]  # bid, ask
+        mock_client.get_price.side_effect = (
+            lambda token_id, side: {"price": "0.45"} if side == BUY
+            else {"price": "0.55"})
 
         snapshot = fetch_market_snapshot(mock_client, "tok_1")
         assert snapshot is not None
-        assert snapshot.best_bid == 0.45
-        assert snapshot.best_ask == 0.55
+        assert snapshot.best_bid == 0.45   # side=BUY -> the book's buy side
+        assert snapshot.best_ask == 0.55   # side=SELL -> the book's sell side
         assert abs(snapshot.midpoint - 0.50) < 0.001
         assert snapshot.spread == pytest.approx(0.10, abs=0.001)
         assert snapshot.spread_bps > 0

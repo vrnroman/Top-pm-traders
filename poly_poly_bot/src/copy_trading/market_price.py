@@ -25,6 +25,25 @@ def _is_valid_price(p: float) -> bool:
     return not math.isnan(p) and not math.isinf(p) and p > 0
 
 
+def _price_of(resp) -> Optional[float]:
+    """Pull a float price out of whatever the CLOB client hands back.
+
+    py-clob-client-v2 returns ``{"price": "0.68"}`` from ``get_price`` and
+    ``{"mid": "0.675"}`` from ``get_midpoint``. Older code here assumed a bare
+    string; a plain ``float()`` therefore raised on every call. Accepts both
+    shapes so a future client change in either direction cannot silently
+    reintroduce that failure.
+    """
+    if resp is None:
+        return None
+    if isinstance(resp, dict):
+        resp = resp.get("price", resp.get("mid"))
+    try:
+        return float(resp)
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_market_snapshot(
     clob_client: ClobClient,
     token_id: str,
@@ -43,11 +62,25 @@ def fetch_market_snapshot(
             return snapshot
 
     try:
-        bid_str = clob_client.get_price(token_id, SELL)  # best bid
-        ask_str = clob_client.get_price(token_id, BUY)   # best ask
-
-        best_bid = float(bid_str)
-        best_ask = float(ask_str)
+        # Two contract facts, both probed against the live CLOB on
+        # 2026-08-16 and both previously wrong here:
+        #
+        # 1. get_price returns a JSON object ``{"price": "0.68"}``, not a
+        #    bare string. ``float()`` on it raised every single call, so this
+        #    function returned None for every token — silently, on the debug
+        #    channel — and every caller degraded to a fallback.
+        # 2. ``side`` names the side of the BOOK, not your intent:
+        #    side=BUY -> the buy side -> the best BID;
+        #    side=SELL -> the sell side -> the best ASK.
+        #    This was inverted, which after fixing (1) alone would have
+        #    produced bid >= ask, tripped the crossed-book guard, and still
+        #    returned None — or, if someone then relaxed that guard, quoted a
+        #    BUY at the bid and understated the entry penalty by the whole
+        #    spread. That penalty is the number being measured.
+        best_bid = _price_of(clob_client.get_price(token_id, BUY))
+        best_ask = _price_of(clob_client.get_price(token_id, SELL))
+        if best_bid is None or best_ask is None:
+            return cached[0] if cached is not None else None
 
     except Exception as exc:
         logger.debug(f"Failed to fetch snapshot for {token_id}: {error_message(exc)}")

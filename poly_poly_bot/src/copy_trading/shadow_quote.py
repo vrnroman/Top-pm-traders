@@ -274,6 +274,7 @@ def make_observer(clob_client_factory, queue_max: int = 500):
 
     def observer(detected: list) -> None:
         dropped = 0
+        queued = 0
         for t in detected:
             cid = t.get("copy_id") or ""
             # One quote per detected trade ever: the detector re-emits the same
@@ -281,14 +282,28 @@ def make_observer(clob_client_factory, queue_max: int = 500):
             # it would weight slow-moving markets by how long they linger.
             if cid and cid in seen:
                 continue
+            # The worker sleeps 12s between a trade's two samples, so it drains
+            # ~5/min while a sweep can emit 30-40. Cap per sweep so the queue
+            # holds recent trades instead of a growing backlog of stale ones —
+            # and mark the skipped ones seen, so what is measured stays a
+            # clean per-sweep head rather than an ever-lagging tail.
+            if queued >= MAX_SAMPLES_PER_SWEEP:
+                if cid:
+                    seen.add(cid)
+                dropped += 1
+                continue
             if cid:
                 seen.add(cid)
             try:
                 q.put_nowait(dict(t))
+                queued += 1
             except Exception:
                 dropped += 1
         if dropped:
-            logger.warn(f"[shadow] queue full — dropped {dropped} sample(s)")
+            # Never silent: a truncated sample that renders as a complete one
+            # is how a measurement lies.
+            logger.info(f"[shadow] sampled {queued} of {queued + dropped} new "
+                        f"detected trade(s) this sweep")
         if len(seen) > 50000:
             seen.clear()
 

@@ -126,8 +126,15 @@ async def _get_market_snapshot(
         bids = book.get("bids", [])
         asks = book.get("asks", [])
 
-        best_bid = float(bids[0]["price"]) if bids else 0.0
-        best_ask = float(asks[0]["price"]) if asks else 1.0
+        # The CLOB returns bids ASCENDING and asks DESCENDING, so index 0 is
+        # the WORST price on each side, not the best. Reading [0] gave
+        # best_bid=0.01 / best_ask=0.99 on a real 0.67/0.68 book (probed on
+        # the live VM, 2026-08-16): every copy was then rejected as
+        # drift/spread, and any that slipped the gates would have posted a
+        # real limit near 99c for a token trading at 68c. Take the extremes
+        # and never trust the ordering.
+        best_bid = max((float(b["price"]) for b in bids), default=0.0)
+        best_ask = min((float(a["price"]) for a in asks), default=1.0)
 
         if best_bid <= 0 or best_ask <= 0:
             return None

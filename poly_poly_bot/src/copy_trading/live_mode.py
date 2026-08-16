@@ -52,10 +52,15 @@ def read_arm() -> dict:
 
 
 def is_armed() -> bool:
-    """True only when BOTH interlock keys are turned."""
+    """True only when BOTH interlock keys are turned.
+
+    ``armed`` must be a real boolean True. A hand-edited
+    ``{"armed": "false"}`` is a truthy *string* and would otherwise arm the
+    bot — the exact inversion you least want on the money path.
+    """
     if not CONFIG.live_arm_enabled:
         return False
-    return bool(read_arm().get("armed"))
+    return read_arm().get("armed") is True
 
 
 def is_preview() -> bool:
@@ -149,6 +154,8 @@ def approvals_warning() -> Optional[str]:
     ERC-20/1155 approval transactions from the wallet. It costs gas and is the
     genuinely irreversible step, and it happens before any order is placed.
     """
-    return ("First boot with PREVIEW_MODE=false sends on-chain token-approval "
-            "transactions (check_and_set_approvals) before any order — that is "
-            "a real transaction and it costs gas.")
+    return ("PREVIEW_MODE=false starts real on-chain activity at BOOT, before "
+            "any order and regardless of the runtime arm: token approvals "
+            "(check_and_set_approvals), the auto-redeemer, and inventory "
+            "reconcile against the real proxy wallet. Those are real "
+            "transactions and they cost gas.")
