@@ -970,3 +970,101 @@ hour. So the numbers live in the surfaces that compute them
 (`/pnl`, `/slice`, `/verdict`, `scripts/rebaseline_ledger.py --era`) and this
 file carries the reasoning, the decisions, and the commands. **If you are
 tempted to paste a number in here, paste the command instead.**
+
+---
+
+## 10. Pre-flip execution measurement — 2026-08-16 (run s-k4m9dp)
+
+The question this section answers: **how fast are we told a target traded, and
+how much worse is our entry price than theirs?** Both were unmeasurable before
+this run, and both decide whether book B's numbers can survive contact with a
+real order book.
+
+### 10.1 §9.7-2 is CLOSED — the CLOB credential path works
+
+`/golive`'s precondition 2 asked for proof of a successful API-key derivation
+before the flip. It exists: `create_clob_client()` (`runner.py:304`) sits
+**outside** both preview guards, so every boot exercises it, and the boot log
+shows `Deriving API credentials from wallet...` → a 400 on `/auth/api-key` →
+`CLOB client authenticated successfully`. The 400 is the documented
+create-then-derive fallback, not a failure. Re-check with:
+
+```
+docker logs poly-poly-bot 2>&1 | grep -i "CLOB client authenticated"
+```
+
+### 10.2 The CLOB price contract was wrong in three places — and the books are clean
+
+Found by probing the live CLOB, not by reading code. All three were shipped
+defects on the real-order path:
+
+1. `get_price` returns `{"price": "0.68"}`; `market_price` called `float()` on
+   the object, so `fetch_market_snapshot` returned `None` on **every** live
+   call, silently, on the debug channel.
+2. `side` names the side of the **book**, not your intent: `side=BUY` is the
+   best **bid**, `side=SELL` the best **ask**. This was inverted, so fixing (1)
+   alone would have crossed the book and still returned `None` — or, with the
+   crossed-book guard relaxed, quoted a BUY at the bid and understated the
+   entry penalty by the whole spread.
+3. `trade_executor._get_market_snapshot` read `bids[0]`/`asks[0]`, but the CLOB
+   returns bids **ascending** and asks **descending**, so index 0 is the worst
+   price on each side. It produced a wildly crossed top-of-book, which rejected
+   every copy as drift and would have posted a real limit near the top of the
+   book had one slipped the gates.
+
+**The paper ledgers are NOT affected, on four independent grounds**, so the
+08-22 verdict data stands: `simulate_copy_fill` sorts the asks
+(`copy_paper.py:112`); book B never reads a book at all; exits go through
+`fetch_bids`, which sorts before indexing; and `fetch_market_snapshot`'s only
+consumer repo-wide is the new shadow-quote module. Verify with:
+
+```
+git diff 81540af..HEAD -- poly_poly_bot/src/copy_trading/copy_paper.py
+```
+
+Every fake in the test suite had encoded the wire contract wrongly, which is
+why a green suite described a function that failed on every real call.
+`tests/test_clob_contract.py` now pins the real shapes and the real side
+mapping.
+
+### 10.3 What is measured now, and the two biases that are excluded
+
+`shadow_quote` prices every **detected** trade against the live book with
+`order_executor.quote_copy_order` — the same function the live executor uses,
+so the measurement cannot drift from the thing it measures. It observes the
+raw detected list **before any admission rule**, because book A's fill gate
+censors exactly the copies whose price ran away: a fill measurement taken
+after the gates is a survivor's average.
+
+Two biases are recorded, excluded from the statistics, and reported as counts
+rather than quietly averaged in:
+
+- **`boot_flush`** — on the first sweep after a restart the detector re-emits
+  its whole `COPY_PAPER_MAX_AGE_S` look-back, so those trades' "latency" is
+  the age of the window. This repo redeploys on every push, so admitting them
+  would make the headline number mostly measure the last deploy.
+- **`quote_lag_s`** — how long a trade sat in the sampler's own queue before
+  being priced. Beyond `MAX_QUOTE_LAG_S` the row describes our delay, not the
+  market's move.
+
+Read the numbers off the surface, never from this file:
+
+```
+/speed [days]        # latency + entry penalty + per-wallet breakdown
+/live                # the real-money interlock and what is blocking it
+```
+
+### 10.4 The flip is now a two-key interlock, and it ships disarmed
+
+A real order requires **both** `LIVE_ARM_ENABLED=true` in the VM environment
+(the owner's key, default false, not settable from inside the process) **and**
+`/live CONFIRM` (the moment's key). `live_mode.is_preview()` fails closed on
+any error, and a persisted arm goes inert the moment the env key is pulled.
+The order-placement gate reads the interlock; **startup** guards still read
+`CONFIG.preview_mode`, so a live boot *prepares* and the arm *releases*.
+
+**The genuinely irreversible step is the boot, not the order.** With
+`PREVIEW_MODE=false`, `runner.py` fires `check_and_set_approvals`, the
+auto-redeemer and inventory reconcile against the real proxy wallet — real
+on-chain transactions that cost gas, before any order and regardless of the
+arm. `/live` renders this warning at the point the decision is made.
