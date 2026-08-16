@@ -1640,6 +1640,29 @@ def _handle_speed(text: str) -> None:
                      f"not dropped: those are the expensive ones to copy.</i>")
         lines.append("")
 
+    # The set-Z slice, reported SEPARATELY and never pooled into the headline
+    # above. Z's wallets are polled per-wallet and detected in about a second;
+    # everything else comes off the ~5-minute global feed. One number over both
+    # describes neither, and Z's is the one that decides real money.
+    fast = shadow_quote.by_source(rows, shadow_quote.FAST_SOURCE)
+    fs = shadow_quote.summarize(fast, known=shadow_quote.coverage_known(fast))
+    lines.append("<b>Set Z, detected per-wallet</b>")
+    if fs["n_latency"] < 5 and fs["n_penalty"] < 5:
+        lines.append(f"  <i>collecting since {shadow_quote.FAST_LABEL_SINCE_ISO}, "
+                     f"{fs['n']} sample(s) so far. Too thin to report.</i>")
+    else:
+        if fs["n_latency"]:
+            lines.append(f"  told in <b>{_esc(_fmt_secs(fs['latency_p50_s']))}</b> "
+                         f"median (n={fs['n_latency']}), vs "
+                         f"{_esc(_fmt_secs(s['latency_p50_s']))} on the global feed")
+        if fs["n_penalty"] >= 5:
+            lines.append(f"  entry <b>{_esc(_fmt_bps(fs['penalty_p50_bps']))}</b> "
+                         f"median (n={fs['n_penalty']}, "
+                         f"{fs['n_markets']} market(s))")
+    lines.append(f"  <i>rows before {shadow_quote.FAST_LABEL_SINCE_ISO} carry no "
+                 f"detector label and are counted as global feed</i>")
+    lines.append("")
+
     lines.append("<i>Measurement only, no order was placed. Book A models a "
                  "lagged fill and censors the copies whose price ran away; "
                  "these rows price every detected trade, including those.</i>")

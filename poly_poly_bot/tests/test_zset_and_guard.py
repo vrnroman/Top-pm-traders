@@ -327,3 +327,79 @@ def test_pentest_z_survives_a_corrupt_store(tmp_path):
     open(promotion_state.promoted_path("z"), "w").write("{not json")
     promotion_state.clear_cache()
     assert zset.wallets() == []
+
+
+# --------------------------------------------------------------------------- #
+# The detector label: fast and slow rows must never pool
+# --------------------------------------------------------------------------- #
+
+def test_the_detection_source_is_persisted(tmp_path, monkeypatch):
+    """The prober sets `source`; `_build_row` dropped it, so ~2 wallets
+    detected in 1s pooled with ~500 detected in 5 minutes into one headline,
+    and a row written unlabelled can never be split afterwards."""
+    from src.copy_trading import shadow_quote
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(shadow_quote, "SECOND_SAMPLE_DELAY_S", 0.0)
+    from src.models import MarketSnapshot
+    snap = MarketSnapshot(best_bid=0.60, best_ask=0.62, midpoint=0.61,
+                          spread=0.02, spread_bps=328, fetched_at=1.0)
+    monkeypatch.setattr("src.copy_trading.market_price.fetch_market_snapshot",
+                        lambda c, t: snap)
+    now = time.time()
+    monkeypatch.setattr(shadow_quote, "PROCESS_START_TS", now - 3600)
+
+    fast = shadow_quote.sample_trade(object(), {
+        "copy_id": "f1", "token_id": "t", "their_price": 0.5,
+        "their_ts": now - 1, "detected_at": now, "source": "fast-prober"})
+    slow = shadow_quote.sample_trade(object(), {
+        "copy_id": "s1", "token_id": "t", "their_price": 0.5,
+        "their_ts": now - 300, "detected_at": now})
+
+    assert fast["source"] == "fast-prober"
+    assert slow["source"] == "feed", "an unlabelled row defaults to the feed"
+
+
+def test_the_two_detectors_are_reportable_separately():
+    from src.copy_trading import shadow_quote
+    rows = ([{"source": "fast-prober", "notify_latency_s": 1.0,
+              "penalty_bps": 50, "quote_lag_s": 1.0, "boot_flush": False,
+              "token_id": f"t{i}", "book_ts": float(i)} for i in range(6)]
+            + [{"notify_latency_s": 300.0, "penalty_bps": 900,
+                "quote_lag_s": 1.0, "boot_flush": False,
+                "token_id": f"s{i}", "book_ts": float(100 + i)}
+               for i in range(6)])
+    fast = shadow_quote.by_source(rows, shadow_quote.FAST_SOURCE)
+    feed = shadow_quote.by_source(rows, "feed")
+    assert len(fast) == 6 and len(feed) == 6
+    assert shadow_quote.summarize(fast)["latency_p50_s"] == 1.0
+    assert shadow_quote.summarize(feed)["latency_p50_s"] == 300.0
+    # pooled would be ~150s, describing neither
+    pooled = shadow_quote.summarize(rows)["latency_p50_s"]
+    assert 1.0 < pooled < 300.0
+
+
+def test_the_z_slice_is_withheld_while_thin(tmp_path, monkeypatch):
+    """A two-wallet slice starts at n=0; it must say so, not print a median."""
+    from unittest.mock import patch
+
+    import src.telegram_bot as tb
+    from src.copy_trading import shadow_quote
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    now = time.time()
+    rows = [{"copy_id": f"c{i}", "target": "0xw", "token_id": f"t{i}",
+             "category": "sports", "their_price": 0.5, "our_price": 0.55,
+             "penalty_bps": 1000, "penalty_bps_t1": 1100, "t1_stale": False,
+             "quote_lag_s": 1.0, "boot_flush": False, "book_ts": float(i),
+             "notify_latency_s": 300.0, "detected_at": now - 10,
+             "source": "feed"} for i in range(8)]
+    with open(tmp_path / "shadow-quotes.jsonl", "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    sent = []
+    with patch.object(tb, "_send_chunked", lambda x: sent.append(x)), \
+         patch.object(tb, "send_message", lambda x, **k: sent.append(x)):
+        tb._handle_speed("/speed 7")
+    out = sent[0]
+    assert "Set Z, detected per-wallet" in out
+    assert "Too thin to report" in out
+    assert "—" not in out and "–" not in out

@@ -228,6 +228,12 @@ def _build_row(trade: dict, t0: dict, t1: Optional[dict], quoted_at: float) -> d
         "target": trade.get("target", ""),
         "token_id": token_id,
         "category": trade.get("category", ""),
+        # WHICH detector saw it. Set-Z wallets are polled per-wallet and are
+        # detected in ~1s; everything else comes off the global feed, which is
+        # structurally ~5 minutes stale. Pooling the two into one latency or
+        # entry-penalty figure produces a number that describes neither, and
+        # a row written without this label can never be split afterwards.
+        "source": trade.get("source") or "feed",
         "title": (trade.get("title") or "")[:120],
         "their_price": their_price,
         "their_usd": float(trade.get("their_usd") or 0),
@@ -578,6 +584,21 @@ def valid_for_penalty(r: dict) -> bool:
     if r.get("penalty_bps") is None:
         return False
     return usable_quote(r)
+
+
+FAST_SOURCE = "fast-prober"
+
+# Rows written before the label existed cannot be attributed, so the fast
+# slice is dated from the deploy that introduced it rather than pretending
+# the whole history is separable.
+FAST_LABEL_SINCE_ISO = "2026-08-16"
+
+
+def by_source(rows: list[dict], source: str) -> list[dict]:
+    """Rows from one detector. Unlabelled rows are the global feed."""
+    if source == "feed":
+        return [r for r in rows if (r.get("source") or "feed") == "feed"]
+    return [r for r in rows if r.get("source") == source]
 
 
 def coverage_known(rows: list[dict]) -> bool:
