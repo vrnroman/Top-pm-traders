@@ -1497,23 +1497,47 @@ def _handle_speed(text: str) -> None:
                      f"· {s['n']} samples</i>")
         lines.append("")
 
-    lines.append(f"<b>How fast am I told</b> ({s['n_latency']} samples)")
-    lines.append(f"  median <b>{_esc(_fmt_secs(s['latency_p50_s']))}</b> · "
-                 f"p90 {_esc(_fmt_secs(s['latency_p90_s']))} · "
-                 f"worst {_esc(_fmt_secs(s['latency_max_s']))}")
-    lines.append("  <i>from their trade timestamp to our detection</i>")
-    lines.append("")
+    if not s["n_latency"]:
+        lines.append("<b>How fast am I told</b> — <i>no usable samples yet</i>")
+        if s["n_excluded_boot"]:
+            lines.append(f"  all {s['n_excluded_boot']} sample(s) are restart "
+                         f"backlog, which measures the last deploy, not us")
+        lines.append("")
+    else:
+        lines.append(f"<b>How fast am I told</b> ({s['n_latency']} samples)")
+        lines.append(f"  median <b>{_esc(_fmt_secs(s['latency_p50_s']))}</b> · "
+                     f"p90 {_esc(_fmt_secs(s['latency_p90_s']))} · "
+                     f"worst {_esc(_fmt_secs(s['latency_max_s']))}")
+        lines.append("  <i>from their trade timestamp to our detection</i>")
+        if s["n_excluded_boot"]:
+            lines.append(f"  <i>{s['n_excluded_boot']} restart-backlog sample(s) "
+                         f"excluded — they measure the look-back window, "
+                         f"not our speed</i>")
+        lines.append("")
 
     worse = s.get("penalty_worse_frac")
-    lines.append(f"<b>How much worse is my entry</b> ({s['n_penalty']} samples)")
-    lines.append(f"  median <b>{_esc(_fmt_bps(s['penalty_p50_bps']))}</b> · "
-                 f"p90 {_esc(_fmt_bps(s['penalty_p90_bps']))} · "
-                 f"mean {_esc(_fmt_bps(s['penalty_mean_bps']))}")
-    if worse is not None:
-        lines.append(f"  paid more than they did on {worse * 100:.0f}% of trades")
-    lines.append("  <i>our postable price vs their fill, same pricing rule "
-                 "the live executor uses</i>")
-    lines.append("")
+    if not s["n_penalty"]:
+        lines.append("<b>How much worse is my entry</b> — <i>no usable samples yet</i>")
+        lines.append("")
+    else:
+        lines.append(f"<b>How much worse is my entry</b> ({s['n_penalty']} samples)")
+        lines.append(f"  median <b>{_esc(_fmt_bps(s['penalty_p50_bps']))}</b> · "
+                     f"p90 {_esc(_fmt_bps(s['penalty_p90_bps']))} · "
+                     f"mean {_esc(_fmt_bps(s['penalty_mean_bps']))}")
+        if worse is not None:
+            lines.append(f"  paid more than they did on {worse * 100:.0f}% of trades")
+        lines.append("  <i>our postable price vs their fill, same pricing rule "
+                     "the live executor uses</i>")
+        if s["n_excluded_lag"]:
+            lines.append(f"  <i>{s['n_excluded_lag']} sample(s) excluded: quoted "
+                         f"over {shadow_quote.MAX_QUOTE_LAG_S:.0f}s after "
+                         f"detection, so they carry our queue delay, not the "
+                         f"market's move</i>")
+        if s.get("quote_lag_p50_s") is not None:
+            lines.append(f"  <i>sampler lag p50 "
+                         f"{_esc(_fmt_secs(s['quote_lag_p50_s']))} "
+                         f"(the instrument's own delay)</i>")
+        lines.append("")
 
     if s.get("n_decay"):
         lines.append(f"<b>Does being faster help</b> ({s['n_decay']} samples)")
@@ -1541,7 +1565,15 @@ def _handle_speed(text: str) -> None:
     try:
         from src.copy_trading import virtual_ledger
         vl = virtual_ledger.replay(CONFIG.copy_paper_b_ledger, quote_rows=rows)
-        if vl["n_matched"]:
+        # A counterfactual ROI off a handful of matched copies is noise wearing
+        # a percentage sign. Mirrors the repo's thin-sample band (MATURITY_THIN).
+        if vl["n_matched"] < 5:
+            if vl["n_matched"]:
+                lines.append(f"<i>counterfactual: only {vl['n_matched']} of "
+                             f"{vl['n_settled']} settled copies carry a quote — "
+                             f"too thin to report</i>")
+                lines.append("")
+        elif vl["n_matched"]:
             lines.append("<b>If those prices had been real</b> (book B, "
                          "counterfactual)")
             lines.append(f"  paper {(vl['paper_roi'] or 0) * 100:+.1f}% → "

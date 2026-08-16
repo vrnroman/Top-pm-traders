@@ -138,6 +138,12 @@ async def _get_market_snapshot(
 
         if best_bid <= 0 or best_ask <= 0:
             return None
+        # A crossed book is bad data, not a tight spread. Without this the
+        # spread goes NEGATIVE and `_check_market_quality`'s `spread_bps > max`
+        # test passes it — the money path would accept a book that
+        # market_price.fetch_market_snapshot rejects outright.
+        if best_bid >= best_ask:
+            return None
 
         midpoint = (best_bid + best_ask) / 2
         spread = best_ask - best_bid

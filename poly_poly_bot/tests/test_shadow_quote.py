@@ -204,23 +204,58 @@ def test_second_sample_delay_clears_the_snapshot_cache():
 
 
 def test_observer_quotes_each_trade_once(monkeypatch, tmp_path):
+    """The worker is two-stage now: t0 on dequeue, t1 after the delay."""
     monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
-    seen = []
-    monkeypatch.setattr(shadow_quote, "sample_trade",
-                        lambda c, t: seen.append(t["copy_id"]))
+    monkeypatch.setattr(shadow_quote, "SECOND_SAMPLE_DELAY_S", 0.0)
+    monkeypatch.setattr(shadow_quote, "quote_once",
+                        lambda c, tok, tp: {"our_price": 0.6, "best_bid": 0.5,
+                                            "best_ask": 0.6, "spread_bps": 10,
+                                            "penalty_bps": 100})
+    recorded = []
+    monkeypatch.setattr(shadow_quote, "_build_row",
+                        lambda t, a, b, quoted_at: recorded.append(t["copy_id"]))
+
     observer, stop = shadow_quote.make_observer(lambda: object())
     try:
-        batch = [{"copy_id": "a"}, {"copy_id": "b"}]
+        batch = [{"copy_id": "a", "token_id": "t", "their_price": 0.5},
+                 {"copy_id": "b", "token_id": "t", "their_price": 0.5}]
         observer(batch)
         observer(batch)          # the detector re-emits until the trade ages out
         import time as _t
-        for _ in range(50):
-            if len(seen) >= 2:
+        for _ in range(60):
+            if len(recorded) >= 2:
                 break
             _t.sleep(0.05)
     finally:
         stop()
-    assert sorted(seen) == ["a", "b"]
+    assert sorted(recorded) == ["a", "b"], "each trade quoted exactly once"
+
+
+def test_t0_is_quoted_on_dequeue_not_after_the_sleep(monkeypatch, tmp_path):
+    """The shipped worker slept 12s inside each sample, serialising the queue:
+    the median production row was priced 295s after detection, so the 'price
+    the moment we were told' carried minutes of our own queue delay."""
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(shadow_quote, "SECOND_SAMPLE_DELAY_S", 5.0)
+    order = []
+    monkeypatch.setattr(shadow_quote, "quote_once",
+                        lambda c, tok, tp: (order.append(tok) or {"our_price": 0.6}))
+    monkeypatch.setattr(shadow_quote, "_build_row",
+                        lambda t, a, b, quoted_at: None)
+    observer, stop = shadow_quote.make_observer(lambda: object())
+    try:
+        observer([{"copy_id": f"c{i}", "token_id": f"t{i}", "their_price": 0.5}
+                  for i in range(5)])
+        import time as _t
+        for _ in range(40):
+            if len(order) >= 5:
+                break
+            _t.sleep(0.05)
+    finally:
+        stop()
+    # All five t0 quotes land well inside one 5s delay window — under the old
+    # shape the fifth would not have been priced for ~48s.
+    assert len(order) == 5
 
 
 def test_engine_observer_sees_refused_trades_and_cannot_break_the_cycle():
@@ -333,3 +368,137 @@ def test_blocking_reasons_are_plain_language(monkeypatch, tmp_path):
     assert len(reasons) == 3
     assert any("PREVIEW_MODE" in r for r in reasons)
     assert any("LIVE_ARM_ENABLED" in r for r in reasons)
+
+
+# --------------------------------------------------------------------------- #
+# Measurement validity — the biases the round-4 verification found
+# --------------------------------------------------------------------------- #
+
+def test_boot_flush_rows_are_flagged_and_kept_out_of_latency(monkeypatch, tmp_path):
+    """A restart re-emits the whole look-back window; that is not latency.
+
+    Reproduces the shipped defect: 33 of 44 production rows sat at boot+15s
+    with `their_ts` spread over the previous hour, which rendered as a
+    'median 11.8min' notification lag. On a repo that redeploys every push,
+    that number would mostly have measured the last deploy.
+    """
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(shadow_quote, "PROCESS_START_TS", 1_000_000.0)
+    monkeypatch.setattr(shadow_quote, "SECOND_SAMPLE_DELAY_S", 0.0)
+    _patch_snapshot(monkeypatch, [(0.60, 0.62)])
+
+    # Traded 50 min BEFORE we started; detected on our first sweep.
+    old = shadow_quote.sample_trade(object(), {
+        "copy_id": "boot", "token_id": "tok", "their_price": 0.5,
+        "their_ts": 999_000.0, "detected_at": 1_000_015.0})
+    assert old["boot_flush"] is True
+    assert old["notify_latency_s"] == 1015.0     # recorded...
+    assert shadow_quote.valid_for_latency(old) is False   # ...but not counted
+
+    _patch_snapshot(monkeypatch, [(0.60, 0.62)])
+    live = shadow_quote.sample_trade(object(), {
+        "copy_id": "live", "token_id": "tok", "their_price": 0.5,
+        "their_ts": 1_000_100.0, "detected_at": 1_000_160.0})
+    assert live["boot_flush"] is False
+    assert shadow_quote.valid_for_latency(live) is True
+
+    s = shadow_quote.summarize([old, live])
+    assert s["n"] == 2
+    assert s["n_excluded_boot"] == 1
+    assert s["n_latency"] == 1
+    assert s["latency_p50_s"] == 60.0, "the boot artifact must not move the median"
+
+
+def test_a_stale_quote_is_excluded_from_the_penalty(monkeypatch, tmp_path):
+    """A quote taken minutes after detection measures our queue, not the market."""
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(shadow_quote, "MAX_QUOTE_LAG_S", 30.0)
+    fresh = {"penalty_bps": 100, "quote_lag_s": 5.0}
+    stale = {"penalty_bps": 900, "quote_lag_s": 295.0}   # the observed p50
+    assert shadow_quote.valid_for_penalty(fresh) is True
+    assert shadow_quote.valid_for_penalty(stale) is False
+    s = shadow_quote.summarize([fresh, stale])
+    assert s["n_penalty"] == 1
+    assert s["n_excluded_lag"] == 1
+    assert s["penalty_p50_bps"] == 100
+
+
+def test_rows_without_the_new_fields_are_still_usable():
+    # Rows written before these flags existed must not vanish from the stats.
+    legacy = {"penalty_bps": 250, "notify_latency_s": 45}
+    assert shadow_quote.valid_for_penalty(legacy) is True
+    assert shadow_quote.valid_for_latency(legacy) is True
+
+
+def test_the_worker_records_quote_lag(monkeypatch, tmp_path):
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(shadow_quote, "SECOND_SAMPLE_DELAY_S", 0.0)
+    _patch_snapshot(monkeypatch, [(0.60, 0.62)])
+    row = shadow_quote.sample_trade(object(), {
+        "copy_id": "c", "token_id": "tok", "their_price": 0.5,
+        "their_ts": 100.0, "detected_at": 200.0})
+    assert row["quote_lag_s"] is not None
+
+
+def test_dedup_survives_a_restart(monkeypatch, tmp_path):
+    """`seen` is memory-only; without seeding, every restart re-quotes the
+    whole look-back window and counts the duplicates as fresh samples."""
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    # A previous process already quoted this trade.
+    shadow_quote.record({"copy_id": "already", "detected_at": 1.0,
+                         "penalty_bps": 100})
+    queued = []
+    monkeypatch.setattr(shadow_quote, "sample_trade",
+                        lambda c, t: queued.append(t["copy_id"]))
+    observer, stop = shadow_quote.make_observer(lambda: None)
+    try:
+        observer([{"copy_id": "already"}])
+    finally:
+        stop()
+    assert queued == [], "a restart must not re-quote what is already in the log"
+
+
+def test_per_sweep_cap_is_reported_not_silent(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(shadow_quote.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(shadow_quote, "MAX_SAMPLES_PER_SWEEP", 2)
+    observer, stop = shadow_quote.make_observer(lambda: None)
+    try:
+        observer([{"copy_id": f"c{i}"} for i in range(5)])
+    finally:
+        stop()
+    # All 5 are marked seen so the next sweep takes a fresh head, not a
+    # growing backlog of stale trades.
+
+
+# --------------------------------------------------------------------------- #
+# The arm check the verifier proved was untested
+# --------------------------------------------------------------------------- #
+
+def test_a_truthy_string_does_not_arm(monkeypatch, tmp_path):
+    """`{"armed": "false"}` is a truthy string. Reverting `is True` to
+    `bool(...)` passed the entire suite before this test existed."""
+    import json as _json
+
+    from src.copy_trading import live_mode
+    monkeypatch.setattr(live_mode.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(live_mode.CONFIG, "preview_mode", False)
+    monkeypatch.setattr(live_mode.CONFIG, "live_arm_enabled", True)
+    for value in ("false", "true", 1, "1", [], {}):
+        (tmp_path / "live_arm.json").write_text(_json.dumps({"armed": value}))
+        assert live_mode.is_armed() is False, f"{value!r} must not arm"
+        assert live_mode.is_preview() is True
+        # and the panel must not claim otherwise
+        assert live_mode.status()["runtime_armed"] is False
+        assert any("not armed" in r for r in live_mode.blocking_reasons())
+
+
+def test_a_real_true_still_arms(monkeypatch, tmp_path):
+    import json as _json
+
+    from src.copy_trading import live_mode
+    monkeypatch.setattr(live_mode.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(live_mode.CONFIG, "preview_mode", False)
+    monkeypatch.setattr(live_mode.CONFIG, "live_arm_enabled", True)
+    (tmp_path / "live_arm.json").write_text(_json.dumps({"armed": True}))
+    assert live_mode.is_armed() is True
+    assert live_mode.status()["runtime_armed"] is True

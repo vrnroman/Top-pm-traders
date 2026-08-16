@@ -126,7 +126,11 @@ def status() -> dict:
     return {
         "env_key": bool(CONFIG.live_arm_enabled),      # LIVE_ARM_ENABLED
         "process_live": not bool(CONFIG.preview_mode),  # PREVIEW_MODE=false
-        "runtime_armed": bool(rec.get("armed")),
+        # Strict, matching is_armed(). A truthy-but-not-True value (a
+        # hand-edited "false" string) must not make the panel report ARMED
+        # while the gate correctly refuses — failing safe on money but lying
+        # to the reader is still lying to the reader.
+        "runtime_armed": rec.get("armed") is True,
         "armed_ts": rec.get("ts"),
         "armed_by": rec.get("by"),
         "reason": rec.get("reason"),
@@ -141,7 +145,7 @@ def blocking_reasons() -> list[str]:
         out.append("PREVIEW_MODE=true (process-level; needs a redeploy to change)")
     if not CONFIG.live_arm_enabled:
         out.append("LIVE_ARM_ENABLED not set on the VM (owner's key)")
-    if not read_arm().get("armed"):
+    if read_arm().get("armed") is not True:
         out.append("runtime not armed (/live CONFIRM)")
     return out
 

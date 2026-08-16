@@ -50,6 +50,21 @@ SECOND_SAMPLE_DELAY_S = 12.0
 # and the detector can emit a burst when a slate settles.
 MAX_SAMPLES_PER_SWEEP = 40
 
+# How stale a t0 quote may be before it stops describing "the price we could
+# have had when we were told". The worker quotes on dequeue, so this is queue
+# delay, not market delay — it is the measuring instrument's own lag, and a
+# row carrying more of it than this is excluded from the penalty statistics
+# rather than quietly averaged in.
+MAX_QUOTE_LAG_S = 30.0
+
+# Process start. Trades whose own timestamp predates it happened while we were
+# not listening, so the "latency" on them is really the age of the detector's
+# look-back window (COPY_PAPER_MAX_AGE_S, an hour) flushing on the first sweep
+# after a restart. They are recorded, flagged, and kept out of the latency
+# statistics: on a repo that redeploys on every push, letting them in means the
+# headline number mostly measures the last deploy.
+PROCESS_START_TS = time.time()
+
 # Keep the log bounded on a small VM disk (a known past failure: the disk hit
 # 84% and the box was a day from full). Trimmed to the newest rows on rollover.
 MAX_ROWS = 20000
@@ -176,6 +191,24 @@ def sample_trade(clob_client, trade: dict) -> Optional[dict]:
 
     time.sleep(SECOND_SAMPLE_DELAY_S)
     t1 = quote_once(clob_client, token_id, their_price)
+    return _build_row(trade, t0, t1, quoted_at=time.time() - SECOND_SAMPLE_DELAY_S)
+
+
+def _build_row(trade: dict, t0: dict, t1: Optional[dict], quoted_at: float) -> dict:
+    """Assemble and persist one shadow-quote row from its two samples."""
+    token_id = trade.get("token_id") or ""
+    their_price = float(trade.get("their_price") or 0)
+    their_ts = float(trade.get("their_ts") or 0)
+    detected_at = float(trade.get("detected_at") or 0)
+    notify_latency_s = (
+        (detected_at - their_ts) if (their_ts > 0 and detected_at > 0) else None
+    )
+    # How long the trade sat in our own queue before we priced it. This is the
+    # instrument's error bar, not the market's: a row with a large one says
+    # what the book looked like minutes after the moment being described.
+    quote_lag_s = (quoted_at - detected_at) if detected_at > 0 else None
+    # Did this trade happen while we were actually listening?
+    boot_flush = bool(their_ts and their_ts < PROCESS_START_TS)
 
     row = {
         "copy_id": trade.get("copy_id", ""),
@@ -188,7 +221,10 @@ def sample_trade(clob_client, trade: dict) -> Optional[dict]:
         "their_ts": their_ts,
         "detected_at": detected_at,
         "notify_latency_s": notify_latency_s,
-        "quoted_at": time.time(),
+        "quoted_at": quoted_at,
+        # Validity flags — read by summarize(), never silently dropped.
+        "quote_lag_s": quote_lag_s,
+        "boot_flush": boot_flush,
         # t0 — the penalty at the moment we could first have acted
         "our_price": t0["our_price"],
         "penalty_bps": t0["penalty_bps"],
@@ -252,23 +288,67 @@ def make_observer(clob_client_factory, queue_max: int = 500):
 
     q: "_queue.Queue[dict]" = _queue.Queue(maxsize=queue_max)
     stop = threading.Event()
+    # Seeded from the log on start, so a restart does not re-quote the whole
+    # look-back window and count it as fresh samples. Memory-only dedup made
+    # every redeploy inflate the sample with duplicates of the same trade.
     seen: set = set()
+    try:
+        for r in load_rows():
+            cid = r.get("copy_id")
+            if cid:
+                seen.add(cid)
+        if seen:
+            logger.info(f"[shadow] resumed with {len(seen)} already-quoted trade(s)")
+    except Exception as exc:
+        logger.warn(f"[shadow] could not seed dedup set: {exc}")
 
     def _worker() -> None:
+        """Two-stage, non-blocking.
+
+        Stage 1 quotes t0 the moment a trade is dequeued; stage 2 re-quotes it
+        once its delay has elapsed. The old shape slept 12s inside the sample,
+        which serialised the whole queue: with ~40 trades a sweep the median
+        trade was priced ~5 minutes after it was detected, so the "entry price
+        the moment we were told" carried minutes of our own queue delay. Now
+        the sleep overlaps instead of stacking.
+        """
         client = None
+        pending: list = []          # (due_ts, trade, t0)
         while not stop.is_set():
-            try:
-                trade = q.get(timeout=1.0)
-            except _queue.Empty:
-                continue
             try:
                 if client is None:
                     client = clob_client_factory()
-                if client is None:
-                    continue
-                sample_trade(client, trade)
             except Exception as exc:
-                logger.warn(f"[shadow] worker sample failed: {exc}")
+                logger.warn(f"[shadow] client unavailable: {exc}")
+            # Stage 1 — drain everything waiting, pricing each immediately.
+            drained = 0
+            while client is not None and drained < MAX_SAMPLES_PER_SWEEP:
+                try:
+                    trade = q.get_nowait()
+                except _queue.Empty:
+                    break
+                drained += 1
+                try:
+                    t0 = quote_once(client, trade.get("token_id") or "",
+                                    float(trade.get("their_price") or 0))
+                    if t0 is not None:
+                        pending.append(
+                            (time.time() + SECOND_SAMPLE_DELAY_S, trade, t0,
+                             time.time()))
+                except Exception as exc:
+                    logger.warn(f"[shadow] t0 quote failed: {exc}")
+            # Stage 2 — anything whose delay has elapsed gets its second look.
+            now = time.time()
+            ready = [p for p in pending if p[0] <= now]
+            pending = [p for p in pending if p[0] > now]
+            for _due, trade, t0, quoted_at in ready:
+                try:
+                    t1 = quote_once(client, trade.get("token_id") or "",
+                                    float(trade.get("their_price") or 0))
+                    _build_row(trade, t0, t1, quoted_at=quoted_at)
+                except Exception as exc:
+                    logger.warn(f"[shadow] t1 quote failed: {exc}")
+            stop.wait(0.5)
 
     threading.Thread(target=_worker, name="shadow-quote", daemon=True).start()
 
@@ -369,18 +449,58 @@ def collecting_since(rows: list[dict]) -> Optional[float]:
     return min(stamps) if stamps else None
 
 
+def valid_for_latency(r: dict) -> bool:
+    """A row whose latency describes us, not a restart.
+
+    Excludes the boot flush: on the first sweep after a restart the detector
+    re-emits its whole look-back window (an hour), so those trades' "latency"
+    is the age of the window, not how fast we were told. Older rows written
+    before this flag existed carry no `their_ts`-vs-start information, so they
+    are judged by the same rule applied to the field they do have.
+    """
+    if r.get("notify_latency_s") is None:
+        return False
+    return not r.get("boot_flush", False)
+
+
+def valid_for_penalty(r: dict) -> bool:
+    """A row whose quote still describes the moment we were told.
+
+    A row priced long after detection carries our own queue delay, not the
+    market's move. Rows written before `quote_lag_s` existed are admitted —
+    the field is absent, not large — and the count is reported either way.
+    """
+    if r.get("penalty_bps") is None:
+        return False
+    lag = r.get("quote_lag_s")
+    return lag is None or float(lag) <= MAX_QUOTE_LAG_S
+
+
 def summarize(rows: list[dict]) -> dict:
-    """Latency and entry-penalty distributions over shadow-quote rows."""
-    lat = [float(r["notify_latency_s"]) for r in rows
-           if r.get("notify_latency_s") is not None]
-    pen = [float(r["penalty_bps"]) for r in rows
-           if r.get("penalty_bps") is not None]
+    """Latency and entry-penalty distributions over shadow-quote rows.
+
+    Biased rows are EXCLUDED and counted, never averaged in: the two figures
+    here are meant to decide whether real money gets deployed, and a number
+    that quietly folds in a restart artifact or the sampler's own queue delay
+    is worse than no number.
+    """
+    lat_rows = [r for r in rows if valid_for_latency(r)]
+    pen_rows = [r for r in rows if valid_for_penalty(r)]
+    lat = [float(r["notify_latency_s"]) for r in lat_rows]
+    pen = [float(r["penalty_bps"]) for r in pen_rows]
     decay = [float(r["penalty_bps_t1"]) - float(r["penalty_bps"])
-             for r in rows
+             for r in pen_rows
              if r.get("penalty_bps_t1") is not None
              and r.get("penalty_bps") is not None]
     return {
         "n": len(rows),
+        "n_excluded_boot": sum(1 for r in rows if r.get("boot_flush")),
+        "n_excluded_lag": sum(
+            1 for r in rows
+            if r.get("penalty_bps") is not None and not valid_for_penalty(r)),
+        "quote_lag_p50_s": _pct(
+            [float(r["quote_lag_s"]) for r in rows
+             if r.get("quote_lag_s") is not None], 0.50),
         "n_latency": len(lat),
         "latency_p50_s": _pct(lat, 0.50),
         "latency_p90_s": _pct(lat, 0.90),
