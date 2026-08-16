@@ -470,7 +470,8 @@ def _pct(values: list[float], q: float) -> Optional[float]:
     return s[lo] * (1 - frac) + s[hi] * frac
 
 
-def by_wallet(rows: list[dict], min_n: int = 3) -> list[dict]:
+def by_wallet(rows: list[dict], min_n: int = 3,
+              known: Optional[bool] = None) -> list[dict]:
     """Per-wallet latency and entry-penalty, worst penalty first.
 
     The averaged figure answers "how bad is it"; this answers the question
@@ -479,10 +480,13 @@ def by_wallet(rows: list[dict], min_n: int = 3) -> list[dict]:
     reach them. Wallets under ``min_n`` samples are returned too, flagged
     thin: hiding them would make a sparse sample look like a complete one.
     """
-    # Same whole-sample coverage decision as the headline, taken BEFORE the
-    # split. Deciding it per wallet is what let the table contradict the
-    # headline (see apply_coverage_filter).
-    rows = apply_coverage_filter(rows)
+    # The coverage decision is the caller's, taken once on the full sample and
+    # passed down. NOT applied as a row filter here: a row can be both
+    # latency-valid and penalty-eligible, so stripping it for lacking a book
+    # stamp silently shrank the table's LATENCY column to a third of the
+    # headline's. summarize() applies coverage to the penalty path only.
+    if known is None:
+        known = coverage_known(rows)
     groups: dict = {}
     for r in rows:
         w = (r.get("target") or "").lower()
@@ -491,7 +495,7 @@ def by_wallet(rows: list[dict], min_n: int = 3) -> list[dict]:
         groups.setdefault(w, []).append(r)
     out = []
     for w, rs in groups.items():
-        s = summarize(rs)
+        s = summarize(rs, known=known)
         # Report the count the penalty figure is actually computed from, not
         # the raw row count: showing n=8 next to a median derived from 7 is
         # the small kind of lie that makes a reader trust the big numbers.
@@ -576,7 +580,22 @@ def valid_for_penalty(r: dict) -> bool:
     return usable_quote(r)
 
 
-def apply_coverage_filter(rows: list[dict]) -> list[dict]:
+def coverage_known(rows: list[dict]) -> bool:
+    """Does this sample, as a whole, carry independence stamps?
+
+    The coverage rule is a WHOLE-SAMPLE decision, so it must be computed once
+    on the full set and then handed down to anything that splits it. Deciding
+    it inside each slice is what let the per-wallet table disagree with the
+    headline twice: once because an unstamped wallet saw "nothing has it", and
+    once because pre-filtering the rows stripped latency the table still
+    needed.
+    """
+    return any(r.get("book_ts") is not None
+               for r in rows if valid_for_penalty(r))
+
+
+def apply_coverage_filter(rows: list[dict],
+                          known: Optional[bool] = None) -> list[dict]:
     """Drop rows whose independence is unknowable, but only once it is knowable.
 
     `book_ts` is what makes a row's independence measurable, and rows written
@@ -593,8 +612,9 @@ def apply_coverage_filter(rows: list[dict]) -> list[dict]:
     excluded four lines above, 15x outside its own p90. Idempotent, so
     applying it again downstream is safe.
     """
-    eligible = [r for r in rows if valid_for_penalty(r)]
-    if not any(r.get("book_ts") is not None for r in eligible):
+    if known is None:
+        known = coverage_known(rows)
+    if not known:
         return list(rows)
     keep = []
     for r in rows:
@@ -607,7 +627,7 @@ def apply_coverage_filter(rows: list[dict]) -> list[dict]:
     return keep
 
 
-def summarize(rows: list[dict]) -> dict:
+def summarize(rows: list[dict], known: Optional[bool] = None) -> dict:
     """Latency and entry-penalty distributions over shadow-quote rows.
 
     Biased rows are EXCLUDED and counted, never averaged in: the two figures
@@ -625,7 +645,10 @@ def summarize(rows: list[dict]) -> dict:
     # as the field populates even though most rows remain unmeasured, which is
     # the disclosure expiring rather than becoming true.
     before = len(pen_rows)
-    pen_rows = [r for r in apply_coverage_filter(rows) if valid_for_penalty(r)]
+    if known is None:
+        known = coverage_known(rows)
+    if known:
+        pen_rows = [r for r in pen_rows if r.get("book_ts") is not None]
     n_unmeasured = before - len(pen_rows)
     def _finite(vals):
         # A NaN or Inf sorts unpredictably and poisons every percentile. Not

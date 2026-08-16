@@ -1047,6 +1047,29 @@ rather than quietly averaged in:
   being priced. Beyond `MAX_QUOTE_LAG_S` the row describes our delay, not the
   market's move.
 
+**What the entry-price number still cannot tell you.**
+A sample here is one detected trade priced against one book read. When several
+copies of the same market arrive in one burst they are priced off one cached
+read, so they are one observation wearing several row numbers. `/speed` counts
+the distinct book reads next to the headline and stays silent on whether speed
+is worth paying for until there are at least 5 of them across more than 2
+markets.
+
+Two things follow. First, the sign of the entry penalty is a reading, not a
+settled answer, until the distinct-read count is in the dozens. Second, rows
+written before this run's deploy do not carry the field that makes
+independence measurable, so they are dropped from the price statistics and
+counted on the panel. **The price sample restarts from 2026-08-16. The latency
+sample does not.**
+
+The per-wallet table carries the same limit more sharply: most wallets sit at
+one or two samples and are marked thin. Read it as which wallets are reachable
+at all, not as a ranking.
+
+None of this blocks the flip. It means the entry-price number should not be
+the only input to it. Give it a few days of collection before you read the
+sign as an answer.
+
 Read the numbers off the surface, never from this file:
 
 ```

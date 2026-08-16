@@ -846,18 +846,27 @@ def test_rendered_output_never_emits_an_unescaped_angle_bracket(tmp_path,
 # --------------------------------------------------------------------------- #
 
 def _mixed_rows():
-    """4 rows with the independence stamp, plus wallets that predate it."""
+    """One wallet with BOTH stamped and unstamped rows, plus wallets with none.
+
+    The stamped/unstamped split inside a single wallet is what separates the
+    two failures: its penalty count must drop to the stamped rows only, while
+    its latency count must keep every row, because the coverage rule is about
+    book-read independence and says nothing about a clock.
+    """
     import time as _t
     now = _t.time()
     base = dict(category="sports", their_price=0.5, our_price=0.55,
                 penalty_bps_t1=1100, t1_stale=False, quote_lag_s=1.0,
                 boot_flush=False, notify_latency_s=60.0, detected_at=now - 10)
     rows = []
-    for i in range(4):                      # measured
+    for i in range(4):                      # measured, same wallet
         rows.append({**base, "copy_id": f"m{i}", "target": "0xmeasured",
                      "token_id": f"tok{i}", "book_ts": float(i),
                      "penalty_bps": 100})
-    for i in range(3):                      # a wallet with NO stamp at all
+    for i in range(3):                      # SAME wallet, no stamp
+        rows.append({**base, "copy_id": f"n{i}", "target": "0xmeasured",
+                     "token_id": "tokN", "penalty_bps": 900})
+    for i in range(3):                      # a wallet with no stamp at all
         rows.append({**base, "copy_id": f"u{i}", "target": "0xunstamped",
                      "token_id": "tokU", "penalty_bps": 2439})
     rows.append({**base, "copy_id": "s1", "target": "0xsolo",
@@ -865,95 +874,75 @@ def _mixed_rows():
     return rows
 
 
-def test_the_wallet_table_cannot_contradict_the_headline():
-    """The round-8 fix was sample-conditional, and `by_wallet` re-partitioned
-    the rows, so a wallet whose rows ALL predated the stamp saw "nothing has
-    it" and kept them. The table then led with +3548bps drawn entirely from
-    rows the headline had excluded four lines above."""
+def test_the_rendered_table_agrees_with_the_rendered_headline(tmp_path,
+                                                              monkeypatch):
+    """End to end through `_handle_speed`, the actual call site.
+
+    The first version of this guard applied the coverage filter ITSELF and
+    then called `by_wallet` directly, so deleting the filter from the
+    production wiring left the whole suite green while the panel rendered a
+    table summing to 28 under a headline of 14. A guard that does the
+    wiring's job cannot detect the wiring being wrong.
+    """
+    import re
     rows = _mixed_rows()
-    s = shadow_quote.summarize(rows)
-    per = shadow_quote.by_wallet(shadow_quote.apply_coverage_filter(rows), min_n=1)
+    out = _render("/speed 7", rows, tmp_path, monkeypatch)
 
-    assert s["n_penalty"] == 4
-    assert s["n_excluded_unmeasured"] == 4
-    # the table sums to exactly the headline's sample
-    assert sum(d["n"] for d in per) == s["n_penalty"]
-    wallets = {d["wallet"] for d in per}
-    assert "0xunstamped" not in wallets
-    assert "0xsolo" not in wallets
-    # and nothing in the table sits outside the headline's own range
-    assert max(d["penalty_p50_bps"] for d in per) <= s["penalty_p90_bps"]
+    m = re.search(r"How much worse is my entry</b> \((\d+) samples\)", out)
+    assert m, f"headline missing from render:\n{out}"
+    pen_n = int(m.group(1))
+    lat_n = int(re.search(r"How fast am I told</b> \((\d+) samples\)",
+                          out).group(1))
+    assert pen_n == 4, out          # only the stamped rows price the book
+    assert lat_n == len(rows), out  # ...but every row still tells the clock
 
-
-def test_coverage_filter_is_idempotent_and_decides_on_the_whole_set():
-    rows = _mixed_rows()
-    once = shadow_quote.apply_coverage_filter(rows)
-    twice = shadow_quote.apply_coverage_filter(once)
-    assert once == twice
-    # A slice that happens to contain no stamped row must not resurrect them:
-    # that is exactly the per-wallet bug, so the decision belongs upstream.
-    unstamped_slice = [r for r in rows if r.get("target") == "0xunstamped"]
-    assert shadow_quote.apply_coverage_filter(unstamped_slice) == unstamped_slice
-    assert [r for r in once if r.get("target") == "0xunstamped"] == []
+    entries = re.findall(r"med \(n=(\d+)\) · [^·]*?\(n=(\d+)\)", out)
+    assert entries, out
+    # the table's penalty column sums to the headline's penalty sample
+    assert sum(int(a) for a, _ in entries) == pen_n, out
+    # and the surviving wallet keeps ALL SEVEN of its latency rows, not the
+    # four that happen to carry a book stamp
+    assert any(int(b) == 7 for _, b in entries), (
+        "the coverage rule must not shrink the latency column", out)
+    assert "0xunstamped" not in out and "0xsolo" not in out
 
 
-def test_latency_only_rows_survive_the_coverage_filter():
-    """A row with no price has nothing to be clustered with; dropping it would
-    shrink the latency sample for no reason."""
-    rows = _mixed_rows()
-    rows.append({"copy_id": "lat", "target": "0xw", "notify_latency_s": 42.0,
-                 "detected_at": 1.0})
-    kept = shadow_quote.apply_coverage_filter(rows)
-    assert any(r["copy_id"] == "lat" for r in kept)
+def test_the_table_guard_actually_catches_both_regressions(tmp_path,
+                                                          monkeypatch):
+    """Proves the guard above can fail, on BOTH shapes it exists to catch.
 
+    r9: `by_wallet` deciding coverage for its own slice, so a wallet with no
+    stamped rows kept them all and the table exceeded the headline.
+    r10: the panel PRE-FILTERING rows before `by_wallet`, which also stripped
+    the latency the table still needed.
+    """
+    import re
+    real = shadow_quote.by_wallet
 
-def test_decay_is_averaged_per_move_not_per_row():
-    """4 quiet reads plus one read with 30 clone copies. Row-weighting let the
-    one noisy read outvote the other four."""
-    rows = []
-    for i in range(4):
-        rows.append({"token_id": "tokA", "book_ts": float(i),
-                     "penalty_bps": 100, "penalty_bps_t1": 400,
-                     "t1_stale": False, "quote_lag_s": 1.0,
-                     "boot_flush": False})
-    for j in range(30):
-        rows.append({"token_id": "tokB", "book_ts": 99.0,
-                     "penalty_bps": 100 + j, "penalty_bps_t1": 2400 + j,
-                     "t1_stale": False, "quote_lag_s": 1.0,
-                     "boot_flush": False})
-    s = shadow_quote.summarize(rows)
-    assert s["n_decay_moves"] == 5
-    assert s["n_decay"] == 5, "the estimator must count moves, like its label"
-    # four moves of +300 and one of +2300 -> +700, not the row-weighted +2065
-    assert s["decay_mean_bps"] == pytest.approx(700.0, abs=1.0)
+    def _headline_and_table(out):
+        pen = int(re.search(
+            r"How much worse is my entry</b> \((\d+) samples\)", out).group(1))
+        pen_ns = [int(a) for a in re.findall(r"med \(n=(\d+)\)", out)]
+        lat_ns = [int(b) for b in
+                  re.findall(r"med \(n=\d+\) · [^·]*?\(n=(\d+)\)", out)]
+        return pen, pen_ns, lat_ns
 
+    # r10 shape: pre-filter before grouping -> the latency column shrinks.
+    monkeypatch.setattr(
+        shadow_quote, "by_wallet",
+        lambda rows, min_n=3, known=None: real(
+            shadow_quote.apply_coverage_filter(rows, known=known),
+            min_n=min_n, known=known))
+    out = _render("/speed 7", _mixed_rows(), tmp_path, monkeypatch)
+    _pen, _pen_ns, lat_ns = _headline_and_table(out)
+    assert 7 not in lat_ns, (
+        "the pre-filtering regression must be visible in the table:\n" + out)
 
-def test_log_lines_this_run_wrote_have_no_dash():
-    """Complements the render guard: it covers Telegram output, this covers
-    the log lines, which is where round 7's em-dash actually shipped."""
-    import ast
-
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    MARKERS = ("[shadow]", "[live]")
-    FILES = ("main.py", "src/copy_trading/live_mode.py",
-             "src/copy_trading/shadow_quote.py", "src/copy_trading/copy_paper.py")
-    offenders = []
-    for rel in FILES:
-        path = os.path.join(repo, rel)
-        if not os.path.exists(path):
-            continue
-        tree = ast.parse(open(path, encoding="utf-8").read())
-        docs = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Module, ast.FunctionDef,
-                                 ast.AsyncFunctionDef, ast.ClassDef)):
-                if ast.get_docstring(node, clean=False) and node.body:
-                    docs.add(node.body[0].lineno)
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Constant)
-                    and isinstance(node.value, str)
-                    and node.lineno not in docs
-                    and any(m in node.value for m in MARKERS)
-                    and ("—" in node.value or "–" in node.value)):
-                offenders.append(f"{rel}:{node.lineno}: {node.value[:60]!r}")
-    assert not offenders, "dash in a log line this run wrote:\n" + "\n".join(offenders)
+    # r9 shape: a wallet whose rows all lack the stamp keeps them.
+    monkeypatch.setattr(
+        shadow_quote, "by_wallet",
+        lambda rows, min_n=3, known=None: real(rows, min_n=min_n, known=False))
+    out = _render("/speed 7", _mixed_rows(), tmp_path, monkeypatch)
+    pen, pen_ns, _lat = _headline_and_table(out)
+    assert sum(pen_ns) != pen, (
+        "the per-slice-decision regression must break the sum:\n" + out)

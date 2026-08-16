@@ -1465,12 +1465,14 @@ def _handle_speed(text: str) -> None:
 
     since = _time.time() - days * 86400
     rows = shadow_quote.load_rows(since_ts=since)
-    s = shadow_quote.summarize(rows)
-    # ONE coverage decision for the whole panel, taken on the full set before
-    # anything splits it. Letting the headline and the per-wallet table each
-    # decide left the table leading with wallets built entirely from rows the
-    # headline had just excluded as unmeasurable, 15x outside its own p90.
-    scoped = shadow_quote.apply_coverage_filter(rows)
+    # ONE coverage decision for the whole panel, computed on the full set and
+    # handed to every surface, rather than each deciding for its own slice.
+    # Deciding locally broke the table twice: once by resurrecting rows the
+    # headline had excluded, once by stripping latency the table still needed.
+    # It is passed as a FLAG, never applied as a row filter here, because a
+    # row can be both latency-valid and penalty-eligible.
+    known = shadow_quote.coverage_known(rows)
+    s = shadow_quote.summarize(rows, known=known)
 
     lines = [f"⏱ <b>Pre-flip speed &amp; price</b>, last {days:g}d", ""]
 
@@ -1584,9 +1586,11 @@ def _handle_speed(text: str) -> None:
         lines.append("")
 
     # Per-wallet: which wallets are reachable at a price worth paying.
-    per = shadow_quote.by_wallet(scoped)
+    per = shadow_quote.by_wallet(rows, known=known)
     if per:
         lines.append("<b>Worst entry penalty by wallet</b>")
+        lines.append("  <i>reachability, not a ranking: most rows here are "
+                     "one or two samples</i>")
         for d in per[:8]:
             thin = " <i>(thin)</i>" if d["thin"] else ""
             lat = (f" · {_esc(_fmt_secs(d['latency_p50_s']))} "
@@ -1602,8 +1606,9 @@ def _handle_speed(text: str) -> None:
     # The counterfactual book, if any settled copies have a quote to re-price.
     try:
         from src.copy_trading import virtual_ledger
-        vl = virtual_ledger.replay(CONFIG.copy_paper_b_ledger,
-                                   quote_rows=scoped)
+        vl = virtual_ledger.replay(
+            CONFIG.copy_paper_b_ledger,
+            quote_rows=shadow_quote.apply_coverage_filter(rows, known=known))
         # A counterfactual ROI off a handful of matched copies is noise wearing
         # a percentage sign. Mirrors the repo's thin-sample band (MATURITY_THIN).
         if vl["n_matched"] < 5:
