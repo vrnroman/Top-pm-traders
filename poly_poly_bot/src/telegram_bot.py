@@ -50,6 +50,7 @@ BOT_MENU_COMMANDS: list[dict] = [
     {"command": "history", "description": "Last 10 copy trades"},
     {"command": "check", "description": "Verify trading setup (read-only, no orders)"},
     {"command": "speed", "description": "Pre-flip: how fast am I told + how much worse is my entry price"},
+    {"command": "zset", "description": "Set Z: the only wallets real money may follow"},
     {"command": "live", "description": "The real-money interlock: status, or /live CONFIRM to arm"},
     {"command": "setkey", "description": "Rotate/clear in-memory private key (e.g. /setkey clear CONFIRM)"},
     {"command": "slice", "description": "Cost-slice @net table for a paper book (/slice A|B)"},
@@ -299,6 +300,8 @@ def _handle_command(text: str):
         _handle_check()
     elif text.startswith("/speed"):
         _handle_speed(text)
+    elif text.startswith("/zset"):
+        _handle_zset(text)
     elif text.startswith("/live"):
         _handle_live(text)
     elif text.startswith("/setkey"):
@@ -1640,6 +1643,59 @@ def _handle_speed(text: str) -> None:
     lines.append("<i>Measurement only, no order was placed. Book A models a "
                  "lagged fill and censors the copies whose price ran away; "
                  "these rows price every detected trade, including those.</i>")
+    _send_chunked("\n".join(lines))
+
+
+def _handle_zset(text: str) -> None:
+    """/zset [drop WALLET] — the only wallets real money may ever follow.
+
+    Read-only by default. `drop` evicts, and eviction is deliberately the one
+    unguarded operation: getting into Z needs the go-live gate plus the
+    concentration rail, getting out needs one word, because anything that only
+    reduces live exposure should be easy.
+    """
+    from src.copy_trading import live_mode, zset
+
+    parts = text.split()
+    if len(parts) >= 3 and parts[1].lower() == "drop":
+        target = parts[2]
+        matches = [w for w in zset.wallets()
+                   if w.lower().startswith(target.lower())]
+        if len(matches) != 1:
+            send_message(f"No unique set-Z wallet matches "
+                         f"<code>{_esc(target)}</code> "
+                         f"({len(matches)} match(es)).")
+            return
+        zset.evict(matches[0], reason="telegram /zset drop")
+        send_message(f"🚫 <b>Evicted from set Z</b>\n<code>{_esc(matches[0])}</code>\n"
+                     f"Real money can no longer follow it. "
+                     f"{len(zset.wallets())} wallet(s) left in Z.")
+        return
+
+    wallets = zset.wallets()
+    st = live_mode.status()
+    lines = ["🅩 <b>Set Z</b>, the only wallets real money may follow", ""]
+    if not wallets:
+        lines.append("<b>Empty.</b> Nothing has cleared the gate.")
+        lines.append("")
+        lines.append("<i>An empty Z is a safe state, not a broken one: with "
+                     "nothing in it, arming trades nothing.</i>")
+    else:
+        for w in wallets:
+            tier = promotion_state.promoted_tier_of(w, scope=zset.SCOPE) or "?"
+            lines.append(f"  <code>{_esc(w)}</code>  tier {_esc(str(tier))}")
+        lines.append("")
+        lines.append(f"<i>{len(wallets)} wallet(s). Admitted by the go-live "
+                     f"gate plus the concentration rail, never by hand.</i>")
+    lines.append("")
+    lines.append("<b>Status</b>")
+    lines.append(f"  {'🔴 LIVE' if not st['preview'] else '🟢 PREVIEW'}, "
+                 f"real orders {'ENABLED' if not st['preview'] else 'blocked'}")
+    for r in live_mode.blocking_reasons():
+        lines.append(f"  • {_esc(r)}")
+    lines.append("")
+    lines.append("<code>/zset drop &lt;wallet&gt;</code> to remove one · "
+                 "<code>/live</code> for the interlock")
     _send_chunked("\n".join(lines))
 
 

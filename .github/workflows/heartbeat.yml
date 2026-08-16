@@ -1,0 +1,119 @@
+name: Heartbeat
+
+# The one watcher that lives OUTSIDE the VM.
+#
+# Every existing health signal (the log line, the disk watch, the live guard)
+# runs inside the process that is the single thing capable of going dark. The
+# VM has previously gone network-dead for hours: metadata server unreachable,
+# SSH refused, container silently not running. With no positions open that
+# cost nothing. With real money in flight it costs whatever the market does
+# while the bot is blind and nobody is told.
+#
+# So this asks from the outside, on a schedule, and speaks ONLY when something
+# is wrong. A watcher that reports "all good" on a timer is one whose silence
+# carries no information.
+#
+# It uses the same GCP service account and the same IAP path the deploy
+# already uses, so it introduces no new infrastructure and no new secret.
+
+on:
+  schedule:
+    # Every 30 minutes. Tight enough that a dead box is noticed within one
+    # market move, loose enough to stay far inside free-tier minutes.
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: heartbeat
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Ask the VM whether it is alive and trading
+        id: probe
+        run: |
+          set +e
+          OUT=$(gcloud compute ssh poly-poly-bot \
+            --zone=asia-northeast1-a --project=roman-vm --tunnel-through-iap \
+            --command='
+              set -e
+              # Is the container up at all?
+              UP=$(docker inspect -f "{{.State.Running}}" poly-poly-bot 2>/dev/null || echo false)
+              # How long since it last said anything? A live process that has
+              # gone quiet is as bad as one that is gone.
+              LAST=$(docker logs --tail 1 --timestamps poly-poly-bot 2>&1 | head -1 | cut -d" " -f1)
+              # Is it armed for real money, and does it still hold set Z?
+              ARMED=$(cat ~/app/data/live_arm.json 2>/dev/null | tr -d "\n" || echo "none")
+              ZN=$(python3 -c "import json,sys;print(len(json.load(open(\"$HOME/app/data/promoted_wallets_z.json\"))))" 2>/dev/null || echo 0)
+              DISK=$(df -h / | awk "NR==2{print \$5}")
+              echo "up=$UP last=$LAST arm=$ARMED z=$ZN disk=$DISK"
+            ' 2>&1)
+          RC=$?
+          set -e
+          echo "raw<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$OUT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "rc=$RC" >> "$GITHUB_OUTPUT"
+          echo "$OUT"
+
+      - name: Decide, and speak only if something is wrong
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RAW: ${{ steps.probe.outputs.raw }}
+          RC: ${{ steps.probe.outputs.rc }}
+        run: |
+          python3 - <<'PY'
+          import os, re, urllib.parse, urllib.request
+
+          raw, rc = os.environ.get("RAW", ""), os.environ.get("RC", "1")
+          problems = []
+
+          if rc != "0" or "up=" not in raw:
+              # This is the failure the whole workflow exists for: the box did
+              # not answer. Nothing inside it could ever have told us.
+              problems.append("the VM did not answer a health probe at all "
+                              "(this is the network-dead failure mode)")
+          else:
+              m = dict(re.findall(r"(\w+)=(\S+)", raw))
+              if m.get("up", "false").lower() != "true":
+                  problems.append(f"container is not running (up={m.get('up')})")
+              disk = m.get("disk", "0%").rstrip("%")
+              if disk.isdigit() and int(disk) >= 90:
+                  problems.append(f"disk at {disk}% (it has filled before)")
+              # Armed for real money is not itself a problem, but an armed box
+              # that has gone quiet is the worst combination, so say so.
+              if '"armed": true' in raw.replace("'", '"'):
+                  problems.append("NOTE: this box is ARMED for real orders")
+
+          if not problems:
+              print("healthy, staying silent")
+              raise SystemExit(0)
+
+          token, chat = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT")
+          text = ("🚨 <b>Heartbeat failed</b>\n"
+                  + "\n".join(f"• {p}" for p in problems)
+                  + "\n\n<i>Checked from GitHub Actions, outside the VM.</i>")
+          print(text)
+          if not token or not chat:
+              print("no telegram secret configured; failing loudly instead")
+              raise SystemExit(1)
+          data = urllib.parse.urlencode(
+              {"chat_id": chat, "text": text, "parse_mode": "HTML"}).encode()
+          urllib.request.urlopen(
+              f"https://api.telegram.org/bot{token}/sendMessage", data=data,
+              timeout=20).read()
+          raise SystemExit(1)
+          PY

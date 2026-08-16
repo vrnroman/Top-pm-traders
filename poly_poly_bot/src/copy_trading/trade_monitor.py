@@ -228,10 +228,16 @@ async def fetch_all_trader_activities() -> list[DetectedTrade]:
     # Tracked tier wallets plus any runtime-promoted wallets (one-tap Telegram
     # promote), so a promotion is detected on the next poll without a restart.
     # Deduped case-insensitively, preserving order.
-    from src.copy_trading import promotion_state
+    from src.copy_trading import promotion_state, zset
     seen: set[str] = set()
     addresses: list[str] = []
-    for a in list(CONFIG.user_addresses) + promotion_state.promoted_wallets():
+    # Set Z, not the legacy promoted store. That store is hand-writable and
+    # held two wallets with 2 and 7 clean-era settled copies, so this line
+    # would have put real capital behind them the moment PREVIEW went off.
+    # Z's only writer is the go-live gate (see zset.admit). Unconditional, NOT
+    # branched on preview: the path that gets rehearsed has to be the path
+    # that runs.
+    for a in list(CONFIG.user_addresses) + zset.wallets():
         if a and a.lower() not in seen:
             seen.add(a.lower())
             addresses.append(a)

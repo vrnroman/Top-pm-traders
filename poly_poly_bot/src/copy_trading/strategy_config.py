@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 from src.config_validators import parse_addresses, validate_address
-from src.copy_trading import promotion_state
+from src.copy_trading import promotion_state, zset
 
 StrategyTier = Literal["1a", "1b", "1c", "legacy"]
 
@@ -308,7 +308,9 @@ def get_all_tiered_wallets() -> list[str]:
     if TIER_1B.enabled:
         for w in TIER_1B.wallets:
             seen.add(w.lower())
-    for w in promotion_state.promoted_wallets():
+    # Set Z only. See trade_monitor: the legacy promoted store is hand-writable
+    # and is no longer a source of live-traded wallets.
+    for w in zset.wallets():
         seen.add(w.lower())
     return list(seen)
 

@@ -77,6 +77,53 @@ def _get_shadow_observer():
     return _shadow_observer_cache
 
 
+def _fast_prober_loop():
+    """Per-wallet fast detection for set Z (see fast_prober).
+
+    Deliberately NOT wired into either paper book: it would change what the
+    frozen 2026-08-22 sample admits. Its output goes to the shadow-quote
+    measurement, so set Z gets an entry-price number taken at ITS detection
+    speed (seconds) rather than the 500-wallet harness's (~5 minutes).
+    """
+    from src.copy_trading import fast_prober, zset
+
+    observer = _get_shadow_observer()
+    if observer is None:
+        logger.info("[fast] shadow observer unavailable; prober idle")
+        return
+    logger.info(f"[fast] set-Z prober started (interval "
+                f"{fast_prober.DEFAULT_INTERVAL_S:.0f}s, Z holds "
+                f"{len(zset.wallets())} wallet(s), measurement only)")
+    fast_prober.run_forever(
+        _shutdown_event,
+        on_trades=fast_prober.make_shadow_sink(observer))
+
+
+def _live_guard_loop():
+    """Watch real money while nobody is looking (see live_guard).
+
+    Detectors run in preview too, which is the whole point: the failure modes
+    get exercised before there is money on them. The acting half is gated on
+    the runtime arm.
+    """
+    from src.copy_trading import live_guard
+
+    interval = 300.0
+    logger.info("[guard] live guard started (detect always, act only when armed)")
+    while not _shutdown_event.is_set():
+        try:
+            from src.copy_trading.inventory import get_open_positions
+            positions = list(get_open_positions() or [])
+        except Exception:
+            positions = []
+        try:
+            live_guard.run_once(positions=positions,
+                                send=telegram_bot.send_message)
+        except Exception as exc:
+            logger.error(f"[guard] pass failed: {exc}")
+        _shutdown_event.wait(interval)
+
+
 def _log_copy_cycle_diagnostics(tag: str, summary) -> None:
     """One line of guardrail skips + one of detection-funnel rejects per cycle
     (only when nonzero) — shared by the A and B paper loops so the two books
@@ -1154,6 +1201,15 @@ async def main():
         logger.info("Wallet-discovery thread started")
     else:
         logger.info("Wallet discovery disabled (set WALLET_DISCOVERY_ENABLED=true)")
+
+    # Set-Z fast detection + the real-money guard. Both run in PREVIEW too:
+    # the prober because its whole job is measuring what Z's detection speed
+    # would be, and the guard because a failure mode you only exercise once
+    # money is on it is one you have never exercised.
+    threading.Thread(target=_fast_prober_loop, daemon=True,
+                     name="fast-prober").start()
+    threading.Thread(target=_live_guard_loop, daemon=True,
+                     name="live-guard").start()
 
     # Start Strategy #1 (Copy Trading) natively via asyncio
     s1_crashed = False
