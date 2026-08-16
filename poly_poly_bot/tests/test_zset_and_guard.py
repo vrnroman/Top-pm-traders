@@ -403,3 +403,126 @@ def test_the_z_slice_is_withheld_while_thin(tmp_path, monkeypatch):
     assert "Set Z, detected per-wallet" in out
     assert "Too thin to report" in out
     assert "—" not in out and "–" not in out
+
+
+# --------------------------------------------------------------------------- #
+# Round-1 verification: five reproduced defects, pinned
+# --------------------------------------------------------------------------- #
+
+def test_a_z_wallet_resolves_to_a_tier(tmp_path, monkeypatch):
+    """D1, the inversion. `get_wallet_tier` read the LEGACY store, so Z
+    wallets returned None and `trade_executor` skipped them before pricing,
+    while the 21 env wallets kept their tiers and were the only ones that
+    would have traded. Exactly backwards."""
+    from src.copy_trading import strategy_config
+    zset.admit("0xZWALLET", ready=True, checks=[], settled=[P(ideal=6.0)] * 30)
+    assert strategy_config.get_wallet_tier("0xZWALLET") == "1b"
+
+
+def test_a_non_z_wallet_has_no_tier_even_if_env_lists_it(monkeypatch):
+    """The env tier lists must not grant live access on their own."""
+    from src.copy_trading import strategy_config
+    monkeypatch.setattr(strategy_config, "_wallet_tier_map", {"0xenvonly": "1a"})
+    assert strategy_config.get_wallet_tier("0xENVONLY") is None
+
+
+def test_the_live_universe_is_z_only():
+    """D1b. `user_addresses` resolved to 21 ungated env wallets; leaving them
+    in the live list made Z decorative."""
+    import ast
+    import inspect
+
+    from src.copy_trading import strategy_config, trade_monitor
+
+    def _reads(fn, dotted):
+        """Does the function actually READ this attribute (not a comment)?"""
+        tree = ast.parse(inspect.getsource(fn).lstrip())
+        want = dotted.split(".")[-1]
+        return any(isinstance(n, ast.Attribute) and n.attr == want
+                   for n in ast.walk(tree))
+
+    assert not _reads(trade_monitor.fetch_all_trader_activities, "user_addresses")
+    assert _reads(trade_monitor.fetch_all_trader_activities, "wallets")
+    src = inspect.getsource(strategy_config.get_all_tiered_wallets)
+    assert "TIER_1A.wallets" not in src and "TIER_1B.wallets" not in src
+
+
+def test_a_blacklisted_wallet_cannot_enter_z(tmp_path, monkeypatch):
+    """D2. 0x4a3f86ed was admitted while carrying an ACTIVE auto-demote
+    (n=15, roi -6.4%, until 2026-08-18). It slipped the contradiction rail
+    because the demotion had already removed its clean-era rows, so the rail
+    saw 'not enough evidence to contradict'. Admitting on headline ROI over
+    the system's own recorded verdict is the failure."""
+    from src.copy_trading import promotion_state
+    promotion_state.add_blacklist("0xDEMOTED", until=time.time() + 86400,
+                                  reason="auto-demote")
+    ok, checks = zset.admit("0xDEMOTED", ready=True, checks=[],
+                            settled=[P(ideal=9.0)] * 40)
+    assert ok is False
+    assert any("auto-demote" in lab and not good for lab, good, _d in checks)
+    assert zset.wallets() == []
+
+
+def test_the_contradiction_rail_is_a_property_of_z_not_a_script():
+    """It used to live only in `scripts/seed_zset.py`, so it protected one
+    script run rather than the set."""
+    ok, detail = zset.contradiction_check(-0.19, 15)
+    assert ok is False and "-19%" in detail
+    ok2, _ = zset.contradiction_check(-0.19, 3)      # too thin to contradict
+    assert ok2 is True
+    # and admit enforces it
+    admitted, _ = zset.admit("0xCONTRA", ready=True, checks=[],
+                             settled=[P(ideal=6.0)] * 30,
+                             other_book_roi=-0.19, other_book_n=15)
+    assert admitted is False
+
+
+def test_a_hand_written_z_entry_is_ignored(tmp_path):
+    """Secondary finding: the store is a file on a box. A hand-added record
+    lacks the gate source and must be inert, not tradable."""
+    from src.copy_trading import promotion_state
+    promotion_state.add_promoted("0xATTACKER", tier="1a", source="telegram",
+                                 scope=zset.SCOPE)
+    assert zset.wallets() == [], "a non-gate record reached the live list"
+    zset.admit("0xLEGIT", ready=True, checks=[], settled=[P(ideal=6.0)] * 30)
+    assert [w.lower() for w in zset.wallets()] == ["0xlegit"]
+
+
+def test_the_guard_loop_reads_functions_that_exist():
+    """D3. The loop imported `inventory.get_open_positions`, which does not
+    exist; the ImportError was swallowed and every detector became
+    structurally incapable of firing while the log said the guard was up."""
+    from src.copy_trading import inventory, trade_queue
+    assert hasattr(inventory, "get_positions")
+    assert hasattr(trade_queue, "peek_pending_orders")
+    import inspect
+
+    import main
+    src = inspect.getsource(main._live_guard_loop)
+    assert "get_open_positions" not in src
+    assert "peek_pending_orders" in src and "get_positions" in src
+    # and a failed read must be logged, not silently swallowed
+    assert "could not read inventory" in src
+
+
+def test_the_drills_do_not_write_the_real_guard_state():
+    """D5. Running the drills flipped the live `live_guard.json` edge state,
+    so the next production pass sent the owner 'resolved' messages for
+    conditions that never happened. A drill that alerts the owner is worse
+    than no drill."""
+    import inspect
+    src = open("scripts/golive_drills.py", encoding="utf-8").read()
+    assert "tempfile.mkdtemp" in src
+    assert "live_guard.CONFIG.data_dir = sandbox" in src
+    assert "CONFIG.data_dir = real_data_dir" in src
+
+
+def test_the_drills_never_call_arm():
+    """Inert today only because the env key is unset; it would arm the bot
+    the day that key is set, against the script's own banner."""
+    import ast
+    tree = ast.parse(open("scripts/golive_drills.py", encoding="utf-8").read())
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute) and n.func.attr == "arm"]
+    assert calls == [], "the drills must not be able to arm the bot"

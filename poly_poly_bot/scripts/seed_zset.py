@@ -112,27 +112,21 @@ def main(argv=None) -> int:
             ideal_roi=ideal_roi, n_ideal_settled=n_ideal,
             book_corr=book_corr, **honest)
 
-        # Rail 2: the other book must not contradict it on the same window.
+        # Both extra rails now live in zset.admit, so this script cannot pass
+        # a wallet that admit() would refuse. It only supplies the evidence.
         a_settled, _ = _wallet_rows(a_positions, w)
         a_roi, a_n = _clean_roi(a_settled, era)
-        if a_n >= CONTRADICTION_MIN_N and a_roi is not None and a_roi < 0:
-            ready = False
-            checks = list(checks) + [
-                ("book A does not contradict it", False,
-                 f"book A is {a_roi * 100:+.0f}% over {a_n} clean copies")]
-        elif a_n >= CONTRADICTION_MIN_N:
-            checks = list(checks) + [
-                ("book A does not contradict it", True,
-                 f"book A {a_roi * 100:+.0f}% over {a_n} clean copies")]
-        else:
-            checks = list(checks) + [
-                ("book A does not contradict it", True,
-                 f"only {a_n} clean copies in book A, not enough to contradict")]
-
         conc_ok, conc_detail = zset.concentration_check(settled, min_opened_ts=era)
+        contra_ok, contra_detail = zset.contradiction_check(a_roi, a_n,
+                                                            CONTRADICTION_MIN_N)
+        bl = zset._blacklist_block(w)
         all_checks = list(checks) + [
-            ("still positive with its best 3 copies deleted", conc_ok, conc_detail)]
-        ok = bool(ready and conc_ok)
+            ("still positive with its best 3 copies deleted", conc_ok, conc_detail),
+            ("the other book does not contradict it", contra_ok, contra_detail),
+            ("not under the bot's own auto-demote", bl is None,
+             bl or "no active demotion"),
+        ]
+        ok = bool(ready and conc_ok and contra_ok and bl is None)
         trimmed, _k, _d = zset.trimmed_roi(settled, min_opened_ts=era)
         n_fail = sum(1 for c in all_checks if not c[1])
         row = (w, ok, n_fail, len(all_checks), all_checks, ideal_roi, n_ideal,
@@ -155,8 +149,10 @@ def main(argv=None) -> int:
         for w, _ok, _nf, _nt, chks, _roi, _n, _tr, settled in admitted:
             gate_checks = [c for c in chks
                            if not c[0].startswith("still positive with its best")]
+            a_settled, _ = _wallet_rows(a_positions, w)
+            a_roi, a_n = _clean_roi(a_settled, era)
             zset.admit(w, ready=True, checks=gate_checks, settled=settled,
-                       era_floor=era)
+                       era_floor=era, other_book_roi=a_roi, other_book_n=a_n)
 
     print(f"=== ADMITTED TO SET Z: {len(admitted)} ===")
     for w, ok, nf, nt, checks, roi, n, trimmed, _s in admitted:

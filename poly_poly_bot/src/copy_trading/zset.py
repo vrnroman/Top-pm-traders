@@ -46,8 +46,22 @@ TRIMMED_MIN_ROI = 0.0
 
 
 def wallets() -> list[str]:
-    """The wallets real money may follow. Empty is a valid, safe answer."""
-    return promotion_state.promoted_wallets(SCOPE)
+    """The wallets real money may follow. Empty is a valid, safe answer.
+
+    Only gate-written records count. The store is a file on a box, so a
+    hand-edited entry is possible; ignoring anything without a gate source
+    means such an entry is inert rather than tradable.
+    """
+    out = []
+    for key, rec in promotion_state.promoted_map(SCOPE).items():
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("source") not in GATE_SOURCES:
+            logger.warn(f"[zset] ignoring {key[:12]}: not written by the gate "
+                        f"(source={rec.get('source')!r})")
+            continue
+        out.append(rec.get("wallet") or key)
+    return out
 
 
 def wallet_set() -> set:
@@ -118,9 +132,57 @@ def concentration_check(settled: Iterable, *,
                 f"{n_dropped} deleted")
 
 
+# Only records written by the gate count. A hand-added entry lacks this and is
+# ignored by `wallets()`, so editing the JSON by hand cannot put a wallet in
+# front of real money even though the file is on a box the owner can write.
+GATE_SOURCES = ("gate", "telegram-gate")
+
+
+def _blacklist_block(wallet: str, now: Optional[float] = None) -> Optional[str]:
+    """Is this wallet under the bot's OWN active demotion?
+
+    The bot auto-demotes wallets it has decided against and records that in
+    `copy_blacklist.json`. Admitting one of those to the real-money set means
+    the headline ROI overrode the system's own recorded verdict, which is
+    exactly what happened: 0x4a3f86ed was admitted while carrying an active
+    auto-demote (n=15, roi -6.4%) that ran to 2026-08-18. It slipped the
+    contradiction rail because the demotion had removed its clean-era rows
+    from book A, so the rail saw "not enough evidence to contradict".
+    """
+    from src.copy_trading import promotion_state
+    for scope in ("", "b"):
+        try:
+            if promotion_state.is_blacklisted(wallet, now=now, scope=scope):
+                rec = promotion_state.blacklist_map(scope).get((wallet or "").lower(), {})
+                return (f"under an active auto-demote in book "
+                        f"{scope or 'A'} ({rec.get('reason', 'no reason')}, "
+                        f"n={rec.get('n_closed', '?')}, roi={rec.get('roi', '?')})")
+        except Exception:
+            continue
+    return None
+
+
+def contradiction_check(a_roi: Optional[float], a_n: int,
+                        min_n: int = 10) -> tuple[bool, str]:
+    """Does the OTHER book disagree in sign on the same window?
+
+    Lives here rather than in the seeding script so it is a property of set Z
+    itself, not of one script's run.
+    """
+    if a_n < min_n or a_roi is None:
+        return (True, f"only {a_n} clean copies in the other book, "
+                      f"not enough to contradict")
+    if a_roi < 0:
+        return (False, f"the other book is {a_roi * 100:+.0f}% over {a_n} "
+                       f"clean copies")
+    return (True, f"the other book agrees at {a_roi * 100:+.0f}% over {a_n} copies")
+
+
 def admit(wallet: str, *, ready: bool, checks: list, settled: Iterable,
           era_floor: Optional[float] = None, tier: str = "1b",
-          source: str = "gate") -> tuple[bool, list]:
+          source: str = "gate",
+          other_book_roi: Optional[float] = None,
+          other_book_n: int = 0) -> tuple[bool, list]:
     """Admit a wallet to Z, but ONLY if the gate passed it and the rail holds.
 
     ``ready`` and ``checks`` come from ``promotion_gate.golive_check``. This
@@ -129,10 +191,23 @@ def admit(wallet: str, *, ready: bool, checks: list, settled: Iterable,
     gate. Returns ``(admitted, full_check_list)``.
     """
     conc_ok, conc_detail = concentration_check(settled, min_opened_ts=era_floor)
+    contra_ok, contra_detail = contradiction_check(other_book_roi, other_book_n)
+    bl = _blacklist_block(wallet)
     all_checks = list(checks) + [
         (f"still positive with its best {DROP_TOP_N} copies deleted",
-         conc_ok, conc_detail)]
+         conc_ok, conc_detail),
+        ("the other book does not contradict it", contra_ok, contra_detail),
+        ("not under the bot's own auto-demote", bl is None,
+         bl or "no active demotion"),
+    ]
 
+    if bl is not None:
+        logger.warn(f"[zset] {wallet[:12]} NOT admitted, {bl}")
+        return (False, all_checks)
+    if not contra_ok:
+        logger.info(f"[zset] {wallet[:12]} NOT admitted, contradiction: "
+                    f"{contra_detail}")
+        return (False, all_checks)
     if not ready:
         failed = [lab for lab, ok, _ in checks if not ok]
         logger.info(f"[zset] {wallet[:12]} NOT admitted, gate: {failed}")

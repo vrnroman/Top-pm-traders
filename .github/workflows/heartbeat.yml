@@ -90,6 +90,21 @@ jobs:
               m = dict(re.findall(r"(\w+)=(\S+)", raw))
               if m.get("up", "false").lower() != "true":
                   problems.append(f"container is not running (up={m.get('up')})")
+              # The quiet check. This was captured and never read, which made
+              # the header's own headline signal ("a live process that has
+              # gone quiet is as bad as one that is gone") a lie.
+              last = m.get("last", "")
+              try:
+                  from datetime import datetime, timezone
+                  t = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                  quiet_min = (datetime.now(timezone.utc) - t).total_seconds() / 60
+                  if quiet_min > 45:
+                      problems.append(
+                          f"container is running but has said nothing for "
+                          f"{quiet_min:.0f} minutes")
+              except Exception:
+                  problems.append("could not read the last log timestamp "
+                                  f"({last!r}); treating that as a failure")
               disk = m.get("disk", "0%").rstrip("%")
               if disk.isdigit() and int(disk) >= 90:
                   problems.append(f"disk at {disk}% (it has filled before)")
@@ -108,7 +123,13 @@ jobs:
                   + "\n\n<i>Checked from GitHub Actions, outside the VM.</i>")
           print(text)
           if not token or not chat:
-              print("no telegram secret configured; failing loudly instead")
+              # This repo has already shipped one undeliverable alert (the
+              # 08-22 verdict memo). A red Actions run is the fallback, but it
+              # is a strictly worse channel than the phone, so name the gap
+              # rather than letting a green-looking config hide it.
+              print("::error::heartbeat detected a problem but CANNOT reach "
+                    "Telegram: repository secrets TELEGRAM_BOT_TOKEN and "
+                    "TELEGRAM_CHAT_ID are not set. The failure above is real.")
               raise SystemExit(1)
           data = urllib.parse.urlencode(
               {"chat_id": chat, "text": text, "parse_mode": "HTML"}).encode()

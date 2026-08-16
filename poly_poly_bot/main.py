@@ -108,19 +108,40 @@ def _live_guard_loop():
     """
     from src.copy_trading import live_guard
 
+    from src.copy_trading import trade_queue
+    from src.copy_trading.inventory import get_positions
+
     interval = 300.0
+    crash_streak = 0
     logger.info("[guard] live guard started (detect always, act only when armed)")
     while not _shutdown_event.is_set():
+        # Gather the REAL inputs. The first version of this loop imported a
+        # function that does not exist, swallowed the ImportError silently, and
+        # called run_once with nothing, so every detector was structurally
+        # incapable of firing while the logs said the guard was running. An
+        # import that fails here must be loud and must count as a failed pass.
+        positions, pending = [], []
         try:
-            from src.copy_trading.inventory import get_open_positions
-            positions = list(get_open_positions() or [])
-        except Exception:
-            positions = []
-        try:
-            live_guard.run_once(positions=positions,
-                                send=telegram_bot.send_message)
+            positions = list(get_positions().values())
         except Exception as exc:
-            logger.error(f"[guard] pass failed: {exc}")
+            logger.error(f"[guard] could not read inventory: {exc}")
+        try:
+            pending = list(trade_queue.peek_pending_orders())
+        except Exception as exc:
+            logger.error(f"[guard] could not read pending orders: {exc}")
+
+        try:
+            out = live_guard.run_once(
+                positions=positions, pending_orders=pending,
+                crash_streak=crash_streak,
+                send=telegram_bot.send_message)
+            crash_streak = 0
+            if out.get("stuck_orders") or out.get("unredeemed"):
+                logger.info(f"[guard] {out['stuck_orders']} stuck order(s), "
+                            f"{out['unredeemed']} unredeemed")
+        except Exception as exc:
+            crash_streak += 1
+            logger.error(f"[guard] pass failed ({crash_streak} in a row): {exc}")
         _shutdown_event.wait(interval)
 
 

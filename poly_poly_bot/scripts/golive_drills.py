@@ -51,8 +51,12 @@ def drill_interlock_is_shut() -> None:
     reasons = live_mode.blocking_reasons()
     check("it can say what is blocking it", len(reasons) > 0,
           f"{len(reasons)} blocker(s)")
-    ok, detail = live_mode.arm(reason="drill: this must be refused")
-    check("arming is refused in this configuration", ok is False, detail)
+    # Deliberately NOT calling live_mode.arm(): it is inert today only because
+    # the env key is unset, and this script's own banner promises it arms
+    # nothing. Assert the refusal from the interlock's state instead.
+    blocked = bool(live_mode.blocking_reasons())
+    check("arming cannot succeed in this configuration", blocked,
+          "; ".join(live_mode.blocking_reasons())[:90])
 
 
 def drill_set_z_is_gated() -> None:
@@ -177,14 +181,32 @@ def drill_caps_are_sane() -> None:
 
 
 def main() -> int:
+    # Run the guard drills against a THROWAWAY data dir. The first version ran
+    # them against the live one, which flipped live_guard.json's edge state to
+    # true; the next production pass then saw empty inputs and sent the owner
+    # "resolved" messages for conditions that never happened. A drill that
+    # alerts the owner is worse than no drill.
+    import tempfile
+    real_data_dir = CONFIG.data_dir
+    sandbox = tempfile.mkdtemp(prefix="golive-drill-")
+
     print("=" * 66)
-    print("GO-LIVE DRILLS — nothing here places an order or arms anything")
+    print("GO-LIVE DRILLS, nothing here places an order or arms anything")
+    print(f"guard drills sandboxed to {sandbox}")
     print("=" * 66)
+    # These read live state on purpose: they answer "is the real box shut".
     drill_interlock_is_shut()
     drill_set_z_is_gated()
     drill_concentration_rail()
-    drill_guard_detects_without_acting()
-    drill_self_disarm_triggers()
+    # These MUTATE watcher state, so they run against the sandbox only.
+    try:
+        CONFIG.data_dir = sandbox
+        live_guard.CONFIG.data_dir = sandbox
+        drill_guard_detects_without_acting()
+        drill_self_disarm_triggers()
+    finally:
+        CONFIG.data_dir = real_data_dir
+        live_guard.CONFIG.data_dir = real_data_dir
     drill_recovery_paths_exist()
     drill_caps_are_sane()
 

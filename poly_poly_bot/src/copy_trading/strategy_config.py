@@ -301,18 +301,11 @@ def get_all_tiered_wallets() -> list[str]:
     the promoted store, so a promotion takes effect on the next cycle without a
     restart — exactly as if the wallet had been added to STRATEGY_1B_WALLETS.
     """
-    seen: set[str] = set()
-    if TIER_1A.enabled:
-        for w in TIER_1A.wallets:
-            seen.add(w.lower())
-    if TIER_1B.enabled:
-        for w in TIER_1B.wallets:
-            seen.add(w.lower())
-    # Set Z only. See trade_monitor: the legacy promoted store is hand-writable
-    # and is no longer a source of live-traded wallets.
-    for w in zset.wallets():
-        seen.add(w.lower())
-    return list(seen)
+    # SET Z ONLY. The env tier lists (STRATEGY_1A/1B_WALLETS) are NOT added:
+    # leaving 21 ungated env wallets in the live universe would be a worse
+    # version of the hazard Z exists to remove, and it is exactly what the
+    # first version of this change did.
+    return [w.lower() for w in zset.wallets()]
 
 
 # Wallet -> tier mapping
@@ -332,12 +325,23 @@ _build_wallet_tier_map()
 def get_wallet_tier(address: str) -> Optional[StrategyTier]:
     """Look up which tier a wallet belongs to (case-insensitive).
 
-    Falls back to the runtime promoted store, so a one-tap-promoted wallet routes
-    and sizes at its promoted tier (default 1b) without a restart."""
-    t = _wallet_tier_map.get(address.lower())
+    Resolves against SET Z, not the legacy promoted store. This function is
+    what `trade_executor` uses to route and size a live copy, and a wallet with
+    no tier is skipped outright, so reading the wrong store here silently
+    inverted the whole point of Z: its wallets had no tier and were dropped
+    before pricing, while the 21 env-configured wallets kept their tiers and
+    were the only ones that would have traded.
+
+    The static env map is still consulted, but ONLY for wallets that are in Z,
+    so `STRATEGY_1A/1B_WALLETS` can set a tier without granting live access on
+    its own."""
+    key = (address or "").lower()
+    if key not in {w.lower() for w in zset.wallets()}:
+        return None
+    t = _wallet_tier_map.get(key)
     if t is not None:
         return t
-    return promotion_state.promoted_tier_of(address)
+    return promotion_state.promoted_tier_of(address, scope=zset.SCOPE)
 
 
 def get_tier_config(tier: StrategyTier) -> TierConfig:

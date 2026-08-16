@@ -237,7 +237,10 @@ async def fetch_all_trader_activities() -> list[DetectedTrade]:
     # Z's only writer is the go-live gate (see zset.admit). Unconditional, NOT
     # branched on preview: the path that gets rehearsed has to be the path
     # that runs.
-    for a in list(CONFIG.user_addresses) + zset.wallets():
+    # SET Z ONLY. `CONFIG.user_addresses` is dropped deliberately: it resolves
+    # to 21 wallets from STRATEGY_1A/1B_WALLETS in .env, none of which passed
+    # the gate, and leaving them here made Z decorative.
+    for a in zset.wallets():
         if a and a.lower() not in seen:
             seen.add(a.lower())
             addresses.append(a)
