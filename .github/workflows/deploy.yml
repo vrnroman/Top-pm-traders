@@ -118,10 +118,23 @@ jobs:
           # (s-log7q, 2026-08-02; default 7d would have fired the one-shot memo
           # 20 days early). Inert once the memo fires — verdict_sent flips.
           ensure_env AB_RACE_VERDICT_DAYS 27
-          # Bankroll governor (run s-yr3unh, 2026-09-05): every live cap is a
-          # fraction of this number and live sizing is CLOSED without it. The
-          # owner's stated first budget: 400 SGD, about 310 USD.
-          ensure_env LIVE_BUDGET_USD 310
+          # Bankroll governor (run s-yr3unh, 2026-09-05). Every live cap is a
+          # fraction of this number and live sizing is CLOSED without it.
+          # Sized to the money that is ACTUALLY in the funder wallet (80.41
+          # pUSD), not to the 400 SGD plan: the governor takes
+          # min(stated, on-chain) anyway, and stating a number the wallet does
+          # not hold would only make the panels lie.
+          #
+          # The fractions are set so a ticket clears Polymarket's $5 order
+          # minimum with headroom. At $80: copy $6.40, day $40, open at once
+          # $64 (about ten positions), floor $56. If the balance falls under
+          # about $62 a copy stops clearing $5 and the governor refuses rather
+          # than quietly trading a size nobody chose.
+          ensure_env LIVE_BUDGET_USD 80
+          ensure_env LIVE_BUDGET_PER_COPY_FRAC 0.08
+          ensure_env LIVE_BUDGET_DAILY_FRAC 0.50
+          ensure_env LIVE_BUDGET_EXPOSURE_FRAC 0.80
+          ensure_env LIVE_BUDGET_DRAWDOWN_FRAC 0.30
           secret_env CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
           secret_env LANGFUSE_PUBLIC_KEY "$LANGFUSE_PUBLIC_KEY"
           secret_env LANGFUSE_SECRET_KEY "$LANGFUSE_SECRET_KEY"

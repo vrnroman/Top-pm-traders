@@ -218,7 +218,9 @@ async def _periodic_loop() -> None:
             if not CONFIG.preview_mode and now - last_redeem >= redeem_interval_s:
                 last_redeem = now
                 try:
-                    result = await check_and_redeem_positions(get_private_key())
+                    from src import telegram_bot as _tb
+                    result = await check_and_redeem_positions(
+                        get_private_key(), notify=_tb.send_message)
                     if result.count > 0:
                         logger.info(f"Redeemed {result.count} resolved position(s)")
                         await telegram.positions_redeemed(result.count, result.details)

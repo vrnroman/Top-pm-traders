@@ -154,7 +154,20 @@ async def _fetch_redeemable_positions(
     return redeemable
 
 
-async def check_and_redeem_positions(private_key: str) -> RedeemResult:
+# Conditions already reported, so a permanent situation speaks once, not every
+# 30 minutes forever.
+_warned: set = set()
+
+
+def _warn_once(key: str) -> bool:
+    if key in _warned:
+        return False
+    _warned.add(key)
+    return True
+
+
+async def check_and_redeem_positions(private_key: str,
+                                     notify=None) -> RedeemResult:
     """Check for resolved positions and redeem them on-chain.
 
     Args:
@@ -180,6 +193,31 @@ async def check_and_redeem_positions(private_key: str) -> RedeemResult:
 
     w3 = Web3(Web3.HTTPProvider(CONFIG.rpc_url))
     account = w3.eth.account.from_key(f"0x{private_key}")
+
+    # WHO HOLDS THE TOKENS decides who may redeem them. `redeemPositions`
+    # redeems for msg.sender, and these positions belong to the proxy while
+    # this transaction would be signed by the EOA. The call does NOT revert on
+    # a zero balance: it skips the burn, transfers nothing, and returns
+    # status 1, which this function's success branch would then book as a
+    # WINNING realized-P&L row that never happened, into the same ledger the
+    # honest-metrics floor reads. So refuse before sending anything, say it
+    # once, and leave the positions counted so the guard's unredeemed trigger
+    # can still fire.
+    if (CONFIG.proxy_wallet or "").lower() != account.address.lower():
+        if _warn_once("proxy-mismatch"):
+            msg = (f"{len(positions)} position(s) worth ${sum(p['shares'] * p['avgPrice'] for p in positions):,.2f} "
+                   f"at cost are held by the proxy wallet, but this bot signs as "
+                   f"a different address, so it cannot redeem them on chain. "
+                   f"Nothing was sent and no P&L was recorded. Claim them in the "
+                   f"Polymarket interface.")
+            logger.error(f"[redeemer] {msg}")
+            if notify is not None:
+                try:
+                    notify("💤 <b>Cannot redeem automatically.</b> " + msg)
+                except Exception as exc:
+                    logger.warn(f"[redeemer] notify failed: {exc}")
+        return RedeemResult()
+
     ctf = w3.eth.contract(
         address=Web3.to_checksum_address(CTF_CONTRACT),
         abi=CTF_REDEEM_ABI,

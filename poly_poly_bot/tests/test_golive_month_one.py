@@ -315,7 +315,7 @@ def test_live_panel_renders_the_governor(budget, monkeypatch):
 
 def test_deploy_sets_the_budget_default_only_when_absent():
     src = open("../.github/workflows/deploy.yml", encoding="utf-8").read()
-    assert "ensure_env LIVE_BUDGET_USD 310" in src
+    assert "ensure_env LIVE_BUDGET_USD" in src
 
 
 # --------------------------------------------------------------------------- #
@@ -1411,3 +1411,55 @@ def test_every_money_read_uses_the_shared_collateral_constant():
     funder = pathlib.Path("src/copy_trading/wallet_funder.py").read_text()
     assert "from src.constants import USDC_ADDRESS" in funder
     assert "_USDC_CURRENT" in funder
+
+
+# --------------------------------------------------------------------------- #
+# Going live on the real bankroll
+# --------------------------------------------------------------------------- #
+
+def test_the_redeemer_refuses_when_it_cannot_sign_for_the_holder(monkeypatch):
+    """redeemPositions does NOT revert on a zero balance: it transfers nothing
+    and returns status 1, which the success branch would book as a WINNING
+    realized row that never happened. Refuse before sending anything."""
+    from src.copy_trading import auto_redeemer, pnl
+    monkeypatch.setattr(auto_redeemer.CONFIG, "proxy_wallet",
+                        "0xb5c5d02e8662b14691273a22add8e2f7f3dcdbf1")
+    monkeypatch.setattr(auto_redeemer, "_warned", set())
+
+    async def positions(w, **k):
+        return [{"conditionId": "0xc1", "tokenId": "t1", "shares": 100.0,
+                 "avgPrice": 0.5, "curPrice": 1.0, "title": "m",
+                 "negRisk": False, "outcomeCount": 2}]
+    monkeypatch.setattr(auto_redeemer, "_fetch_redeemable_positions", positions)
+    wrote: list = []
+    monkeypatch.setattr(pnl, "append_realized", lambda r: wrote.append(r))
+    sent: list = []
+    # a key whose address is NOT the proxy
+    key = "ab" * 32
+    res = _run(auto_redeemer.check_and_redeem_positions(key, notify=sent.append))
+    assert res.count == 0
+    assert wrote == [], "no fabricated winning row"
+    assert len(sent) == 1 and "cannot redeem" in sent[0].lower()
+    # and it says it once, not every half hour forever
+    _run(auto_redeemer.check_and_redeem_positions(key, notify=sent.append))
+    assert len(sent) == 1
+
+
+def test_the_redeem_pass_is_wired_to_tell_the_owner():
+    import inspect
+
+    from src.copy_trading import runner
+    src = inspect.getsource(runner)
+    assert "check_and_redeem_positions(\n                        get_private_key(), notify=" in src \
+        or "notify=_tb.send_message" in src
+
+
+def test_the_deploy_sizes_the_governor_to_a_real_ticket():
+    """At the funded balance a copy must clear Polymarket's $5 order minimum,
+    or the governor refuses everything and the bot trades nothing."""
+    src = open("../.github/workflows/deploy.yml", encoding="utf-8").read()
+    assert "ensure_env LIVE_BUDGET_USD 80" in src
+    assert "ensure_env LIVE_BUDGET_PER_COPY_FRAC 0.08" in src
+    per_copy = 80 * 0.08
+    assert per_copy >= 5.0, "a ticket must clear the exchange minimum"
+    assert round(80 * 0.80 / per_copy) >= 5, "room for a handful of open positions"

@@ -28,12 +28,19 @@ def redeem_env(monkeypatch, tmp_path):
 
 
 def _mock_web3():
-    """A Web3 stand-in whose call chain yields a successful redemption."""
+    """A Web3 stand-in whose call chain yields a successful redemption.
+
+    The mocked signer address is the SAME address as the configured proxy:
+    `redeemPositions` redeems for msg.sender, so redemption is only possible
+    at all when the signer is the holder, and the redeemer now refuses
+    outright when it is not (run s-yr3unh).
+    """
     w3 = MagicMock()
     w3.eth.fee_history.return_value = {"baseFeePerGas": [100]}
     w3.eth.get_transaction_count.return_value = 0
     w3.eth.send_raw_transaction.return_value = MagicMock()
     w3.eth.wait_for_transaction_receipt.return_value = {"status": 1}
+    w3.eth.account.from_key.return_value.address = "0xproxy"
 
     Web3 = MagicMock()
     Web3.return_value = w3
