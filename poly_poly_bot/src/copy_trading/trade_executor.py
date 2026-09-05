@@ -386,6 +386,9 @@ async def place_trade_orders(
     for qt in sorted_trades:
         trade = qt.trade
         now_ms = time.time() * 1000
+        # Set before the try so the handler below can always ask whether a
+        # one-shot was spent on this trade.
+        canary_shot = False
 
         try:
             # --- Dedup ---
@@ -657,11 +660,28 @@ async def place_trade_orders(
             # CLOB, reply lost) or a failed state write must cost a re-arm,
             # never a second ticket.
             from src.copy_trading import canary
-            canary_shot = canary.is_staged()
+            # BUY only: the canary exists to price an ENTRY against the book,
+            # and an exit measures nothing it was built to answer.
+            canary_shot = canary.is_staged() and trade.side == "BUY"
             if canary_shot:
                 from src.copy_trading.order_executor import quote_copy_order
                 _cp = quote_copy_order(trade.side, trade.price, snapshot)
-                copy_size = canary.size_for(clob_client, trade.token_id, _cp or trade.price)
+                shot_size = canary.size_for(clob_client, trade.token_id, _cp or trade.price)
+                # The market's own minimum is a THIRD-PARTY number on the one
+                # path that would otherwise escape "one knob derives every live
+                # cap". A book quoting a 500-share minimum would have posted
+                # $255 against a $7.75 cap. It never raises the ticket: if this
+                # market cannot be entered inside the cap, the shot stays
+                # staged and waits for one that can.
+                if shot_size > gov.per_copy_usd:
+                    logger.skip(
+                        f"[canary] {trade.market[:40]}: this market's minimum order "
+                        f"${shot_size:.2f} is over the ${gov.per_copy_usd:.2f} per-copy "
+                        f"cap; staying staged for a market inside the cap")
+                    canary_shot = False
+                    mark_trade_as_seen(trade.id)
+                    continue
+                copy_size = shot_size
                 consumed = canary.consume(
                     market=trade.market, token_id=trade.token_id,
                     their_price=trade.price,
@@ -779,6 +799,17 @@ async def place_trade_orders(
                 break
 
         except Exception as exc:
+            # A one-shot spent on a trade that then threw must not stay
+            # half-open: the arm is already off, so say the order did not
+            # post rather than leaving a fired record with no outcome.
+            if canary_shot:
+                try:
+                    from src.copy_trading import canary as _canary
+                    rec = (_canary.read().get("fired") or {})
+                    if rec and not rec.get("posted"):
+                        _canary.record_post_failed(error_message(exc))
+                except Exception:
+                    pass
             logger.error(
                 f"[exec] Unexpected error processing trade {trade.id[:20]}...: "
                 f"{error_message(exc)}"

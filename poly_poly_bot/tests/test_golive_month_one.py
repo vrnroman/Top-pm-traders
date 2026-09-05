@@ -1048,3 +1048,121 @@ def test_the_sink_caps_the_copy_at_the_governor_size(tmp_path, monkeypatch):
     placed = h.run(h.trades(1))
     assert placed == 1 and h.posted == [7.75], "the tier said $25, the governor says $7.75"
     assert live_mode.is_armed() is True, "no canary staged, the arm stays"
+
+
+# --------------------------------------------------------------------------- #
+# Verifier round 1: what it broke
+# --------------------------------------------------------------------------- #
+
+def test_the_canary_never_posts_above_the_per_copy_cap(tmp_path, monkeypatch):
+    """A book quoting a 500-share minimum would have posted $255 against a
+    $7.75 cap: the market's minimum is a third-party number, and it was the
+    one path that escaped 'one knob derives every live cap'."""
+    from src.copy_trading import canary
+    h = _Harness(tmp_path, monkeypatch)
+    assert canary.stage(by="test")[0]
+
+    class _FatClob:
+        def get_order_book(self, token_id):
+            return {"min_order_size": "500"}
+    placed = _run(h.te.place_trade_orders(h.trades(1), _FatClob()))
+    assert placed == 0 and h.posted == [], "nothing may post above the cap"
+    assert canary.is_staged() is True, "the shot waits for a market inside the cap"
+    assert live_mode.is_armed() is True, "and the arm is untouched"
+
+
+def test_the_canary_takes_the_next_affordable_market(tmp_path, monkeypatch):
+    from src.copy_trading import canary
+    h = _Harness(tmp_path, monkeypatch)
+    canary.stage(by="test")
+    books = iter([{"min_order_size": "500"}, {"min_order_size": "5"}])
+
+    class _MixedClob:
+        def get_order_book(self, token_id):
+            return next(books)
+    placed = _run(h.te.place_trade_orders(h.trades(2), _MixedClob()))
+    assert placed == 1 and h.posted == [5.0]
+    assert canary.is_staged() is False and live_mode.is_armed() is False
+
+
+def test_the_canary_does_not_fire_on_an_exit(tmp_path, monkeypatch):
+    """It exists to price an ENTRY against the book."""
+    from src.copy_trading import canary
+    h = _Harness(tmp_path, monkeypatch)
+    canary.stage(by="test")
+    q = h.trades(1)
+    q[0].trade.side = "SELL"
+    monkeypatch.setattr(h.te, "_inventory", lambda: (
+        lambda *a, **k: None, lambda *a, **k: None, lambda t: True, _noop_async))
+    h.run(q)
+    assert canary.is_staged() is True, "the shot is not spent on a SELL"
+
+
+def test_the_entry_trigger_does_not_gate_our_own_exits():
+    """An entry filter blocking exits left us holding a position the target
+    was leaving. Book B takes its edge on exits."""
+    from datetime import datetime, timezone
+
+    from src.copy_trading.tiered_risk_manager import (TierExposure,
+                                                      _evaluate_tiered_trade_with_state)
+    from src.models import DetectedTrade
+
+    def trade(side, size):
+        return DetectedTrade(id="t", trader_address="0x" + "a" * 40,
+                             timestamp=datetime.now(timezone.utc).isoformat(),
+                             market="m", side=side, size=size, price=0.5)
+    cfg = _cfg_1b()
+    exp = TierExposure(open_total=0.0, daily_date="", daily_volume=0.0)
+    with patch("src.copy_trading.tiered_risk_manager.CONFIG") as c:
+        c.max_trade_age_hours = 1.0
+        buy = _evaluate_tiered_trade_with_state(trade("BUY", 150.0), "1b", exp, cfg)
+        assert buy.should_copy is False and "min_trader_bet" in buy.reason
+        sell = _evaluate_tiered_trade_with_state(trade("SELL", 150.0), "1b", exp, cfg)
+        assert sell.should_copy is True, "their small exit must still close ours"
+
+
+def test_one_thinness_threshold_across_every_surface():
+    from src.copy_trading import rehearsal, virtual_ledger, zset_candidates
+    assert (rehearsal.THIN_N == zset_candidates.REAL_QUOTE_THIN_N
+            == virtual_ledger.THIN_MATCHED_N == 15)
+
+
+def test_the_rehearsal_headline_discloses_what_share_of_it_is_thin(budget):
+    from src.copy_trading import rehearsal
+    budget(310.0)
+    # One a day each, so the $93 day cap (12 copies) never binds and the
+    # thinness of the wallet is what the assertion is actually about.
+    pos = ([_Pos(f"a{i}", W1, 10_000.0 + i * 86400.0) for i in range(20)]
+           + [_Pos(f"b{i}", W2, 10_000.0 + i * 86400.0 + 100.0) for i in range(3)])
+    quotes = {p.copy_id: 0.51 for p in pos}
+    res = rehearsal.rehearse(budget_usd=310.0, positions=pos, quotes=quotes,
+                             wallets=[W1, W2], since_ts=0.0)
+    assert res["wallets"][W2.lower()]["thin"] is True
+    assert res["wallets"][W1.lower()]["thin"] is False
+    text = rehearsal.render(res)
+    assert "comes from 1 wallet(s) under 15 taken copies" in text
+    assert "not a number to lean on" in text
+
+
+def test_the_real_money_line_says_open_cost_may_be_stale(monkeypatch, budget):
+    from src.copy_trading import inventory, pnl, rehearsal
+    budget(310.0)
+    monkeypatch.setattr(live_mode, "read_arm", lambda: {"armed": True, "first_armed_ts": 1.0})
+    monkeypatch.setattr(live_budget, "_read_balance", lambda now=None: 250.0)
+    monkeypatch.setattr(inventory, "get_inventory_summary", lambda: {"total_cost_basis_usd": 30.0})
+    monkeypatch.setattr(pnl, "load_realized", lambda: [])
+    line = rehearsal.real_money_line()
+    assert "counted at cost" in line and "not redeemed yet" in line
+
+
+def test_the_roadmap_does_not_claim_both_z_wallets_are_pure_hold():
+    """The false universal the verifier caught. The doc may quote the wrong
+    claim while correcting it; it may not assert it."""
+    src = open("../ROADMAP.md", encoding="utf-8").read()
+    i = src.index("## 11.")if "## 11." in src else src.index("## 11")
+    sec = src[i:]
+    assert "Correction (verifier" in sec
+    assert "mirrored exits" in sec
+    # the only surviving occurrence is inside the quoted correction
+    before, _, after = sec.partition("Correction (verifier")
+    assert "pure hold-to-settlement" not in before

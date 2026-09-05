@@ -39,6 +39,13 @@ def _num(x) -> float:
         return 0.0
 
 
+# Below this many real-quote-matched copies, a dollar or ROI figure derived
+# from them is labelled thin wherever it is rendered. ONE number, because two
+# surfaces calling the same 11 rows "solid" and "not a number to lean on" is
+# the disagreement this project has paid for before.
+THIN_MATCHED_N = 15
+
+
 def quote_map(quote_rows: Optional[list[dict]] = None) -> dict:
     """copy_id -> the real price a copy order would have taken.
 

@@ -159,8 +159,14 @@ def _evaluate_tiered_trade_with_state(
     except (ValueError, TypeError):
         pass
 
-    # 3. Min trader bet
-    if cfg.min_trader_bet > 0 and trade.size < cfg.min_trader_bet:
+    # 3. Min trader bet, ENTRIES ONLY.
+    # The threshold says which of the target's BUYS are worth copying. Applying
+    # it to their SELLS gated our own exits behind the size of their exit, so a
+    # target trimming $150 of a position we hold left us holding it. Book B,
+    # whose record is the evidence for going live, mirrors exits from $100 and
+    # takes its edge there; an entry filter must not quietly switch that off.
+    if (trade.side == "BUY" and cfg.min_trader_bet > 0
+            and trade.size < cfg.min_trader_bet):
         return skip(
             f"Trader bet ${trade.size:.2f} < min_trader_bet ${cfg.min_trader_bet:.2f} for tier {tier}"
         )

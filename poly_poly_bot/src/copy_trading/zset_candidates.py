@@ -37,8 +37,8 @@ CONTRADICTION_MIN_N = 10
 
 # Below this many real-quote matches the replay figure is shown as thin and
 # never as a headline: 9 matched rows reading +123% is the exact shape that
-# fools a reader.
-REAL_QUOTE_THIN_N = 15
+# fools a reader. One definition, shared with the rehearsal ledger.
+REAL_QUOTE_THIN_N = virtual_ledger.THIN_MATCHED_N
 
 # What one admitted wallet costs the per-wallet prober, for the header.
 PROBER_POLLS_PER_MIN_PER_WALLET = 20

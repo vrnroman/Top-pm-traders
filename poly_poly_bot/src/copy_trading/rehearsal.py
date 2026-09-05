@@ -25,7 +25,10 @@ from src.copy_trading import live_budget, virtual_ledger
 from src.logger import logger
 
 # Below this many taken copies a wallet's dollar figure is shown as thin.
-THIN_N = 5
+# The SAME threshold the candidate cards use: 11 rows cannot be "thin, not a
+# number to lean on" on one surface and solid on another when they are 36% of
+# the headline he acts on.
+THIN_N = virtual_ledger.THIN_MATCHED_N
 
 
 def _num(x) -> float:
@@ -149,6 +152,17 @@ def render(res: dict) -> str:
     lines.append(f"total: {t['n_taken']} copies, ${t['spent']:,.0f} cycled → "
                  f"<b>${t['real_pnl']:+,.2f}</b> at real quotes, ${t['ideal_pnl']:+,.2f} "
                  f"at their price")
+    # How much of that headline rests on wallets with too few taken copies to
+    # lean on. Saying the total without saying this is how a thin number gets
+    # acted on as a solid one.
+    thin_pnl = sum(d["real_pnl"] for d in res["wallets"].values()
+                   if d.get("thin") and d["n_taken"])
+    thin_n = sum(1 for d in res["wallets"].values() if d.get("thin") and d["n_taken"])
+    if thin_n and t["real_pnl"]:
+        share = abs(thin_pnl) / abs(t["real_pnl"]) * 100
+        lines.append(f"of that, ${thin_pnl:+,.2f} ({share:.0f}%) comes from {thin_n} "
+                     f"wallet(s) under {THIN_N} taken copies: thin, not a number to "
+                     f"lean on")
     return "\n".join(lines)
 
 
@@ -307,8 +321,18 @@ def real_money_line(now: Optional[float] = None) -> str:
         equity = live_budget.equity_usd(bal, open_cost)
         floor_txt = (f" · floor ${floor:,.0f} · distance ${equity - floor:+,.2f}"
                      if floor is not None else " · no floor (LIVE_BUDGET_USD unset)")
-        return (f"💵 real money: bankroll ${equity:,.2f} (USDC ${bal:,.2f} + open at cost "
+        line = (f"💵 real money: bankroll ${equity:,.2f} (USDC ${bal:,.2f} + open at cost "
                 f"${open_cost:,.2f}){floor_txt} · realized today ${realized:+,.2f} "
                 f"({len(rows)} redeem(s))")
+        if open_cost > 0:
+            # Open positions are carried AT COST so the floor cannot flap on
+            # quotes. The cost of a position that has already resolved to zero
+            # is still counted until it is redeemed, and neg-risk losers are
+            # never redeemed by design, so the bankroll can read high and the
+            # floor can fire late. Say so rather than let the number imply
+            # precision it does not have.
+            line += ("\n   open positions are counted at cost, including any that "
+                     "have resolved but are not redeemed yet, so this can read high")
+        return line
     except Exception as exc:
         return f"💵 real money: could not compute ({exc})"

@@ -1181,11 +1181,30 @@ In Telegram: `/zset candidates` (one card per passer, admit by tap),
 
 Book A is dead at any price. Book B is marginally positive at their price and
 negative once re-settled at the real quoted book, and its clean-era profit
-sits in mirrored exits; the two set-Z wallets are pure hold-to-settlement and
-carry none of that edge, so the go-live rests on their own real-quote records
-and on the rehearsal dollars. A live entry-penalty cap was tested against the
-replay and rejected: the high-penalty copies did better, not worse. Real-quote
+sits in mirrored exits. A live entry-penalty cap was tested against the replay
+and rejected: the high-penalty copies did better, not worse. Real-quote
 coverage exists only from 2026-08-16, so the read leans on about three weeks.
+
+**Correction (verifier, same run).** An earlier draft of this section said the
+two set-Z wallets are "pure hold-to-settlement and carry none of that edge".
+That is a false universal and the run's own card disproves it: `0x3f3aa700`
+has no early exits, but `0xf49614e6` closed 25 of its 58 clean-era copies by
+mirroring the target's SELL, and that is a large share of its profit. Read the
+"mirrored exits" line on each `/zset candidates` card rather than any sentence
+written here.
+
+**The live exit rule is not the paper book's, and the difference is not
+modelled.** Book B closes the WHOLE position when a watched wallet sells above
+its feed floor. Live tier 1b mirrors a SELL as a copy sized like any other, a
+percentage of the target's notional capped by the governor, not "close what we
+hold". The entry trigger no longer gates exits (fixed this run: step 3 of
+`tiered_risk_manager` is BUY-only, because an entry filter was silently
+blocking our own exits), but partial-close versus full-close remains a real
+divergence between the evidence and the wire. Since exits are where book B's
+edge sits, treat the rehearsal dollars as an upper bound on the exit leg until
+a live ledger says otherwise. Closing that gap is deferred to month two on
+purpose: changing exit sizing before a single real fill exists would be tuning
+against a model rather than against evidence.
 
 ### 11.4 The owner's steps, in order
 
