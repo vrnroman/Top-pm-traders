@@ -1360,3 +1360,54 @@ def test_an_expired_canary_takes_the_arm_with_it(canary_env, monkeypatch):
     assert canary.expire_if_due(send=sent.append, now=1000.0 + canary.TTL_S + 1) is True
     assert pulled == ["canary-expiry"]
     assert "arm came off with it" in sent[0] and "/live CONFIRM again" in sent[0]
+
+
+# --------------------------------------------------------------------------- #
+# The collateral migration: pUSD, not USDC.e
+# --------------------------------------------------------------------------- #
+
+def test_the_bot_reads_its_addresses_from_the_clob_client_not_a_literal():
+    """Polymarket moved collateral to pUSD and its exchanges to v2. The
+    hardcoded USDC.e address made every on-chain balance read return zero on a
+    funded wallet, which the governor turns into 'refuse every live copy'.
+    One source of truth: the same config the order builder already trusts."""
+    from py_clob_client_v2.config import get_contract_config
+
+    from src import constants
+    cfg = get_contract_config(137)
+    assert constants.USDC_ADDRESS == cfg.collateral
+    assert constants.CTF_EXCHANGE == cfg.exchange_v2
+    assert constants.NEG_RISK_CTF_EXCHANGE == cfg.neg_risk_exchange_v2
+    assert constants.CTF_CONTRACT == cfg.conditional_tokens
+    # the old literals must not be pasted back in
+    src = open("src/constants.py", encoding="utf-8").read()
+    assert "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" not in src
+    assert "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" not in src
+
+
+def test_the_collateral_is_the_token_the_funder_actually_holds():
+    """Guard the fact, not the spelling: the collateral must be the token the
+    CLOB settles in. pUSD today; if Polymarket migrates again this fails."""
+    from src import constants
+    assert constants.USDC_ADDRESS.lower() == "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb"
+
+
+def test_every_money_read_uses_the_shared_collateral_constant():
+    """No module may re-hardcode a collateral address for OUR money.
+
+    `wallet_funder` is the one exemption and it is not a money read: it scans
+    other wallets' deposit HISTORY, where a 2026-04 inflow really did arrive
+    as USDC.e. It still picks today's collateral up from the shared constant
+    so the scan follows any future migration.
+    """
+    import pathlib
+    bad = []
+    for p in list(pathlib.Path("src").rglob("*.py")) + [pathlib.Path("main.py")]:
+        if p.name in ("constants.py", "wallet_funder.py"):
+            continue
+        if "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" in p.read_text():
+            bad.append(str(p))
+    assert not bad, f"stale USDC.e address hardcoded in: {sorted(set(bad))}"
+    funder = pathlib.Path("src/copy_trading/wallet_funder.py").read_text()
+    assert "from src.constants import USDC_ADDRESS" in funder
+    assert "_USDC_CURRENT" in funder

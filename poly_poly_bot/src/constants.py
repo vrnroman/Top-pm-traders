@@ -1,10 +1,44 @@
-"""Polygon contract addresses and ABI fragments used by Polymarket."""
+"""Polygon contract addresses and ABI fragments used by Polymarket.
 
-# Polygon PoS chain contracts
-USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-NEG_RISK_CTF_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
-CTF_CONTRACT = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+**The addresses come from the CLOB client library, not from this file.**
+
+Found 2026-09-05, and it would have stopped the first live session dead:
+Polymarket migrated its collateral from bridged USDC.e
+(`0x2791Bca1...`) to **pUSD** (`0xC011a7E1...`), and its exchanges to the v2
+contracts. This file still hardcoded the old USDC.e address, so every
+on-chain read the bot made about "our money" asked the wrong token and got
+zero, on a funder wallet that really held 80.41 pUSD. Zero balance means the
+bankroll governor computes an effective budget of zero, which refuses every
+live copy: the bot would have armed, seen a funded wallet, and traded
+nothing.
+
+Order placement was never affected, because the order builder reads
+`py_clob_client_v2.config.get_contract_config`. So the fix is not to paste
+newer addresses here, which is how this file went stale in the first place:
+it is to read the SAME source the order path already trusts, and let this
+module be a thin alias over it. A hardcoded copy is a second way to know
+one fact, and the second way is the one that rots.
+"""
+
+from py_clob_client_v2.config import get_contract_config as _clob_config
+
+# Polygon PoS. The chain the bot trades and the only one this file describes.
+CHAIN_ID = 137
+_CFG = _clob_config(CHAIN_ID)
+
+# The collateral Polymarket settles in TODAY (pUSD as of 2026-09-05). Every
+# balance read, approval and redemption must use this, never a literal.
+USDC_ADDRESS = _CFG.collateral
+
+# The exchanges that actually match orders now. `exchange_v2` /
+# `neg_risk_exchange_v2` are what the CLOB reports allowances for; the v1
+# addresses are kept under their own names for anything reading history.
+CTF_EXCHANGE = _CFG.exchange_v2
+NEG_RISK_CTF_EXCHANGE = _CFG.neg_risk_exchange_v2
+CTF_EXCHANGE_V1 = _CFG.exchange
+NEG_RISK_CTF_EXCHANGE_V1 = _CFG.neg_risk_exchange
+NEG_RISK_ADAPTER = _CFG.neg_risk_adapter
+CTF_CONTRACT = _CFG.conditional_tokens
 
 # ABI fragments for web3.py
 ERC20_BALANCE_ABI = [{"inputs": [{"name": "account", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"}]

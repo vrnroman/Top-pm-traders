@@ -35,8 +35,13 @@ _DB_PATH = Path(CONFIG.data_dir) / "wallet-funder.sqlite"
 _ETHERSCAN_URL = "https://api.etherscan.io/v2/api"
 _CHAIN_ID = 137
 
-# Polymarket historically used bridged USDC.e; native USDC is now also accepted.
-# We scan both contracts and take whichever had the earliest inflow.
+# This module reads deposit HISTORY, so it deliberately keeps the older token
+# addresses as literals: a 2026-04 inflow really did arrive as USDC.e and
+# renaming history to today's collateral would lose it. The CURRENT collateral
+# comes from the shared constant, so the scan follows Polymarket's migrations
+# without another list to maintain.
+from src.constants import USDC_ADDRESS as _USDC_CURRENT
+
 _USDC_BRIDGED = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 _USDC_NATIVE = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 
@@ -188,11 +193,14 @@ _inflight: dict[str, asyncio.Task] = {}
 
 
 async def _lookup(address: str) -> tuple[str, int]:
-    """Fetch the earliest non-CEX USDC sender across both USDC contracts."""
+    """Fetch the earliest non-CEX sender across every collateral Polymarket
+    has used: the two historical USDC contracts and today's."""
+    tokens = [_USDC_BRIDGED, _USDC_NATIVE]
+    if _USDC_CURRENT and _USDC_CURRENT.lower() not in {t.lower() for t in tokens}:
+        tokens.append(_USDC_CURRENT)
     async with httpx.AsyncClient() as client:
         results = await asyncio.gather(
-            _fetch_first_inflow(client, address, _USDC_BRIDGED),
-            _fetch_first_inflow(client, address, _USDC_NATIVE),
+            *[_fetch_first_inflow(client, address, t) for t in tokens],
             return_exceptions=False,
         )
 
