@@ -1463,3 +1463,74 @@ def test_the_deploy_sizes_the_governor_to_a_real_ticket():
     per_copy = 80 * 0.08
     assert per_copy >= 5.0, "a ticket must clear the exchange minimum"
     assert round(80 * 0.80 / per_copy) >= 5, "room for a handful of open positions"
+
+
+# --------------------------------------------------------------------------- #
+# Found in production, minutes after arming
+# --------------------------------------------------------------------------- #
+
+def test_a_position_row_carries_the_asset_id_as_a_string(monkeypatch):
+    """`asset` is the token id as a STRING on the live API. The parser indexed
+    into it as a dict and raised on every real row. It was unreachable while
+    the `resolved` filter dropped everything, so fixing that filter surfaced
+    the crash: the guard's read failed, which made the bankroll floor inert
+    again for a new reason."""
+    from src.copy_trading import auto_redeemer
+    row = dict(conditionId="0xc1", asset="83103999101871503431179904490734",
+               size=970.03, avgPrice=0.26, curPrice=0.0, currentValue=0.0,
+               title="m", negRisk=False, outcomeCount=2, redeemable=True)
+    monkeypatch.setattr(auto_redeemer.httpx, "AsyncClient", _http([row]))
+    out = _run(auto_redeemer._fetch_redeemable_positions("0xp"))
+    assert len(out) == 1
+    assert out[0]["tokenId"] == "83103999101871503431179904490734"
+    assert out[0]["currentValue"] == 0.0
+
+    nested = dict(row, asset={"id": "999"})
+    monkeypatch.setattr(auto_redeemer.httpx, "AsyncClient", _http([nested]))
+    assert _run(auto_redeemer._fetch_redeemable_positions("0xp"))[0]["tokenId"] == "999"
+
+
+def test_worthless_resolved_positions_do_not_disarm_a_live_session(tmp_path, monkeypatch):
+    """The funder carries 61 resolved losers worth zero. Counting them as
+    failed redemptions would disarm every live session forever over tickets
+    there is nothing to collect on."""
+    monkeypatch.setattr(live_guard.CONFIG, "data_dir", str(tmp_path))
+    dust = [{"tokenId": f"t{i}", "currentValue": 0.0} for i in range(61)]
+    out = live_guard.run_once(redeemable=dust)
+    assert out["unredeemed"] == 0 and out["disarm_reason"] == ""
+
+    # real stuck capital still disarms
+    stuck = [{"tokenId": f"s{i}", "currentValue": 12.5} for i in range(3)]
+    out = live_guard.run_once(redeemable=stuck)
+    assert out["unredeemed"] == 3 and "failed to redeem" in out["disarm_reason"]
+
+    # and a row with NO value figure is counted, because unknown is not zero
+    unknown = [{"tokenId": f"u{i}"} for i in range(3)]
+    out = live_guard.run_once(redeemable=unknown)
+    assert out["unredeemed"] == 3
+
+
+def test_resolved_positions_are_still_excluded_from_the_bankroll(budget):
+    """Worthless for the disarm count, but their COST must still leave the
+    bankroll: a resolved position is worth its payout, not what we paid."""
+    budget(80.0)
+    summary = {"total_cost_basis_usd": 840.0,
+               "positions": {f"t{i}": {"cost_basis": 84.0} for i in range(10)}}
+    dust = [{"tokenId": f"t{i}", "currentValue": 0.0} for i in range(10)]
+    cost, n, known = live_budget.live_open_cost(summary, dust)
+    assert (cost, n, known) == (0.0, 10, True)
+    assert live_budget.equity_usd(80.41, cost) == 80.41
+
+
+def test_the_stuck_order_detector_is_not_shadowed_by_the_redeemable_filter(tmp_path, monkeypatch):
+    """A local named `stuck` for the redeemable filter overwrote the stuck
+    ORDERS list, silently zeroing a detector that had nothing to do with it.
+    Both must report together."""
+    monkeypatch.setattr(live_guard.CONFIG, "data_dir", str(tmp_path))
+    now = time.time()
+    out = live_guard.run_once(
+        pending_orders=[{"order_id": "o1", "placed_at": (now - 3600) * 1000}],
+        redeemable=[{"tokenId": "t", "currentValue": 0.0}],
+        now=now)
+    assert out["stuck_orders"] == 1, "the order detector still sees its order"
+    assert out["unredeemed"] == 0, "and the worthless position is still excluded"

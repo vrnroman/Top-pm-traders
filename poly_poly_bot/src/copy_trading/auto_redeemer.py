@@ -120,7 +120,17 @@ async def _fetch_redeemable_positions(
         if not condition_id:
             continue
 
-        token_id = entry.get("asset", {}).get("id", "") or entry.get("tokenId", "")
+        # `asset` is the token id as a STRING on the live API, not a nested
+        # object. This line assumed a dict and raised AttributeError on every
+        # real row; it was unreachable until the `redeemable` filter above was
+        # fixed, so the crash arrived the moment rows started passing. Accept
+        # both shapes and never index into a string.
+        raw_asset = entry.get("asset")
+        if isinstance(raw_asset, dict):
+            token_id = raw_asset.get("id", "")
+        else:
+            token_id = str(raw_asset or "")
+        token_id = token_id or str(entry.get("tokenId") or "")
         shares = float(entry.get("size", 0) or entry.get("shares", 0))
         avg_price = float(entry.get("avgPrice", 0) or entry.get("avg_price", 0))
         cur_price = float(entry.get("curPrice", 0) or entry.get("price", 0))
@@ -137,6 +147,10 @@ async def _fetch_redeemable_positions(
             "title": title,
             "negRisk": neg_risk,
             "outcomeCount": outcome_count,
+            # What the position is worth NOW. A resolved loser is worth zero,
+            # and zero is not stuck capital: the guard uses this to tell "the
+            # redeemer is broken" from "these are old worthless tickets".
+            "currentValue": float(entry.get("currentValue") or 0.0),
         })
 
     # Every row missing BOTH keys means the schema moved under us. Returning a

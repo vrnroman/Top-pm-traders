@@ -48,6 +48,13 @@ UNREDEEMED_S = 6 * 3600.0
 # Consecutive cycle failures before the session stops trusting itself.
 CRASH_LOOP_N = 5
 
+# A resolved position worth less than this is not "stuck capital". The funder
+# on this box carries dozens of resolved losers worth exactly zero; counting
+# them as failed redemptions would disarm every live session forever over
+# tickets there is nothing to collect on, and a gate that fires on a false
+# positive is worse than the bug it guards.
+STUCK_VALUE_USD = 1.0
+
 
 def _field(o, name, default=None):
     """Read a field from an attribute object OR a dict.
@@ -61,6 +68,17 @@ def _field(o, name, default=None):
     if isinstance(o, dict):
         return o.get(name, default)
     return getattr(o, name, default)
+
+
+def _num_field(o, name):
+    """A numeric field from a dict or attribute object, or None if absent."""
+    v = _field(o, name, None)
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _state_path() -> str:
@@ -304,7 +322,20 @@ def run_once(*, pending_orders: Optional[list] = None,
     # None means the redeemable read FAILED, which is not the same as zero.
     # Skip the edge entirely in that case rather than announcing a clearance.
     redeem_unknown = redeemable is None
-    unred = find_unredeemed(positions or [], now=now) + list(redeemable or [])
+    # Only positions actually worth collecting count as a failed redemption.
+    # Rows with no value figure at all are counted, because unknown is not
+    # zero.
+    # NOT `stuck`: that name already holds the stuck ORDERS a few lines above,
+    # and shadowing it silently zeroed the stuck-order detector.
+    stuck_capital = [p for p in (redeemable or [])
+                     if _num_field(p, "currentValue") is None
+                     or _num_field(p, "currentValue") >= STUCK_VALUE_USD]
+    dust = len(redeemable or []) - len(stuck_capital)
+    if dust:
+        logger.info(f"[guard] {dust} resolved position(s) worth under "
+                    f"${STUCK_VALUE_USD:.0f} excluded from the stuck-redemption "
+                    f"count: there is nothing to collect on them")
+    unred = find_unredeemed(positions or [], now=now) + stuck_capital
     edge("stuck_orders", bool(stuck),
          f"⏳ {len(stuck)} order(s) resting over "
          f"{STUCK_ORDER_S / 60:.0f} minutes", send, st)
