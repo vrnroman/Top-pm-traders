@@ -213,6 +213,7 @@ def test_each_trust_failure_disarms(kw):
 def test_self_disarm_actually_disarms_when_armed(monkeypatch, tmp_path):
     monkeypatch.setattr(live_mode.CONFIG, "preview_mode", False)
     monkeypatch.setattr(live_mode.CONFIG, "live_arm_enabled", True)
+    monkeypatch.setattr(live_mode.CONFIG, "strategy1_enabled", True)
     live_mode.arm(reason="test")
     assert live_mode.is_armed() is True
     out = live_guard.run_once(crash_streak=live_guard.CRASH_LOOP_N)

@@ -300,6 +300,11 @@ def test_engine_observer_sees_refused_trades_and_cannot_break_the_cycle():
 def test_preview_is_the_default_and_both_keys_are_required(monkeypatch, tmp_path):
     from src.copy_trading import live_mode
     monkeypatch.setattr(live_mode.CONFIG, "data_dir", str(tmp_path))
+    # A live poller has to exist for arming to mean anything (see
+    # live_mode.arm). Set explicitly: the CI runner configures no strategy
+    # wallets, so inheriting the box's value made this test pass locally and
+    # fail there.
+    monkeypatch.setattr(live_mode.CONFIG, "strategy1_enabled", True)
 
     # Shipping state: process in preview, no owner key.
     monkeypatch.setattr(live_mode.CONFIG, "preview_mode", True)
@@ -333,6 +338,7 @@ def test_arm_does_not_survive_the_owner_key_being_pulled(monkeypatch, tmp_path):
     monkeypatch.setattr(live_mode.CONFIG, "data_dir", str(tmp_path))
     monkeypatch.setattr(live_mode.CONFIG, "preview_mode", False)
     monkeypatch.setattr(live_mode.CONFIG, "live_arm_enabled", True)
+    monkeypatch.setattr(live_mode.CONFIG, "strategy1_enabled", True)
     live_mode.arm(reason="pilot")
     assert live_mode.is_preview() is False
     # Owner removes LIVE_ARM_ENABLED and restarts: the persisted arm is inert.
