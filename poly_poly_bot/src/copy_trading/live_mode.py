@@ -63,13 +63,39 @@ def is_armed() -> bool:
     return read_arm().get("armed") is True
 
 
+# Set when a disarm could NOT be written to disk. The arm file is the durable
+# key, but a disk that refuses a write (this box has hit disk pressure twice)
+# must not leave the process trading: the very next cycle would have placed
+# full-size live copies with nobody told. This flag is deliberately in-memory
+# only and one-way for the life of the process; the operator restarts after
+# fixing the disk, and the persisted arm record is read normally again.
+_hard_disarmed: bool = False
+_hard_disarm_reason: str = ""
+
+
+def hard_disarm(reason: str) -> None:
+    """Stop this process trading, even though the arm file could not be written."""
+    global _hard_disarmed, _hard_disarm_reason
+    _hard_disarmed = True
+    _hard_disarm_reason = reason
+    logger.error(f"[live] HARD DISARM (in memory): {reason}. This process will "
+                 f"place no further real orders until it is restarted.")
+
+
+def is_hard_disarmed() -> tuple[bool, str]:
+    return (_hard_disarmed, _hard_disarm_reason)
+
+
 def is_preview() -> bool:
     """The one question the trading paths ask: are we still on paper?
 
     Preview unless the process was started with ``PREVIEW_MODE=false`` AND the
-    runtime arm is set. Fails closed — an unreadable arm file means preview.
+    runtime arm is set. Fails closed: an unreadable arm file means preview, and
+    so does a disarm that could not be persisted.
     """
     try:
+        if _hard_disarmed:
+            return True
         if CONFIG.preview_mode:
             return True
         return not is_armed()
@@ -131,6 +157,9 @@ def disarm(by: str = "telegram") -> bool:
             json.dump(rec, f)
         os.replace(tmp, _path())
     except OSError as exc:
+        # The durable record did not move, so stop this process in memory
+        # instead of returning False and letting the caller hope.
+        hard_disarm(f"the arm record could not be written ({exc})")
         logger.warn(f"[live] disarm write failed: {exc}")
         return False
     logger.warn(f"[live] DISARMED by {by}, back to paper")

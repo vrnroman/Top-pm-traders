@@ -142,7 +142,7 @@ def render(res: dict) -> str:
             lines.append(f"{tag}: {d['n_settled']} settled, {d['n_matched']} with a real "
                          f"quote, none taken")
             continue
-        thin = " · thin, under 5 taken" if d["thin"] else ""
+        thin = f" · thin, under {THIN_N} taken" if d["thin"] else ""
         cap = f" ({binding_cap(d)})" if d["n_held"] else ""
         lines.append(f"{tag}: {d['n_taken']} taken, {d['n_held']} held by caps{cap}, "
                      f"{d['n_settled'] - d['n_matched']} unquoted → "
@@ -306,9 +306,15 @@ def real_money_line(now: Optional[float] = None) -> str:
     if not arm.get("first_armed_ts"):
         return "💵 real money: not armed yet, no real-money figures"
     try:
-        from src.copy_trading import inventory, pnl
+        from src.copy_trading import inventory, live_guard, pnl
         bal = live_budget._read_balance(now)
-        open_cost = float(inventory.get_inventory_summary().get("total_cost_basis_usd", 0.0) or 0.0)
+        # Same rule the floor uses: a resolved position is not worth its cost.
+        try:
+            redeemable = live_guard.redeemable_positions(CONFIG.proxy_wallet)
+        except Exception:
+            redeemable = None
+        open_cost, n_done, known = live_budget.live_open_cost(
+            inventory.get_inventory_summary(), redeemable)
         floor = live_budget.floor_usd()
         today = _day(now)
         rows = [r for r in pnl.load_realized()
@@ -324,15 +330,13 @@ def real_money_line(now: Optional[float] = None) -> str:
         line = (f"💵 real money: bankroll ${equity:,.2f} (USDC ${bal:,.2f} + open at cost "
                 f"${open_cost:,.2f}){floor_txt} · realized today ${realized:+,.2f} "
                 f"({len(rows)} redeem(s))")
-        if open_cost > 0:
-            # Open positions are carried AT COST so the floor cannot flap on
-            # quotes. The cost of a position that has already resolved to zero
-            # is still counted until it is redeemed, and neg-risk losers are
-            # never redeemed by design, so the bankroll can read high and the
-            # floor can fire late. Say so rather than let the number imply
-            # precision it does not have.
-            line += ("\n   open positions are counted at cost, including any that "
-                     "have resolved but are not redeemed yet, so this can read high")
+        if n_done:
+            line += (f"\n   {n_done} resolved position(s) awaiting redemption are "
+                     f"excluded from the bankroll: they are worth their payout, "
+                     f"not their cost")
+        if not known:
+            line += ("\n   the resolved set could not be read, so every open "
+                     "position is counted at cost here and this can read high")
         return line
     except Exception as exc:
         return f"💵 real money: could not compute ({exc})"

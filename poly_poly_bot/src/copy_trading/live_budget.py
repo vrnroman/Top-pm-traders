@@ -214,11 +214,55 @@ def floor_usd() -> Optional[float]:
     return round(stated * (1.0 - DRAWDOWN_FRAC), 2)
 
 
+def live_open_cost(summary: dict,
+                   redeemable: Optional[list]) -> tuple[float, int, bool]:
+    """Cost basis of positions that are still LIVE, and how many were dropped.
+
+    A position the chain has already resolved is not worth its cost any more;
+    its value is its payout, which shows up as USDC when it is redeemed. The
+    funder wallet on this box carried 61 resolved losers at a cost basis
+    several times the month's budget, so counting them made the bankroll read
+    far above the floor and the floor could not fire with ZERO USDC on chain.
+
+    Returns ``(live_cost, n_excluded, known)``. ``known`` is False when the
+    resolved set could not be read, in which case the caller is told the
+    number is the old, inflated one rather than being handed a guess.
+    """
+    positions = (summary or {}).get("positions") or {}
+    total = float((summary or {}).get("total_cost_basis_usd") or 0.0)
+    if redeemable is None:
+        return (round(total, 2), 0, False)
+    if total > 0 and not positions:
+        # A cost basis with no per-position rows cannot be attributed, so
+        # nothing can be excluded. Returning 0 here would UNDERSTATE the
+        # bankroll and fire the floor on a false positive, and a gate that
+        # fires on a false positive is worse than the bug it guards.
+        return (round(total, 2), 0, False)
+    done = set()
+    for r in redeemable or []:
+        for key in ("tokenId", "asset", "token_id"):
+            v = (r or {}).get(key) if isinstance(r, dict) else None
+            if v:
+                done.add(str(v))
+    live, excluded = 0.0, 0
+    for tid, p in positions.items():
+        if str(tid) in done:
+            excluded += 1
+            continue
+        try:
+            live += float((p or {}).get("cost_basis") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return (round(live, 2), excluded, True)
+
+
 def equity_usd(balance: Optional[float], open_cost_usd: float) -> Optional[float]:
-    """Realized equity: USDC on chain plus open positions AT COST.
+    """Realized equity: USDC on chain plus STILL-LIVE positions at cost.
 
     At cost, never marked, so it cannot fire on a deployment or flap on
-    quotes; only a settled loss or a redeem moves it.
+    quotes; only a settled loss or a redeem moves it. The caller supplies a
+    cost basis that already excludes resolved positions (see live_open_cost);
+    counting those was what made the floor inert on the real wallet.
     """
     if balance is None:
         return None

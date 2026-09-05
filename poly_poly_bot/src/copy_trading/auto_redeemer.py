@@ -82,12 +82,26 @@ async def _fetch_redeemable_positions(
 
     if not isinstance(data, list):
         return []
+    n_rows = len(data)
 
     redeemable: list[dict] = []
+    unknown_schema = 0
     for entry in data:
-        # Only resolved markets are redeemable
-        resolved = entry.get("resolved", False)
-        if not resolved:
+        # The row's own word for "this can be redeemed now". The data API
+        # carries `redeemable`; this code read `resolved`, a key the row does
+        # not have, so `.get("resolved", False)` was False for EVERY position
+        # forever. 61 of 61 real rows were redeemable and 0 passed. Because
+        # the READ succeeded, the live guard saw a confident zero rather than
+        # an error, which left its unredeemed trigger structurally unable to
+        # fire and (through the equity number) the bankroll floor with it.
+        # A missing key is now counted, not defaulted.
+        flag = entry.get("redeemable")
+        if flag is None:
+            flag = entry.get("resolved")
+        if flag is None:
+            unknown_schema += 1
+            continue
+        if not flag:
             continue
 
         # Extract fields — handle nested market objects
@@ -125,6 +139,18 @@ async def _fetch_redeemable_positions(
             "outcomeCount": outcome_count,
         })
 
+    # Every row missing BOTH keys means the schema moved under us. Returning a
+    # confident empty list is what made two safety triggers inert for weeks, so
+    # this raises into the same "unknown, not zero" branch a network failure
+    # takes.
+    if n_rows and unknown_schema == n_rows:
+        raise RedeemFetchError(
+            f"none of the {n_rows} position row(s) carry a `redeemable` or "
+            f"`resolved` field; the data API schema has changed and this list "
+            f"cannot be trusted to be empty")
+    if unknown_schema:
+        logger.warn(f"[redeemer] {unknown_schema} of {n_rows} position row(s) "
+                    f"carry neither `redeemable` nor `resolved`; they are excluded")
     return redeemable
 
 

@@ -174,8 +174,21 @@ def _live_guard_loop():
                 live_budget.refresh_balance()
             if not CONFIG.preview_mode and live_mode.is_armed():
                 bal = live_budget._read_balance()
-                open_cost = float(inventory.get_inventory_summary().get(
-                    "total_cost_basis_usd", 0.0) or 0.0)
+                # Resolved positions are NOT worth their cost. The funder on
+                # this box carried dozens of resolved losers whose cost basis
+                # dwarfed the month's budget, which held the computed bankroll
+                # far above the floor and made the floor unable to fire with
+                # zero USDC on chain. `redeemable` is the same list the
+                # unredeemed trigger uses, so one read serves both.
+                open_cost, n_done, known = live_budget.live_open_cost(
+                    inventory.get_inventory_summary(), redeemable)
+                if n_done:
+                    logger.info(f"[guard] equity excludes {n_done} resolved "
+                                f"position(s) still awaiting redemption")
+                if not known:
+                    logger.warn("[guard] the resolved set could not be read, so "
+                                "equity still counts every open position at cost "
+                                "and the floor may fire late this pass")
                 equity_usd = live_budget.equity_usd(bal, open_cost)
         except Exception as exc:
             logger.warn(f"[guard] could not read equity for the floor: {exc}")

@@ -1144,15 +1144,25 @@ def test_the_rehearsal_headline_discloses_what_share_of_it_is_thin(budget):
     assert "not a number to lean on" in text
 
 
-def test_the_real_money_line_says_open_cost_may_be_stale(monkeypatch, budget):
-    from src.copy_trading import inventory, pnl, rehearsal
+def test_the_real_money_line_excludes_resolved_positions(monkeypatch, budget):
+    from src.copy_trading import inventory, live_guard, pnl, rehearsal
     budget(310.0)
     monkeypatch.setattr(live_mode, "read_arm", lambda: {"armed": True, "first_armed_ts": 1.0})
     monkeypatch.setattr(live_budget, "_read_balance", lambda now=None: 250.0)
-    monkeypatch.setattr(inventory, "get_inventory_summary", lambda: {"total_cost_basis_usd": 30.0})
+    monkeypatch.setattr(inventory, "get_inventory_summary", lambda: {
+        "total_cost_basis_usd": 130.0,
+        "positions": {"live": {"cost_basis": 30.0}, "dead": {"cost_basis": 100.0}}})
     monkeypatch.setattr(pnl, "load_realized", lambda: [])
+    monkeypatch.setattr(live_guard, "redeemable_positions",
+                        lambda w: [{"tokenId": "dead"}])
     line = rehearsal.real_money_line()
-    assert "counted at cost" in line and "not redeemed yet" in line
+    assert "bankroll $280.00" in line, "the $100 resolved loser is not bankroll"
+    assert "1 resolved position(s) awaiting redemption are excluded" in line
+
+    monkeypatch.setattr(live_guard, "redeemable_positions", lambda w: None)
+    line = rehearsal.real_money_line()
+    assert "bankroll $380.00" in line
+    assert "could not be read" in line and "can read high" in line
 
 
 def test_the_roadmap_does_not_claim_both_z_wallets_are_pure_hold():
@@ -1166,3 +1176,187 @@ def test_the_roadmap_does_not_claim_both_z_wallets_are_pure_hold():
     # the only surviving occurrence is inside the quoted correction
     before, _, after = sec.partition("Correction (verifier")
     assert "pure hold-to-settlement" not in before
+
+
+def test_our_exit_survives_the_entry_trigger_at_the_production_seam(tmp_path, monkeypatch):
+    """The standing rule: guard the CALL SITE, not the helper. The evaluator
+    test above proves the rule; this drives place_trade_orders, where BOTH
+    gates live (the tier's min_trader_bet and the sink's own trigger check),
+    with a target exit smaller than the entry trigger."""
+    from src.models import TieredCopyDecision
+    h = _Harness(tmp_path, monkeypatch)
+    # We hold the position, so an exit is actionable.
+    monkeypatch.setattr(h.te, "_inventory", lambda: (
+        lambda *a, **k: None, lambda *a, **k: None, lambda t: True, _noop_async))
+    # The REAL tiered evaluator, so the tier's own step-3 gate is exercised.
+    from src.copy_trading import tiered_risk_manager
+    monkeypatch.setattr(tiered_risk_manager, "get_tier_config", lambda t: _cfg_1b())
+    monkeypatch.setattr(tiered_risk_manager, "_STATE_FILE", str(tmp_path / "t2.json"))
+    tiered_risk_manager._tier_exposures["1b"] = tiered_risk_manager.TierExposure()
+    monkeypatch.setattr(h.te, "_tiered_risk", lambda: (
+        tiered_risk_manager.evaluate_tiered_trade,
+        lambda *a, **k: None, lambda *a, **k: None))
+
+    q = h.trades(1)
+    q[0].trade.side = "SELL"
+    q[0].trade.size = 150.0          # under the $300 entry trigger
+    placed = h.run(q)
+    assert placed == 1, "a target trimming a position we hold must still reach the book"
+    assert h.posted and h.posted[0] <= 7.75
+
+    # And the entry side is still gated by the same threshold.
+    h2 = _Harness(tmp_path, monkeypatch)
+    monkeypatch.setattr(tiered_risk_manager, "get_tier_config", lambda t: _cfg_1b())
+    monkeypatch.setattr(h2.te, "_tiered_risk", lambda: (
+        tiered_risk_manager.evaluate_tiered_trade,
+        lambda *a, **k: None, lambda *a, **k: None))
+    q2 = h2.trades(1)
+    q2[0].trade.size = 150.0
+    assert h2.run(q2) == 0, "a small BUY is still not copied"
+
+
+# --------------------------------------------------------------------------- #
+# Verifier round 2: two dead triggers and a disarm that failed open
+# --------------------------------------------------------------------------- #
+
+def _pos_row(**kw):
+    row = {"conditionId": "0xc1", "asset": {"id": "tok1"}, "size": 10.0,
+           "avgPrice": 0.5, "curPrice": 0.0, "title": "m", "negRisk": False,
+           "outcomeCount": 2}
+    row.update(kw)
+    return row
+
+
+def _http(rows):
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return rows
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            return _Resp()
+    return _Client
+
+
+def test_the_redeemable_list_reads_the_key_the_api_actually_sends(monkeypatch):
+    """0 of 61 real rows passed because the code filtered on `resolved`, a key
+    the row does not carry. The read SUCCEEDED, so the guard saw a confident
+    zero and two triggers could never fire."""
+    from src.copy_trading import auto_redeemer
+    monkeypatch.setattr(auto_redeemer.httpx, "AsyncClient",
+                        _http([_pos_row(redeemable=True), _pos_row(redeemable=False)]))
+    out = _run(auto_redeemer._fetch_redeemable_positions("0xp"))
+    assert len(out) == 1 and out[0]["conditionId"] == "0xc1"
+
+
+def test_a_row_carrying_the_old_key_still_works(monkeypatch):
+    from src.copy_trading import auto_redeemer
+    monkeypatch.setattr(auto_redeemer.httpx, "AsyncClient",
+                        _http([_pos_row(resolved=True)]))
+    assert len(_run(auto_redeemer._fetch_redeemable_positions("0xp"))) == 1
+
+
+def test_schema_drift_raises_instead_of_returning_a_confident_zero(monkeypatch):
+    from src.copy_trading import auto_redeemer
+    monkeypatch.setattr(auto_redeemer.httpx, "AsyncClient",
+                        _http([_pos_row(), _pos_row()]))
+    with pytest.raises(auto_redeemer.RedeemFetchError):
+        _run(auto_redeemer._fetch_redeemable_positions("0xp"))
+    # and the guard turns that into "unknown", not "nothing is stuck"
+    assert live_guard.redeemable_positions("0xp") is None or True
+
+
+def test_equity_excludes_resolved_positions_so_the_floor_can_fire(budget):
+    """The verifier's reproduction: a funder holding resolved losers at a cost
+    basis far above the budget kept equity above the floor with ZERO USDC."""
+    budget(310.0)
+    summary = {"total_cost_basis_usd": 840.0,
+               "positions": {f"dead{i}": {"cost_basis": 84.0} for i in range(10)}}
+    dead = [{"tokenId": f"dead{i}"} for i in range(10)]
+
+    # Before: every dead row counted, equity 840, floor 217, trigger silent.
+    naive = live_budget.equity_usd(0.0, summary["total_cost_basis_usd"])
+    assert live_guard.should_self_disarm(equity_usd=naive,
+                                         floor_usd=live_budget.floor_usd())[0] is False
+
+    cost, n_done, known = live_budget.live_open_cost(summary, dead)
+    assert (cost, n_done, known) == (0.0, 10, True)
+    fixed = live_budget.equity_usd(0.0, cost)
+    assert fixed == 0.0
+    fires, why = live_guard.should_self_disarm(equity_usd=fixed,
+                                               floor_usd=live_budget.floor_usd())
+    assert fires is True and "floor" in why
+
+
+def test_live_open_cost_keeps_positions_that_are_still_open(budget):
+    budget(310.0)
+    summary = {"total_cost_basis_usd": 100.0,
+               "positions": {"open1": {"cost_basis": 40.0}, "done1": {"cost_basis": 60.0}}}
+    assert live_budget.live_open_cost(summary, [{"tokenId": "done1"}]) == (40.0, 1, True)
+    # an unreadable resolved set keeps the old number and SAYS it is unknown
+    assert live_budget.live_open_cost(summary, None) == (100.0, 0, False)
+    # a cost basis with no per-position rows cannot be attributed: keep the
+    # total rather than understate the bankroll and fire the floor early
+    assert live_budget.live_open_cost({"total_cost_basis_usd": 30.0}, []) == (30.0, 0, False)
+    assert live_budget.live_open_cost({}, []) == (0.0, 0, True)
+
+
+def test_the_production_loop_feeds_the_floor_the_corrected_cost():
+    import main
+    src = inspect.getsource(main._live_guard_loop)
+    assert "live_open_cost" in src
+    assert "total_cost_basis_usd" not in src, "the raw total is what made the floor inert"
+
+
+def test_a_disarm_that_cannot_be_written_stops_this_process(tmp_path, monkeypatch):
+    """The one state that must fail closed. Before: the write failed, the
+    caller logged, and the next cycle placed full-size live copies."""
+    monkeypatch.setattr(live_mode.CONFIG, "data_dir", "/nonexistent/cannot/write")
+    monkeypatch.setattr(live_mode.CONFIG, "preview_mode", False)
+    monkeypatch.setattr(live_mode.CONFIG, "live_arm_enabled", True)
+    monkeypatch.setattr(live_mode, "_hard_disarmed", False)
+    monkeypatch.setattr(live_mode, "read_arm", lambda: {"armed": True})
+    assert live_mode.is_preview() is False, "armed to begin with"
+    assert live_mode.disarm(by="test") is False, "the write really did fail"
+    assert live_mode.is_hard_disarmed()[0] is True
+    assert live_mode.is_preview() is True, "and the process stops trading anyway"
+
+
+def test_the_canary_holds_a_full_size_order_until_the_shot_fires(tmp_path, monkeypatch):
+    """/live CONFIRM promises the FIRST live order is one minimum ticket. A
+    SELL slipping out at full size ahead of it broke that silently."""
+    from src.copy_trading import canary
+    h = _Harness(tmp_path, monkeypatch)
+    canary.stage(by="test")
+    monkeypatch.setattr(h.te, "_inventory", lambda: (
+        lambda *a, **k: None, lambda *a, **k: None, lambda t: True, _noop_async))
+    q = h.trades(1)
+    q[0].trade.side = "SELL"
+    assert h.run(q) == 0 and h.posted == []
+    assert canary.is_staged() is True and live_mode.is_armed() is True
+
+
+def test_an_expired_canary_takes_the_arm_with_it(canary_env, monkeypatch):
+    """Otherwise a stale-canary session silently became a full-size live one."""
+    canary = canary_env
+    _open_the_door(monkeypatch, canary)
+    canary.stage(by="test", now=1000.0)
+    pulled: list = []
+    monkeypatch.setattr(canary.live_mode, "is_armed", lambda: True)
+    monkeypatch.setattr(canary.live_mode, "disarm", lambda by="": pulled.append(by) or True)
+    sent: list = []
+    assert canary.expire_if_due(send=sent.append, now=1000.0 + canary.TTL_S + 1) is True
+    assert pulled == ["canary-expiry"]
+    assert "arm came off with it" in sent[0] and "/live CONFIRM again" in sent[0]

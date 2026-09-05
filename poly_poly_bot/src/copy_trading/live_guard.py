@@ -351,8 +351,22 @@ def run_once(*, pending_orders: Optional[list] = None,
             by = FLOOR_DISARM_BY if is_floor_reason(why) else "live-guard"
             disarmed = bool(live_mode.disarm(by=by))
             if not disarmed:
+                # `disarm` already hard-disarms this process on a write
+                # failure. Say it out loud too: the durable record still says
+                # armed, so the NEXT process to boot would trade.
+                live_mode.hard_disarm("the guard could not persist a disarm")
                 logger.error("[guard] disarm requested but the arm record could "
-                             "not be written; the session may still be armed")
+                             "not be written; this process is hard-disarmed, but "
+                             "the persisted arm still reads ARMED and a restart "
+                             "would trade. Fix the disk, then /live DISARM.")
+                if send is not None:
+                    try:
+                        send("🚨 <b>Could not persist a disarm.</b> This process "
+                             "has stopped trading, but the saved arm still reads "
+                             "ARMED, so a restart would trade. Check disk space "
+                             "on the VM, then send <code>/live DISARM</code>.")
+                    except Exception:
+                        pass
             if send is not None:
                 try:
                     send(f"🛑 <b>Self-disarmed</b>, back to paper.\n{why}")

@@ -143,8 +143,18 @@ def expire_if_due(send=None, now: Optional[float] = None) -> bool:
     d["expired"] = True
     d["expired_ts"] = now
     _write(d)
+    # The owner armed expecting one minimum-size ticket first. Letting the
+    # expiry quietly hand him a full-size live session is the opposite of what
+    # he agreed to, so the arm comes off with the canary.
+    was_armed = live_mode.is_armed()
+    if was_armed:
+        live_mode.disarm(by="canary-expiry")
     msg = ("🐤 Canary expired unfired after 24h: no set-Z copy passed the rails "
-           "while it was staged. /canary CONFIRM stages it again.")
+           "while it was staged. "
+           + ("The arm came off with it, so nothing trades until you send "
+              "/live CONFIRM again. " if was_armed
+              else "Nothing was armed. ")
+           + "/canary CONFIRM stages it again.")
     logger.warn(f"[canary] {msg}")
     if send is not None:
         try:

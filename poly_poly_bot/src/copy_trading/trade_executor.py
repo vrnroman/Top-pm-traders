@@ -662,7 +662,17 @@ async def place_trade_orders(
             from src.copy_trading import canary
             # BUY only: the canary exists to price an ENTRY against the book,
             # and an exit measures nothing it was built to answer.
-            canary_shot = canary.is_staged() and trade.side == "BUY"
+            canary_staged = canary.is_staged()
+            canary_shot = canary_staged and trade.side == "BUY"
+            if canary_staged and not canary_shot:
+                # /live CONFIRM promises the FIRST live order is one ticket at
+                # the minimum. A full-size SELL slipping out ahead of the shot
+                # would break that promise silently, so it waits its turn
+                # rather than being dropped.
+                logger.skip(f"[canary] staged: holding this {trade.side} until the "
+                            f"one shot fires")
+                increment_retry(trade.id)
+                continue
             if canary_shot:
                 from src.copy_trading.order_executor import quote_copy_order
                 _cp = quote_copy_order(trade.side, trade.price, snapshot)
@@ -691,8 +701,23 @@ async def place_trade_orders(
                         if getattr(qt, "received_at_ms", None) else None))
                 pulled = live_mode.disarm(by="canary")
                 if not consumed or not pulled:
+                    # Refusing to post is not enough: the arm record may still
+                    # read ARMED, and the next cycle would place FULL-SIZE
+                    # copies with no canary staged. Stop this process trading.
+                    live_mode.hard_disarm(
+                        "the canary's one-shot or its disarm could not be persisted")
                     logger.error("[canary] could not persist the one-shot or pull the "
-                                 "arm; refusing to post and stopping this batch")
+                                 "arm; this process is hard-disarmed and will place "
+                                 "no further real orders until it is restarted")
+                    try:
+                        from src.copy_trading.telegram_notifier import _send_message
+                        await _send_message(
+                            "🚨 <b>Canary could not be recorded.</b> No order was "
+                            "placed and this process has stopped trading. The saved "
+                            "arm may still read ARMED, so check disk space on the VM "
+                            "and send <code>/live DISARM</code> before restarting.")
+                    except Exception as exc:
+                        logger.warn(f"[canary] hard-disarm message failed: {exc}")
                     break
                 logger.warn(f"[exec] canary: one order at the minimum, ${copy_size:.2f}; "
                             f"the arm is off")
