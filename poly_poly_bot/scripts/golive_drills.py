@@ -227,11 +227,12 @@ def drill_canary_is_bounded() -> None:
     canary.reset(by="drill")
     canary._write({"staged": True, "staged_ts": 0.0, "expires_ts": 9e12,
                    "fired": None, "fill": None})
-    canary.record_fired(order_id="drill-1", market="m", token_id="t",
-                        their_price=0.5, quoted_ask=0.51, order_price=0.51,
-                        copy_size=5.0, notify_latency_s=3.0)
+    canary.consume(market="m", token_id="t", their_price=0.5, quoted_ask=0.51,
+                   copy_size=5.0, notify_latency_s=3.0)
+    check("the shot is spent before any order posts", canary.is_staged() is False)
+    canary.record_fired(order_id="drill-1", order_price=0.51)
     check("once fired it is no longer staged", canary.is_staged() is False)
-    ok2, why2 = canary.stage(by="drill", force_restage=True)
+    ok2, why2 = canary.stage(by="drill")
     check("a fired canary does not restage without RESET", ok2 is False, why2[:60])
 
 

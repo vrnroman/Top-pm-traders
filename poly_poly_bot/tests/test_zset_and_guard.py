@@ -755,8 +755,12 @@ def test_the_executor_checks_set_z_outside_the_tiered_branch():
     from src.copy_trading import trade_executor
     src = inspect.getsource(trade_executor.place_trade_orders)
     zi = src.index("not in set Z")
-    ti = src.index("if TIERED_MODE:")
+    # The routing line now also sends any wallet that carries a tier (every
+    # set-Z wallet does) through the tiered evaluator; the invariant is the
+    # same: the Z check comes first, outside that branch.
+    ti = src.index("if TIERED_MODE or tier is not None:")
     assert zi < ti, "the Z check must come BEFORE the tiered branch"
+    assert src.index("tier = get_wallet_tier(trade.trader_address)") > zi
 
 
 def test_wallet_set_is_derived_from_the_filtered_list(tmp_path):

@@ -145,7 +145,7 @@ def _update_cursor(address: str, ts_iso: str) -> None:
         _trader_cursors[key] = epoch_ms
 
 
-async def fetch_trader_activity(address: str) -> list[DetectedTrade]:
+async def fetch_trader_activity(address: str) -> Optional[list[DetectedTrade]]:
     """Fetch recent activity for a single trader from the Data API.
 
     Returns a list of DetectedTrade objects, deduplicated by canonical ID.
@@ -172,20 +172,23 @@ async def fetch_trader_activity(address: str) -> list[DetectedTrade]:
                 retry_after = float(resp.headers.get("Retry-After", "2"))
                 logger.warn(f"Rate limited fetching {short_address(address)}, backing off {retry_after}s")
                 await asyncio.sleep(retry_after)
-                return []
+                return None
 
             resp.raise_for_status()
             data = resp.json()
 
+    # None, not []: an empty list is a wallet that answered "nothing new"; a
+    # failed fetch is not an answer. The live poller's liveness clock counts
+    # answers, and a rate-limit storm must never read as a heartbeat.
     except httpx.TimeoutException:
         logger.warn(f"Timeout fetching activity for {short_address(address)}")
-        return []
+        return None
     except httpx.HTTPStatusError as exc:
         logger.error(f"HTTP {exc.response.status_code} fetching activity for {short_address(address)}")
-        return []
+        return None
     except Exception as exc:
         logger.error(f"Network error fetching {short_address(address)}: {exc}")
-        return []
+        return None
 
     # data can be a list or wrapped in a key
     items: list[dict] = []
@@ -268,6 +271,8 @@ async def fetch_all_trader_activities() -> list[DetectedTrade]:
         if isinstance(result, BaseException):
             logger.error(f"Error fetching {short_address(addresses[i])}: {result}")
             continue
+        if result is None:
+            continue  # the fetch failed and said so; not an answer
         answered += 1
         all_trades.extend(result)
 

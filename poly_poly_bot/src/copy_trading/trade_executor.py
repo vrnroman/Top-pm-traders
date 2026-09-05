@@ -222,6 +222,7 @@ def _book_preview_exit(trade, sell_shares: float) -> None:
             "tier": held.get("tier", "") or "",
             "trader_address": trade.trader_address,
             "exit": "sell",
+            "source": "preview",
         })
     except Exception as exc:
         logger.warn(f"[exec] preview exit booking failed: {error_message(exc)}")
@@ -424,8 +425,12 @@ async def place_trade_orders(
             alert_only = False
             copy_size = 0.0
 
-            if TIERED_MODE:
-                tier = get_wallet_tier(trade.trader_address)
+            # A set-Z wallet always carries a tier (admit() writes one), so it
+            # is sized by the tiered evaluator whatever the env tier lists say;
+            # the legacy branch below has no governor, no exposure cap and no
+            # trigger, and must not be the path a Z wallet takes.
+            tier = get_wallet_tier(trade.trader_address)
+            if TIERED_MODE or tier is not None:
                 if tier is not None:
                     decision = evaluate_tiered_trade(trade, tier)
                     if decision.alert_only:
@@ -557,6 +562,34 @@ async def place_trade_orders(
             # CONFIG.preview_mode: a live boot prepares (approvals, inventory
             # sync), the arm releases.
             if live_mode.is_preview():
+                if not CONFIG.preview_mode:
+                    # A LIVE process that is runtime-disarmed. No paper
+                    # bookkeeping here: the inventory file is the REAL one in
+                    # this process, the notifier would announce "[LIVE]", and a
+                    # paper exit would write an untagged realized row. Log it,
+                    # record it, and move on.
+                    logger.trade(
+                        f"[DISARMED] would {trade.side} ${copy_size:.2f} on "
+                        f"'{trade.market[:40]}' @ {trade.price:.4f} "
+                        f"(from {short_address(trade.trader_address)}); the arm is off")
+                    record_trade_history(TradeRecord(
+                        timestamp=trade.timestamp,
+                        trader_address=trade.trader_address,
+                        market=trade.market,
+                        side=trade.side,
+                        trader_size=trade.size,
+                        copy_size=copy_size,
+                        price=trade.price,
+                        status="DISARMED",
+                        source=qt.source,
+                        source_detected_at=qt.source_detected_at,
+                        enqueued_at=qt.enqueued_at,
+                        condition_id=trade.condition_id,
+                        token_id=trade.token_id,
+                        outcome=trade.outcome,
+                    ))
+                    mark_trade_as_seen(trade.id)
+                    continue
                 logger.trade(
                     f"[PREVIEW] {trade.side} ${copy_size:.2f} on '{trade.market[:40]}' "
                     f"@ {trade.price:.4f} (from {short_address(trade.trader_address)})"
@@ -597,17 +630,52 @@ async def place_trade_orders(
                 placed += 1
                 continue
 
+            # --- The bankroll governor at the single order sink ---
+            # Whatever branch sized this copy, a real order never leaves
+            # without the governor: closed means refused, the per-copy cap
+            # binds, and the copy trigger is the evidence base's. The tiered
+            # branch already applied these; the legacy branch did not.
+            from src.copy_trading import live_budget
+            gov = live_budget.caps(live=True)
+            if gov is None:
+                logger.skip("[exec] bankroll governor closed (LIVE_BUDGET_USD is not "
+                            "set): refusing a live copy")
+                mark_trade_as_seen(trade.id)
+                continue
+            if trade.side == "BUY" and trade.size < gov.min_trader_bet_usd:
+                logger.skip(f"[exec] target bet ${trade.size:.0f} is under the evidence "
+                            f"base's ${gov.min_trader_bet_usd:.0f}: not copied")
+                mark_trade_as_seen(trade.id)
+                continue
+            if copy_size > gov.per_copy_usd:
+                copy_size = gov.per_copy_usd
+
             # --- The canary: one minimum-size order, then the arm comes off ---
-            # Read once per trade. It only ever LOWERS the size of an order
-            # every rail above has already admitted; it cannot admit one.
+            # It only ever LOWERS the size of an order every rail above has
+            # already admitted; it cannot admit one. The shot is spent and the
+            # arm pulled BEFORE the post: an ambiguous post (accepted by the
+            # CLOB, reply lost) or a failed state write must cost a re-arm,
+            # never a second ticket.
             from src.copy_trading import canary
             canary_shot = canary.is_staged()
             if canary_shot:
                 from src.copy_trading.order_executor import quote_copy_order
                 _cp = quote_copy_order(trade.side, trade.price, snapshot)
                 copy_size = canary.size_for(clob_client, trade.token_id, _cp or trade.price)
-                logger.warn(f"[exec] canary: sizing this copy at the minimum, "
-                            f"${copy_size:.2f}")
+                consumed = canary.consume(
+                    market=trade.market, token_id=trade.token_id,
+                    their_price=trade.price,
+                    quoted_ask=(snapshot or {}).get("best_ask"), copy_size=copy_size,
+                    notify_latency_s=(
+                        (qt.received_at_ms - qt.source_detected_at) / 1000.0
+                        if getattr(qt, "received_at_ms", None) else None))
+                pulled = live_mode.disarm(by="canary")
+                if not consumed or not pulled:
+                    logger.error("[canary] could not persist the one-shot or pull the "
+                                 "arm; refusing to post and stopping this batch")
+                    break
+                logger.warn(f"[exec] canary: one order at the minimum, ${copy_size:.2f}; "
+                            f"the arm is off")
 
             # --- Live order placement ---
             order_submitted_at = time.time() * 1000
@@ -616,6 +684,15 @@ async def place_trade_orders(
             if result is None:
                 logger.error(f"[exec] Order placement returned None for '{trade.market[:40]}'")
                 await tg.trade_failed(trade.market, "Order placement returned no result")
+                if canary_shot:
+                    canary.record_post_failed("order placement returned no result")
+                    try:
+                        from src.copy_trading.telegram_notifier import _send_message
+                        await _send_message(canary.report_text())
+                    except Exception as exc:
+                        logger.warn(f"[canary] post-failed message failed: {exc}")
+                    mark_trade_as_seen(trade.id)
+                    break
                 increment_retry(trade.id)
                 continue
 
@@ -624,22 +701,12 @@ async def place_trade_orders(
                 f"@ {result.order_price:.4f} — order {result.order_id[:12]}..."
             )
             if canary_shot:
-                # The one shot is out. Disarm BEFORE any bookkeeping so a
-                # failure below cannot leave the session armed for a second.
-                canary.record_fired(
-                    order_id=result.order_id, market=trade.market,
-                    token_id=trade.token_id, their_price=trade.price,
-                    quoted_ask=(snapshot or {}).get("best_ask"),
-                    order_price=result.order_price, copy_size=copy_size,
-                    notify_latency_s=(
-                        (qt.received_at_ms - qt.source_detected_at) / 1000.0
-                        if getattr(qt, "received_at_ms", None) else None))
-                live_mode.disarm(by="canary")
+                canary.record_fired(order_id=result.order_id, order_price=result.order_price)
                 try:
-                    from src.copy_trading.telegram_notifier import _send_message
+                    from src.copy_trading.telegram_notifier import _escape_html, _send_message
                     await _send_message(
                         f"🐤 <b>Canary fired</b>: ${copy_size:.2f} on "
-                        f"'{trade.market[:50]}' at {result.order_price:.4f} "
+                        f"'{_escape_html(trade.market[:50])}' at {result.order_price:.4f} "
                         f"(theirs {trade.price:.4f}). The arm is off; the fill "
                         f"report follows when the verifier sees it.")
                 except Exception as exc:
@@ -705,6 +772,11 @@ async def place_trade_orders(
             ))
 
             placed += 1
+            if canary_shot:
+                # The one shot is out and the arm is off. The rest of this
+                # batch must not run: in a live process the preview branch
+                # would write paper into the real inventory.
+                break
 
         except Exception as exc:
             logger.error(

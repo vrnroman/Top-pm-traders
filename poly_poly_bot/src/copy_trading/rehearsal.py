@@ -260,9 +260,13 @@ def daily_message(now: Optional[float] = None) -> str:
     parts: list[str] = []
     try:
         budget = live_budget.stated_budget()
-        era, positions, quotes, wallets = _load_inputs(now)
         if budget is None:
             parts.append("🎯 rehearsal: LIVE_BUDGET_USD not set, nothing to size")
+            era = positions = quotes = wallets = None
+        else:
+            era, positions, quotes, wallets = _load_inputs(now)
+        if budget is None:
+            pass
         elif not wallets:
             parts.append("🎯 rehearsal: set Z is empty, nothing to rehearse")
         else:

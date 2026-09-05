@@ -13,17 +13,38 @@ def _escape_html(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-async def _send_message(text: str) -> None:
+def _plain(text: str) -> str:
+    """Drop the HTML tags and unescape entities, for the plain-text retry."""
+    import re
+    out = re.sub(r"<[^>]+>", "", text)
+    return (out.replace("&lt;", "<").replace("&gt;", ">")
+               .replace("&quot;", '"').replace("&amp;", "&"))
+
+
+async def _send_message(text: str) -> bool:
+    """Send as HTML; on a rejected parse retry as plain text. Returns whether
+    anything was delivered, and LOGS a rejection: a 400 that vanished unlogged
+    is how a message that mattered never reached the owner."""
     if not BOT_TOKEN or not CHAT_ID:
-        return
+        return False
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"},
-            )
+            resp = await client.post(
+                url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"})
+            if resp.status_code == 200:
+                return True
+            logger.warn(f"Telegram rejected an HTML send ({resp.status_code}); "
+                        f"retrying as plain text")
+            resp2 = await client.post(url, json={"chat_id": CHAT_ID, "text": _plain(text)})
+            if resp2.status_code == 200:
+                return True
+            logger.warn(f"Telegram rejected the plain retry too ({resp2.status_code}): "
+                        f"{resp2.text[:120]}")
+            return False
     except Exception as err:
         logger.warn(f"Telegram send failed: {error_message(err)}")
+        return False
 
 
 class TelegramNotifier:

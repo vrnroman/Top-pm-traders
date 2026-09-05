@@ -248,6 +248,10 @@ class OnchainSource:
         while self._running:
             try:
                 latest = self._w3.eth.block_number
+                # A successful chain read is this poller's heartbeat for the
+                # guard's stale-feed trigger (the data-api source stamps its own).
+                from src.copy_trading.trade_store import record_poll_ok
+                record_poll_ok()
 
                 # Skip if cursor is too far behind
                 if latest - cursor > MAX_BLOCKS_BEHIND:

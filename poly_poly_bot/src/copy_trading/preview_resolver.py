@@ -99,6 +99,7 @@ def realize_preview_positions(
             "tier": pos.get("tier", "") or "",
             "trader_address": pos.get("trader_address", "") or "",
             "exit": "resolution",
+            "source": "preview",
         })
         drop.append(token_id)
     return rows, drop

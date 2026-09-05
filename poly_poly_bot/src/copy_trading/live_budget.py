@@ -64,8 +64,12 @@ EXPOSURE_FRAC = _frac("LIVE_BUDGET_EXPOSURE_FRAC", 0.80)
 # default, not a measured optimum.
 DRAWDOWN_FRAC = _frac("LIVE_BUDGET_DRAWDOWN_FRAC", 0.30)
 
-# One chain read a minute at most; the executor asks per trade.
-_BALANCE_TTL_S = 60.0
+# The chain is read by the guard thread (every pass, ~300s) and by the
+# Telegram thread on demand; the executor's asyncio loop only ever reads the
+# cache, because a blocking web3 call there stalls detection, verification
+# and order placement together. A value older than the TTL counts as
+# unreadable, which falls back to the stated budget and says so.
+_BALANCE_TTL_S = 900.0
 _balance_cache: Optional[tuple[float, Optional[float]]] = None
 
 
@@ -106,12 +110,12 @@ def is_open() -> bool:
     return stated_budget() is not None
 
 
-def _read_balance(now: Optional[float] = None) -> Optional[float]:
-    """The proxy wallet's USDC, cached for a minute. None when unreadable."""
+def refresh_balance(now: Optional[float] = None) -> Optional[float]:
+    """Read the proxy wallet's USDC from the chain and cache it. BLOCKING:
+    call from a thread that may wait (the guard loop, the Telegram thread),
+    never from the executor's asyncio loop."""
     global _balance_cache
     now = time.time() if now is None else now
-    if _balance_cache is not None and now - _balance_cache[0] < _BALANCE_TTL_S:
-        return _balance_cache[1]
     try:
         from src.copy_trading.get_balance import get_usdc_balance
         b = float(get_usdc_balance())
@@ -121,6 +125,15 @@ def _read_balance(now: Optional[float] = None) -> Optional[float]:
         val = None
     _balance_cache = (now, val)
     return val
+
+
+def _read_balance(now: Optional[float] = None) -> Optional[float]:
+    """The cached USDC balance, or None when nothing fresh is cached. Never
+    touches the network."""
+    now = time.time() if now is None else now
+    if _balance_cache is not None and now - _balance_cache[0] < _BALANCE_TTL_S:
+        return _balance_cache[1]
+    return None
 
 
 def caps(*, live: Optional[bool] = None, balance: Optional[float] = None,

@@ -91,11 +91,21 @@ def arm(reason: str = "", by: str = "telegram") -> tuple[bool, str]:
     if CONFIG.preview_mode:
         return (False, "PREVIEW_MODE=true at the process level; arming alone "
                        "will not place orders. Both keys are required.")
+    if not CONFIG.strategy1_enabled:
+        # No poller, no executor: arming would trade nothing and the guard's
+        # stale-feed trigger would pull the arm within minutes with a message
+        # that blames the feed.
+        return (False, "Strategy 1 is disabled: there is no live poller or "
+                       "executor to arm.")
     prev = read_arm()
     rec = {"armed": True, "ts": time.time(), "by": by, "reason": reason,
            # Kept forever once set: the daily real-money line renders only
            # after the first arm, so it needs to know one ever happened.
-           "first_armed_ts": prev.get("first_armed_ts") or time.time()}
+           "first_armed_ts": prev.get("first_armed_ts") or time.time(),
+           # The owner's override of the bankroll floor, for THIS arm session
+           # only: set when the disarm this arm follows was the floor's, and
+           # gone with the next disarm of any kind.
+           "floor_override": prev.get("by") == "live-guard:floor"}
     try:
         os.makedirs(os.path.dirname(_path()), exist_ok=True)
         tmp = _path() + ".tmp"

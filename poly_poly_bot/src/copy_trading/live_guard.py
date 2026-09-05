@@ -240,18 +240,37 @@ def should_self_disarm(*, crash_streak: int = 0,
     return (False, "")
 
 
-def _floor_overridden(state: dict) -> bool:
-    """Did the owner re-arm AFTER the floor last tripped? Then the floor is
-    his to ignore for this arm session: the guard hands him the override, not
-    the decision, and does not fight him for it every pass."""
-    trip = state.get("floor_trip_ts")
-    if not trip:
-        return False
+FLOOR_REASON_PREFIX = "bankroll $"
+FLOOR_DISARM_BY = "live-guard:floor"
+
+
+def is_floor_reason(why: str) -> bool:
+    return bool(why) and why.startswith(FLOOR_REASON_PREFIX)
+
+
+def _floor_overridden() -> bool:
+    """Did the owner re-arm right after a floor trip? Then the floor is his
+    to ignore for THIS arm session only. The fact lives on the arm record
+    (``live_mode.arm`` sets ``floor_override`` when the disarm it follows was
+    the floor's), so any later disarm clears it and the floor is back."""
     try:
         arm = live_mode.read_arm()
-        return arm.get("armed") is True and float(arm.get("ts") or 0.0) > float(trip)
+        return arm.get("armed") is True and arm.get("floor_override") is True
     except Exception:
         return False
+
+
+def active_block() -> Optional[str]:
+    """A self-disarm condition the guard currently holds, other than the
+    floor, in its own words. Arming under it would be pulled within one pass,
+    silently, because the edge already fired. None when clear."""
+    st = _read_state()
+    if not st.get("self_disarm"):
+        return None
+    why = str(st.get("self_disarm_reason") or "")
+    if is_floor_reason(why):
+        return None  # the floor is the owner's to override by arming
+    return why or "a self-disarm condition is active"
 
 
 # --------------------------------------------------------------------------- #
@@ -308,35 +327,50 @@ def run_once(*, pending_orders: Optional[list] = None,
                 logger.error(f"[guard] could not cancel {oid}: {exc}")
 
     # The floor: silenced for THIS arm session once the owner has re-armed
-    # after a trip. The number still renders in the daily line; only the
-    # automatic stop steps aside.
-    overridden = _floor_overridden(st)
+    # right after a trip. The number still renders in the daily line; only
+    # the automatic stop steps aside.
+    overridden = _floor_overridden()
     eq_for_trigger = None if overridden else equity_usd
     disarm, why = should_self_disarm(
         crash_streak=crash_streak,
         unredeemed=0 if redeem_unknown else len(unred),
         feed_stale_s=feed_stale_s,
         equity_usd=eq_for_trigger, floor_usd=floor_usd)
-    if (disarm and eq_for_trigger is not None and floor_usd is not None
-            and float(eq_for_trigger) < float(floor_usd)):
-        st["floor_trip_ts"] = now
     disarmed = False
-    # The self-disarm edge is still DETECTED and logged while unarmed, which
-    # is how it gets exercised before there is money on it. It is only
-    # MESSAGED when there is an arm to pull: "self-disarmed, back to paper"
-    # sent to a session that was never off paper is noise, and 255 of them
-    # went out in 20 days.
-    disarm_send = send if armed else None
+    # The self-disarm edge is DETECTED and logged whether or not anything is
+    # armed, which is how it gets exercised before there is money on it. The
+    # owner is messaged when the guard ACTS (every time it pulls the arm, not
+    # only on the edge: a condition that entered while unarmed still has to
+    # announce the disarm it causes after he arms), and told once when a
+    # condition he was told about clears. A "self-disarmed, back to paper"
+    # for a session that was never off paper is noise: 255 went out in 20 days.
     if disarm:
-        # Always allowed, armed or not: this can only move toward preview.
         if armed:
-            live_mode.disarm(by="live-guard")
-            disarmed = True
-        edge("self_disarm", True,
-             f"🛑 <b>Self-disarmed</b>, back to paper.\n{why}", disarm_send, st)
+            # Always allowed: this can only move toward preview. The floor
+            # disarms under its own name so the next arm can carry the override.
+            by = FLOOR_DISARM_BY if is_floor_reason(why) else "live-guard"
+            disarmed = bool(live_mode.disarm(by=by))
+            if not disarmed:
+                logger.error("[guard] disarm requested but the arm record could "
+                             "not be written; the session may still be armed")
+            if send is not None:
+                try:
+                    send(f"🛑 <b>Self-disarmed</b>, back to paper.\n{why}")
+                    st["self_disarm_messaged"] = True
+                except Exception as exc:
+                    logger.warn(f"[guard] alert send failed: {exc}")
+        st["self_disarm_reason"] = why
+        edge("self_disarm", True, f"🛑 Self-disarmed, back to paper. {why}", None, st)
     else:
-        edge("self_disarm", False, "self-disarm condition cleared",
-             disarm_send, st)
+        cleared = edge("self_disarm", False, "self-disarm condition cleared", None, st)
+        if cleared:
+            if st.get("self_disarm_messaged") and send is not None:
+                try:
+                    send("✅ resolved: self-disarm condition cleared")
+                except Exception as exc:
+                    logger.warn(f"[guard] alert send failed: {exc}")
+            st["self_disarm_messaged"] = False
+            st.pop("self_disarm_reason", None)
 
     _write_state(st)
     return {

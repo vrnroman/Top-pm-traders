@@ -168,6 +168,10 @@ def _live_guard_loop():
         try:
             from src.copy_trading import inventory, live_budget, live_mode
             floor_usd = live_budget.floor_usd()
+            if not CONFIG.preview_mode:
+                # The one place the chain is read for the governor: this
+                # thread may block, the executor's loop never does.
+                live_budget.refresh_balance()
             if not CONFIG.preview_mode and live_mode.is_armed():
                 bal = live_budget._read_balance()
                 open_cost = float(inventory.get_inventory_summary().get(

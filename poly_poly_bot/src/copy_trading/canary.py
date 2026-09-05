@@ -94,15 +94,15 @@ def blocking_reasons() -> list[str]:
     return out
 
 
-def stage(by: str = "telegram", now: Optional[float] = None,
-          *, force_restage: bool = False) -> tuple[bool, str]:
-    """Arm the one-shot. Refuses unless every interlock key is turned."""
+def stage(by: str = "telegram", now: Optional[float] = None) -> tuple[bool, str]:
+    """Arm the one-shot. Refuses unless every interlock key is turned, and
+    refuses while a fired record stands (RESET clears it)."""
     now = time.time() if now is None else now
     reasons = blocking_reasons()
     if reasons:
         return (False, "; ".join(reasons))
     d = read()
-    if d.get("fired") and not force_restage:
+    if d.get("fired"):
         return (False, f"already fired at {_iso(d['fired'].get('placed_ts'))}; "
                        f"/canary RESET clears it so another can be staged")
     rec = {"staged": True, "staged_ts": now, "expires_ts": now + TTL_S,
@@ -154,57 +154,102 @@ def expire_if_due(send=None, now: Optional[float] = None) -> bool:
     return True
 
 
+# The CLOB's usual minimum when the book does not say: five shares.
+DEFAULT_MIN_SHARES = 5.0
+
+
 def size_for(clob_client, token_id: str, order_price: float) -> float:
     """The smallest order this market accepts, in USD, never under the bot's
-    own order minimum. Falls back to the bot minimum when the book cannot be
-    read, so the canary cannot silently grow past a ticket."""
+    own order minimum. The book is read as a dict OR an object (the v2 client
+    has returned both shapes); when it cannot be read, five shares is assumed
+    rather than one dollar, so the canary is never sized under the exchange
+    minimum and rejected as if no copy had passed."""
     floor = float(CONFIG.min_order_size_usd)
+    min_shares = 0.0
     try:
         book = clob_client.get_order_book(token_id)
-        min_shares = _num(getattr(book, "min_order_size", None))
-        if min_shares > 0 and order_price > 0:
-            return round(max(floor, min_shares * float(order_price)), 2)
+        raw = (book.get("min_order_size") if isinstance(book, dict)
+               else getattr(book, "min_order_size", None))
+        min_shares = _num(raw)
     except Exception as exc:
-        logger.warn(f"[canary] min order size unreadable, using the bot minimum: {exc}")
-    return round(floor, 2)
+        logger.warn(f"[canary] min order size unreadable: {exc}")
+    if min_shares <= 0:
+        min_shares = DEFAULT_MIN_SHARES
+    price = float(order_price) if order_price and float(order_price) > 0 else 1.0
+    return round(max(floor, min_shares * price), 2)
 
 
 def model_price(their_price: float) -> float:
     """What paper book B would have booked this entry at: their price plus
     the flat slippage model the book uses. Stored at fire time so the report
     never recomputes it from a book that has moved."""
-    bps = float(getattr(CONFIG, "copy_paper_b_slippage_bps", 100) or 100)
-    return round(float(their_price) * (1.0 + bps / 10000.0), 4)
+    raw = getattr(CONFIG, "copy_paper_b_slippage_bps", 100)
+    bps = 100.0 if raw is None else float(raw)
+    return round(min(0.999, float(their_price) * (1.0 + bps / 10000.0)), 4)
 
 
-def record_fired(*, order_id: str, market: str, token_id: str,
-                 their_price: float, quoted_ask: Optional[float],
-                 order_price: float, copy_size: float,
-                 notify_latency_s: Optional[float], now: Optional[float] = None) -> dict:
-    """The one order went out. Staged flips off here, whatever the fill does."""
+def consume(*, market: str, token_id: str, their_price: float,
+            quoted_ask: Optional[float], copy_size: float,
+            notify_latency_s: Optional[float], now: Optional[float] = None) -> bool:
+    """Spend the one shot BEFORE the order is posted.
+
+    Staged flips off and a fired record is written with no order id yet. An
+    ambiguous post (the CLOB accepted it, the reply was lost) or a failed
+    post then costs the owner a RESET and a re-arm, never a second ticket.
+    Returns False when the record could not be persisted; the caller must
+    then refuse to post.
+    """
     now = time.time() if now is None else now
     d = read()
     d["staged"] = False
     d["fired"] = {
-        "order_id": order_id, "market": market, "token_id": token_id,
+        "order_id": None, "posted": False, "market": market, "token_id": token_id,
         "their_price": their_price, "quoted_ask": quoted_ask,
         "model_price": model_price(their_price),
-        "order_price": order_price, "copy_size": copy_size,
+        "order_price": None, "copy_size": copy_size,
         "notify_latency_s": notify_latency_s, "placed_ts": now,
     }
     d["fill"] = None
+    ok = _write(d)
+    if ok:
+        logger.warn(f"[canary] CONSUMED: one ${copy_size:.2f} order on '{market[:40]}' "
+                    f"is about to post; the arm comes off now")
+    return ok
+
+
+def record_fired(*, order_id: str, order_price: float, now: Optional[float] = None) -> dict:
+    """The one order posted. Completes the record ``consume`` opened."""
+    now = time.time() if now is None else now
+    d = read()
+    f = d.get("fired") or {}
+    f.update({"order_id": order_id, "posted": True, "order_price": order_price,
+              "placed_ts": now})
+    d["fired"] = f
+    d["staged"] = False
     _write(d)
-    logger.warn(f"[canary] FIRED: {order_id[:12]} ${copy_size:.2f} on "
-                f"'{market[:40]}' at {order_price:.4f} (theirs {their_price:.4f}); "
-                f"the arm comes off now")
-    return d["fired"]
+    logger.warn(f"[canary] FIRED: {order_id[:12]} ${_num(f.get('copy_size')):.2f} on "
+                f"'{str(f.get('market') or '')[:40]}' at {order_price:.4f} "
+                f"(theirs {_num(f.get('their_price')):.4f})")
+    return f
+
+
+def record_post_failed(reason: str) -> None:
+    """The one order did not post. The shot stays spent; RESET re-opens it."""
+    d = read()
+    f = d.get("fired") or {}
+    f.update({"posted": False, "post_error": str(reason)[:200]})
+    d["fired"] = f
+    d["staged"] = False
+    _write(d)
+    logger.error(f"[canary] the one order did not post: {reason}")
 
 
 def record_fill(order_id: str, fill, now: Optional[float] = None) -> Optional[str]:
     """The verifier saw the order's fate. Returns the report text ONCE."""
     d = read()
     fired = d.get("fired") or {}
-    if not fired or fired.get("order_id") != order_id or d.get("fill"):
+    if not fired or not fired.get("order_id") or fired.get("order_id") != order_id \
+            or d.get("fill"):
         return None
     status = str(getattr(fill, "status", "") or "")
     if not status or status == "UNKNOWN":
@@ -235,8 +280,14 @@ def report_text(d: Optional[dict] = None) -> str:
     fill = d.get("fill") or {}
     if not f:
         return "🐤 Canary: not fired yet."
-    lines = [f"🐤 <b>Canary report</b>, order {f.get('order_id', '')[:12]}",
-             f"market: {f.get('market', '')[:60]}",
+    from src.copy_trading.telegram_notifier import _escape_html
+    if not f.get("posted"):
+        return (f"🐤 <b>Canary</b>: the one order did not post "
+                f"({_escape_html(str(f.get('post_error') or 'no order id returned'))}). "
+                f"The shot is spent and the arm is off. <code>/canary RESET</code> then "
+                f"<code>/live CONFIRM</code> to try again.")
+    lines = [f"🐤 <b>Canary report</b>, order {str(f.get('order_id') or '')[:12]}",
+             f"market: {_escape_html(str(f.get('market') or '')[:60])}",
              f"their price {_num(f.get('their_price')):.4f} · quoted ask at detection "
              f"{_num(f.get('quoted_ask')):.4f} · our order {_num(f.get('order_price')):.4f} "
              f"· ${_num(f.get('copy_size')):.2f}"]
@@ -289,6 +340,9 @@ def status_lines() -> list[str]:
         left = (_num(d.get("expires_ts")) - now) / 3600
         out.append(f"staged by {d.get('by', '?')} at {_iso(d.get('staged_ts'))}, "
                    f"expires in {left:.1f}h")
+    elif d.get("fired") and not d["fired"].get("posted"):
+        out.append(f"spent at {_iso(d['fired'].get('placed_ts'))} but the order did not "
+                   f"post; /canary RESET to stage again")
     elif d.get("fired"):
         out.append(f"fired at {_iso(d['fired'].get('placed_ts'))}; "
                    f"{'fill recorded' if d.get('fill') else 'fill pending'}")

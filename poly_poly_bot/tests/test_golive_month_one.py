@@ -56,11 +56,36 @@ def test_fetch_all_stamps_the_clock_only_when_a_wallet_answered(monkeypatch):
     assert _run(trade_monitor.fetch_all_trader_activities()) == []
     assert trade_store.last_poll_ok_ts() == 1.0, "all fetches failed, clock must not move"
 
+    async def failed_quietly(addr):
+        return None  # what the real function returns on 429/timeout/5xx
+    monkeypatch.setattr(trade_monitor, "fetch_trader_activity", failed_quietly)
+    assert _run(trade_monitor.fetch_all_trader_activities()) == []
+    assert trade_store.last_poll_ok_ts() == 1.0, "a swallowed failure is not an answer"
+
     async def quiet(addr):
         return []
     monkeypatch.setattr(trade_monitor, "fetch_trader_activity", quiet)
     _run(trade_monitor.fetch_all_trader_activities())
     assert trade_store.last_poll_ok_ts() > 1.0, "a quiet wallet still answered"
+
+
+def test_the_real_fetch_returns_none_on_failure_not_an_empty_list(monkeypatch):
+    from src.copy_trading import trade_monitor
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            raise trade_monitor.httpx.TimeoutException("slow")
+    monkeypatch.setattr(trade_monitor.httpx, "AsyncClient", _Client)
+    assert _run(trade_monitor.fetch_trader_activity("0x" + "a" * 40)) is None
 
 
 def test_an_empty_z_is_a_completed_poll_not_a_dead_pipeline(monkeypatch):
@@ -497,11 +522,13 @@ def test_canary_stages_fires_once_and_reports_once(canary_env, monkeypatch):
     assert canary.size_for(_Clob(), "tok", 0.8) == 5.0
     assert canary.size_for(_Clob(), "tok", 2.0) == 10.0
 
-    canary.record_fired(order_id="o1", market="m", token_id="t", their_price=0.5,
-                        quoted_ask=0.51, order_price=0.51, copy_size=5.0,
-                        notify_latency_s=3.0, now=1002.0)
-    assert canary.is_staged(now=1003.0) is False, "one shot"
-    assert canary.has_fired()
+    assert canary.consume(market="m", token_id="t", their_price=0.5, quoted_ask=0.51,
+                          copy_size=5.0, notify_latency_s=3.0, now=1002.0)
+    assert canary.is_staged(now=1003.0) is False, "spent before the post"
+    assert canary.has_fired() and canary.read()["fired"]["posted"] is False
+    assert canary.record_fill("o1", object(), now=1003.0) is None, "no order id yet"
+    canary.record_fired(order_id="o1", order_price=0.51, now=1002.5)
+    assert canary.read()["fired"]["posted"] is True
 
     class _Fill:
         status, fill_price, filled_shares, filled_usd = "FILLED", 0.52, 9.6, 5.0
@@ -528,14 +555,16 @@ def test_canary_expires_unfired_and_says_so_once(canary_env, monkeypatch):
     assert len(sent) == 1 and canary.is_staged() is False
 
 
-def test_the_executor_sizes_the_canary_before_the_order_and_disarms_after():
-    """The seam: the live path, not a helper."""
+def test_the_executor_spends_the_canary_and_pulls_the_arm_before_the_post():
+    """The seam: the shot is consumed and the arm pulled BEFORE the CLOB is
+    touched, so an ambiguous post costs a re-arm, never a second ticket."""
     from src.copy_trading import trade_executor
     src = inspect.getsource(trade_executor.place_trade_orders)
     i_stage = src.index("canary.is_staged()")
-    i_order = src.index("_execute_copy_order(clob_client, trade, copy_size, snapshot)")
+    i_consume = src.index("canary.consume(")
     i_disarm = src.index('live_mode.disarm(by="canary")')
-    assert i_stage < i_order < i_disarm
+    i_order = src.index("_execute_copy_order(clob_client, trade, copy_size, snapshot)")
+    assert i_stage < i_consume < i_disarm < i_order
     vsrc = inspect.getsource(trade_executor.process_verifications)
     assert "canary.record_fill(po.order_id, fill)" in vsrc
 
@@ -591,7 +620,9 @@ def test_a_bankroll_under_the_floor_disarms_and_a_losing_session_alone_does_not(
 
 
 def test_the_owner_rearming_after_a_trip_overrides_the_floor(tmp_path, monkeypatch):
-    """The guard hands him the override, not the decision."""
+    """The guard hands him the override, not the decision. The override is a
+    fact on the ARM RECORD for that session only; it never outlives the next
+    disarm (the code-review found the first version stayed overridden forever)."""
     monkeypatch.setattr(live_guard.CONFIG, "data_dir", str(tmp_path))
     monkeypatch.setattr(live_mode.CONFIG, "data_dir", str(tmp_path))
     arm = {"armed": True, "ts": 1000.0}
@@ -599,25 +630,70 @@ def test_the_owner_rearming_after_a_trip_overrides_the_floor(tmp_path, monkeypat
     monkeypatch.setattr(live_guard.live_mode, "read_arm", lambda: arm)
     disarms: list = []
     monkeypatch.setattr(live_guard.live_mode, "disarm", lambda by="": disarms.append(by) or True)
+    sent: list = []
 
-    out = live_guard.run_once(equity_usd=200.0, floor_usd=217.0, now=2000.0)
-    assert out["self_disarmed"] is True and disarms == ["live-guard"]
-    assert live_guard._read_state().get("floor_trip_ts") == 2000.0
+    out = live_guard.run_once(equity_usd=200.0, floor_usd=217.0, now=2000.0, send=sent.append)
+    assert out["self_disarmed"] is True and disarms == ["live-guard:floor"], "the floor disarms under its own name"
+    assert sent and "Self-disarmed" in sent[0], "an acted disarm is always messaged"
 
-    # Still under the floor, and the owner has NOT re-armed: trips again.
-    out = live_guard.run_once(equity_usd=200.0, floor_usd=217.0, now=2300.0)
+    # Still under the floor, re-armed WITHOUT the override flag: trips again,
+    # and the message goes out again even though the edge did not change.
+    out = live_guard.run_once(equity_usd=200.0, floor_usd=217.0, now=2300.0, send=sent.append)
     assert out["self_disarmed"] is True and out["floor_overridden"] is False
+    assert len(sent) == 2
 
-    # The owner re-arms after the trip: the floor steps aside for this session.
-    arm["ts"] = 2500.0
+    # The owner re-armed right after the floor's own disarm: the record says so.
+    arm.update({"ts": 2500.0, "floor_override": True})
     out = live_guard.run_once(equity_usd=200.0, floor_usd=217.0, now=2600.0)
     assert out["self_disarmed"] is False and out["floor_overridden"] is True
+
+    # A stale-feed trigger under the floor is NOT the floor's business.
+    arm.update({"floor_override": False})
+    out = live_guard.run_once(feed_stale_s=3600, equity_usd=300.0, floor_usd=217.0, now=2700.0)
+    assert disarms[-1] == "live-guard"
+
+
+def test_a_condition_that_entered_while_unarmed_still_announces_the_disarm(tmp_path, monkeypatch):
+    """Edge fired silently while unarmed; the owner arms; the guard must say
+    why it pulled the arm even though the edge did not change."""
+    monkeypatch.setattr(live_guard.CONFIG, "data_dir", str(tmp_path))
+    sent: list = []
+    live_guard.run_once(feed_stale_s=3600, send=sent.append)      # unarmed: silent
+    assert sent == [] and live_guard.active_block(), "and /live CONFIRM can see it"
+    monkeypatch.setattr(live_guard.live_mode, "is_armed", lambda: True)
+    monkeypatch.setattr(live_guard.live_mode, "disarm", lambda by="": True)
+    out = live_guard.run_once(feed_stale_s=3600, send=sent.append)
+    assert out["self_disarmed"] is True and len(sent) == 1 and "Self-disarmed" in sent[0]
+    monkeypatch.setattr(live_guard.live_mode, "is_armed", lambda: False)
+    live_guard.run_once(feed_stale_s=10, send=sent.append)         # clears
+    assert len(sent) == 2 and "resolved" in sent[1]
+    assert live_guard.active_block() is None
+
+
+def test_the_floor_is_not_a_block_on_arming_but_a_trust_trigger_is(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_guard.CONFIG, "data_dir", str(tmp_path))
+    live_guard.run_once(equity_usd=100.0, floor_usd=217.0)
+    assert live_guard.active_block() is None, "the floor is his to override by arming"
+    live_guard.run_once(equity_usd=300.0, floor_usd=217.0, feed_stale_s=3600)
+    assert "no trade data" in (live_guard.active_block() or "")
+
+
+def test_live_confirm_refuses_under_an_active_guard_block(tmp_path, monkeypatch):
+    import src.telegram_bot as tb
+    monkeypatch.setattr(live_guard, "active_block", lambda: "no trade data for 60 minutes")
+    armed: list = []
+    monkeypatch.setattr(live_mode, "arm", lambda reason="", by="": armed.append(1) or (True, "armed"))
+    sent: list = []
+    with patch.object(tb, "send_message", lambda x, **k: sent.append(x)):
+        tb._handle_live("/live CONFIRM")
+    assert armed == [] and "Not armed" in sent[0] and "no trade data" in sent[0]
 
 
 def test_the_arm_record_remembers_the_first_arm_across_disarms(tmp_path, monkeypatch):
     monkeypatch.setattr(live_mode.CONFIG, "data_dir", str(tmp_path))
     monkeypatch.setattr(live_mode.CONFIG, "live_arm_enabled", True)
     monkeypatch.setattr(live_mode.CONFIG, "preview_mode", False)
+    monkeypatch.setattr(live_mode.CONFIG, "strategy1_enabled", True)
     ok, _ = live_mode.arm(reason="t", by="test")
     assert ok
     first = live_mode.read_arm()["first_armed_ts"]
@@ -626,6 +702,29 @@ def test_the_arm_record_remembers_the_first_arm_across_disarms(tmp_path, monkeyp
     assert live_mode.read_arm()["first_armed_ts"] == first
     live_mode.arm(reason="again", by="test")
     assert live_mode.read_arm()["first_armed_ts"] == first
+    assert live_mode.read_arm().get("floor_override") is False
+
+
+def test_the_floor_override_rides_exactly_one_arm_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_mode.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(live_mode.CONFIG, "live_arm_enabled", True)
+    monkeypatch.setattr(live_mode.CONFIG, "preview_mode", False)
+    monkeypatch.setattr(live_mode.CONFIG, "strategy1_enabled", True)
+    live_mode.disarm(by="live-guard:floor")
+    live_mode.arm(reason="override", by="test")
+    assert live_mode.read_arm()["floor_override"] is True
+    live_mode.disarm(by="canary")
+    live_mode.arm(reason="again", by="test")
+    assert live_mode.read_arm()["floor_override"] is False, "the floor is back"
+
+
+def test_arming_needs_a_live_poller(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_mode.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(live_mode.CONFIG, "live_arm_enabled", True)
+    monkeypatch.setattr(live_mode.CONFIG, "preview_mode", False)
+    monkeypatch.setattr(live_mode.CONFIG, "strategy1_enabled", False)
+    ok, why = live_mode.arm(reason="t", by="test")
+    assert ok is False and "Strategy 1 is disabled" in why
 
 
 # --------------------------------------------------------------------------- #
@@ -722,9 +821,9 @@ def test_canary_report_prints_the_models_next_to_the_fill(canary_env, monkeypatc
     canary = canary_env
     monkeypatch.setattr(CONFIG, "copy_paper_b_slippage_bps", 100)
     canary._write({"staged": True, "staged_ts": 0.0, "expires_ts": 9e12, "fired": None, "fill": None})
-    canary.record_fired(order_id="o9", market="m", token_id="t", their_price=0.5,
-                        quoted_ask=0.51, order_price=0.51, copy_size=5.0,
-                        notify_latency_s=2.0, now=10.0)
+    canary.consume(market="m", token_id="t", their_price=0.5, quoted_ask=0.51,
+                   copy_size=5.0, notify_latency_s=2.0, now=10.0)
+    canary.record_fired(order_id="o9", order_price=0.51, now=10.5)
     assert canary.read()["fired"]["model_price"] == 0.505, "stored at fire time"
 
     class _Fill:
@@ -791,3 +890,161 @@ def test_sweep_message_always_includes_the_stated_budget(budget, monkeypatch):
     monkeypatch.setattr(rehearsal, "sweep", fake_sweep)
     rehearsal.sweep_message([250.0, 400.0])
     assert seen["b"] == [250.0, 333.0, 400.0]
+
+
+# --------------------------------------------------------------------------- #
+# The money path, driven through the real entry point
+# --------------------------------------------------------------------------- #
+
+class _Harness:
+    """Everything place_trade_orders touches, faked at the seams it imports
+    through, with the interlock, set Z, the governor and the canary REAL."""
+
+    def __init__(self, tmp_path, monkeypatch, *, armed=True, budget=310.0):
+        from src.copy_trading import canary, daily_spend_guard, trade_executor, zset
+        self.te = trade_executor
+        for mod in (canary, live_mode, live_guard, zset.promotion_state):
+            monkeypatch.setattr(mod.CONFIG, "data_dir", str(tmp_path))
+        monkeypatch.setattr(CONFIG, "data_dir", str(tmp_path))
+        monkeypatch.setattr(CONFIG, "preview_mode", False)
+        monkeypatch.setattr(CONFIG, "live_arm_enabled", True)
+        monkeypatch.setattr(CONFIG, "strategy1_enabled", True)
+        monkeypatch.setattr(CONFIG, "live_budget_usd", budget)
+        monkeypatch.setattr(CONFIG, "min_order_size_usd", 5.0)
+        monkeypatch.setattr(CONFIG, "copy_paper_min_usd", 300.0)
+        monkeypatch.setattr(CONFIG, "max_copies_per_market_side", 2)
+        monkeypatch.setattr(CONFIG, "max_trade_age_hours", 1.0)
+        monkeypatch.setattr(daily_spend_guard, "_STATE_FILE", str(tmp_path / "spend.json"))
+        monkeypatch.setattr(live_budget, "_balance_cache", None)
+        zset.promotion_state.clear_cache()
+        zset.admit(W1, ready=True, checks=[], settled=[_P(ideal=6.0, opened=5.0)] * 30,
+                   era_floor=1.0, rails_supplied=True)
+        if armed:
+            ok, why = live_mode.arm(reason="test", by="test")
+            assert ok, why
+        else:
+            live_mode.disarm(by="test")
+
+        self.seen: set = set()
+        self.history: list = []
+        self.posted: list = []
+        self.bought: list = []
+        self.placed_msgs: list = []
+        self.failed_msgs: list = []
+        self.post_result = "ok"
+
+        monkeypatch.setattr(trade_executor, "_trade_store", lambda: (
+            lambda i: i in self.seen, lambda i: self.seen.add(i), lambda i: 0,
+            lambda i: False, lambda r: self.history.append(r), lambda k, s: 0))
+        monkeypatch.setattr(trade_executor, "_trade_queue",
+                            lambda: (lambda *a, **k: None, lambda *a, **k: None, lambda *a, **k: 0))
+        monkeypatch.setattr(trade_executor, "_inventory", lambda: (
+            lambda *a, **k: self.bought.append(a), lambda *a, **k: None,
+            lambda t: False, _noop_async))
+
+        class _TG:
+            async def trade_placed(s, *a, **k):
+                self.placed_msgs.append(a)
+
+            async def trade_failed(s, *a, **k):
+                self.failed_msgs.append(a)
+        monkeypatch.setattr(trade_executor, "_telegram", lambda: _TG())
+        monkeypatch.setattr(trade_executor, "_pattern_detector", lambda: _noop_async)
+
+        class _T1C:
+            enabled = False
+        from src.copy_trading.strategy_config import get_wallet_tier
+        monkeypatch.setattr(trade_executor, "_strategy_config",
+                            lambda: (True, get_wallet_tier, _T1C()))
+        from src.models import TieredCopyDecision
+        monkeypatch.setattr(trade_executor, "_tiered_risk", lambda: (
+            lambda t, tier: TieredCopyDecision(should_copy=True, copy_size=25.0,
+                                               tier=tier, alert_only=False),
+            lambda *a, **k: None, lambda *a, **k: None))
+        monkeypatch.setattr(trade_executor, "_risk_manager",
+                            lambda: (None, lambda *a, **k: None, lambda *a, **k: None))
+
+        async def snap(client, token_id):
+            return {"best_bid": 0.49, "best_ask": 0.51, "midpoint": 0.50, "spread_bps": 400}
+        monkeypatch.setattr(trade_executor, "_get_market_snapshot", snap)
+        monkeypatch.setattr(trade_executor, "_check_market_quality", lambda t, s: None)
+
+        async def post(client, trade, copy_size, snapshot):
+            from src.models import OrderResult
+            self.posted.append(copy_size)
+            if self.post_result == "ok":
+                return OrderResult(order_id=f"ord-{len(self.posted)}", shares=10.0,
+                                   order_price=0.51)
+            return None
+        monkeypatch.setattr(trade_executor, "_execute_copy_order", post)
+
+    def trades(self, n):
+        from datetime import datetime, timezone
+
+        from src.models import DetectedTrade, QueuedTrade
+        out = []
+        for i in range(n):
+            t = DetectedTrade(id=f"t{i}", trader_address=W1,
+                              timestamp=datetime.now(timezone.utc).isoformat(),
+                              market=f"m{i}", token_id=f"tok{i}", condition_id=f"c{i}",
+                              side="BUY", size=1000.0, price=0.5)
+            out.append(QueuedTrade(trade=t, enqueued_at=float(i), source_detected_at=float(i)))
+        return out
+
+    def run(self, queued):
+        class _Clob:
+            def get_order_book(self, token_id):
+                return {"min_order_size": "5"}
+        return _run(self.te.place_trade_orders(queued, _Clob()))
+
+
+async def _noop_async(*a, **k):
+    return None
+
+
+def test_the_canary_fires_once_and_the_rest_of_the_batch_never_posts(tmp_path, monkeypatch):
+    from src.copy_trading import canary
+    h = _Harness(tmp_path, monkeypatch)
+    assert canary.stage(by="test")[0]
+    placed = h.run(h.trades(3))
+    assert placed == 1 and h.posted == [5.0], "one order, at the $5 minimum"
+    rec = canary.read()["fired"]
+    assert rec["posted"] is True and rec["order_id"] == "ord-1" and rec["model_price"] == 0.505
+    assert live_mode.is_armed() is False, "the arm came off"
+    assert h.seen == {"t0"}, "the rest of the batch was left for the next cycle, not paper-traded"
+
+
+def test_a_failed_canary_post_spends_the_shot_and_keeps_the_arm_off(tmp_path, monkeypatch):
+    from src.copy_trading import canary
+    h = _Harness(tmp_path, monkeypatch)
+    canary.stage(by="test")
+    h.post_result = "fail"
+    placed = h.run(h.trades(2))
+    assert placed == 0 and len(h.posted) == 1, "no retry of a real order"
+    rec = canary.read()["fired"]
+    assert rec["posted"] is False and "no result" in rec["post_error"]
+    assert live_mode.is_armed() is False and canary.is_staged() is False
+    assert "did not post" in canary.report_text()
+    assert canary.stage(by="test")[0] is False, "spent until RESET"
+
+
+def test_a_disarmed_live_process_writes_no_paper_into_the_live_inventory(tmp_path, monkeypatch):
+    h = _Harness(tmp_path, monkeypatch, armed=False)
+    assert live_mode.is_preview() is True and CONFIG.preview_mode is False
+    placed = h.run(h.trades(1))
+    assert placed == 0 and h.posted == [] and h.bought == []
+    assert h.placed_msgs == [], "no '[LIVE] Order Placed' for an order that did not happen"
+    assert [r.status for r in h.history] == ["DISARMED"] and h.seen == {"t0"}
+
+
+def test_the_sink_refuses_a_live_copy_when_the_governor_is_closed(tmp_path, monkeypatch):
+    h = _Harness(tmp_path, monkeypatch, budget=0.0)
+    placed = h.run(h.trades(1))
+    assert placed == 0 and h.posted == [] and h.seen == {"t0"}
+
+
+def test_the_sink_caps_the_copy_at_the_governor_size(tmp_path, monkeypatch):
+    h = _Harness(tmp_path, monkeypatch)
+    placed = h.run(h.trades(1))
+    assert placed == 1 and h.posted == [7.75], "the tier said $25, the governor says $7.75"
+    assert live_mode.is_armed() is True, "no canary staged, the arm stays"

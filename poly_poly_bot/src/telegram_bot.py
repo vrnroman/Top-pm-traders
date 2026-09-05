@@ -1791,7 +1791,9 @@ def _handle_zset_candidates() -> None:
         send_message("Nothing passes the gate today and set Z is empty. "
                      "An empty Z is a safe state: with nothing in it, arming trades nothing.")
         return
-    for c, rq in rows:
+    for i, (c, rq) in enumerate(rows):
+        if i:
+            _time.sleep(0.4)  # a burst of cards is what Telegram rate-limits
         in_z = c.wallet.lower() in z
         text = zc.render_card(
             c, rq=rq, pen=zc.penalty_slice(c.wallet, quote_rows),
@@ -1821,12 +1823,27 @@ def _handle_live(text: str) -> None:
         return
 
     if len(parts) > 1 and parts[1].upper() == "CONFIRM":
+        # A self-disarm condition the guard already holds would pull this arm
+        # within one pass, and the edge has already fired so it would do it
+        # without a word. Say so now instead.
+        from src.copy_trading import live_guard
+        block = live_guard.active_block()
+        if block:
+            send_message(f"⏸ <b>Not armed.</b> The guard holds a self-disarm condition "
+                         f"and would pull the arm within 5 minutes: {_esc(block)}. "
+                         f"Clear it first.")
+            return
         ok, detail = live_mode.arm(reason=" ".join(parts[2:])[:200], by="telegram")
         if ok:
             from src.copy_trading import canary
             lines = ["🔴 <b>ARMED for real orders.</b>",
                      "Both interlock keys are turned. Copies from here place real "
                      "money."]
+            if live_mode.read_arm().get("floor_override"):
+                lines.append("")
+                lines.append("⚠️ The bankroll floor tripped on the last session. "
+                             "Arming now overrides it for this session; the next "
+                             "disarm of any kind puts the floor back.")
             # The first live session is bounded to one ticket unless the owner
             # says otherwise: a canary that has never fired is staged here, so
             # the arm and the canary are one motion, not two he has to hold.
@@ -1861,6 +1878,8 @@ def _handle_live(text: str) -> None:
     # The bankroll governor: what a copy would be sized at, from the budget
     # the owner stated and (live) the balance the chain reports.
     from src.copy_trading import live_budget
+    if not CONFIG.preview_mode:
+        live_budget.refresh_balance()  # the Telegram thread may block; the executor never does
     lines.append("")
     lines.append("<b>Bankroll governor</b>")
     for ln in live_budget.status_lines():
