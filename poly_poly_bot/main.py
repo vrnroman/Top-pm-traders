@@ -113,6 +113,7 @@ def _live_guard_loop():
 
     interval = 300.0
     crash_streak = 0
+    guard_started = time.time()
     logger.info("[guard] live guard started (detect always, act only when armed)")
     while not _shutdown_event.is_set():
         # Gather the REAL inputs, from the sources that actually know. An
@@ -136,25 +137,49 @@ def _live_guard_loop():
         except Exception as exc:
             read_failed = True
             logger.error(f"[guard] could not read redeemable positions: {exc}")
-        # How long since the detector last saw ANY trade. This is the input
-        # the stale-feed trigger needs and never had.
+        # How long since the LIVE poller last completed a successful poll of
+        # the watched wallets. The pipeline's clock, not the market's: the
+        # earlier version read the newest shadow-quote row, so every quiet
+        # hour with nothing to detect read as a dead feed and the trigger
+        # flapped 255 times in 20 days, messaging the owner each time.
         feed_stale_s = None
         try:
-            from src.copy_trading import shadow_quote
-            # Bounded: this runs every 300s on an e2-small and the log
-            # holds up to 20k rows; only the newest matter here.
-            rows = shadow_quote.load_rows(since_ts=time.time() - 3600)
-            if rows:
-                newest = max(float(r.get("detected_at") or 0) for r in rows)
-                if newest > 0:
-                    feed_stale_s = max(0.0, time.time() - newest)
+            from src.copy_trading import trade_store
+            ts = trade_store.last_poll_ok_ts()
+            # Before the first successful poll the clock runs from the guard's
+            # own start, so a poller that never succeeds after boot still
+            # trips the trigger instead of leaving it inert.
+            feed_stale_s = max(0.0, time.time() - (ts if ts else guard_started))
         except Exception:
             pass
 
         try:
+            from src.copy_trading import canary
+            canary.expire_if_due(send=telegram_bot.send_message)
+        except Exception as exc:
+            logger.warn(f"[guard] canary expiry check failed: {exc}")
+        # The floor under the bankroll: realized equity (USDC on chain plus
+        # open positions at cost) against the drawdown floor the governor
+        # derives from LIVE_BUDGET_USD. Only measured off paper; in preview
+        # the equity is None and the trigger is inert, the floor still
+        # renders. A failed balance read is None too, never a zero that
+        # would read as a wipe-out.
+        equity_usd, floor_usd = None, None
+        try:
+            from src.copy_trading import inventory, live_budget, live_mode
+            floor_usd = live_budget.floor_usd()
+            if not CONFIG.preview_mode and live_mode.is_armed():
+                bal = live_budget._read_balance()
+                open_cost = float(inventory.get_inventory_summary().get(
+                    "total_cost_basis_usd", 0.0) or 0.0)
+                equity_usd = live_budget.equity_usd(bal, open_cost)
+        except Exception as exc:
+            logger.warn(f"[guard] could not read equity for the floor: {exc}")
+        try:
             out = live_guard.run_once(
                 pending_orders=pending, redeemable=redeemable,
                 feed_stale_s=feed_stale_s,
+                equity_usd=equity_usd, floor_usd=floor_usd,
                 crash_streak=crash_streak, send=telegram_bot.send_message)
             crash_streak = crash_streak + 1 if read_failed else 0
             if out.get("stuck_orders") or out.get("unredeemed"):
@@ -957,6 +982,17 @@ def _ab_race_reporter_loop():
                 f"[AB-RACE] daily snapshot {'sent' if sent_snap else 'SEND FAILED'} "
                 f"(era_day={cmp_.get('era_days', 0):.1f}, "
                 f"era_floor={era_floor:.0f})")
+            # Month one: the rehearsal at the owner's caps for set Z, and the
+            # real-money line. Its own message so a failure here cannot cost
+            # the snapshot, and labelled counterfactual so it never reads as
+            # a book.
+            try:
+                from src.copy_trading import rehearsal
+                sent_reh = telegram_bot._send_chunked(rehearsal.daily_message())
+                logger.info(f"[AB-RACE] rehearsal line "
+                            f"{'sent' if sent_reh else 'SEND FAILED'}")
+            except Exception as exc:
+                logger.warning(f"[AB-RACE] rehearsal line failed: {exc}")
             st = era_state.load(state_path)
             era = cmp_.get("era_start")
             # Verdict clock: the confirmed /verdict overlay outranks env (an

@@ -244,7 +244,11 @@ async def fetch_all_trader_activities() -> list[DetectedTrade]:
         if a and a.lower() not in seen:
             seen.add(a.lower())
             addresses.append(a)
+    from src.copy_trading.trade_store import record_poll_ok
     if not addresses:
+        # Nothing to ask is still a completed poll: an empty Z must not read
+        # as a dead pipeline, it reads as a session that can trade nothing.
+        record_poll_ok()
         return []
 
     semaphore = asyncio.Semaphore(CONFIG.fetch_concurrency)
@@ -259,10 +263,17 @@ async def fetch_all_trader_activities() -> list[DetectedTrade]:
     )
 
     all_trades: list[DetectedTrade] = []
+    answered = 0
     for i, result in enumerate(results):
         if isinstance(result, BaseException):
             logger.error(f"Error fetching {short_address(addresses[i])}: {result}")
             continue
+        answered += 1
         all_trades.extend(result)
 
+    # The liveness clock advances only when at least one wallet answered. A
+    # poll where every fetch failed is exactly the outage the stale-feed
+    # trigger exists for, so it must not look like a heartbeat.
+    if answered:
+        record_poll_ok()
     return all_trades

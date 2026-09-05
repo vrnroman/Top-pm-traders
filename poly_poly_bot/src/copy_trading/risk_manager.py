@@ -159,6 +159,12 @@ def _evaluate_trade_with_state(
         copy_size = CONFIG.min_order_size_usd
     if copy_size > CONFIG.max_order_size_usd:
         copy_size = CONFIG.max_order_size_usd
+    # The bankroll governor's per-copy ceiling applies on this path too, so
+    # the legacy (non-tiered) branch cannot size past what the tiered one may.
+    from src.copy_trading import live_budget
+    _gov = live_budget.per_copy_cap()
+    if _gov is not None and copy_size > _gov:
+        copy_size = round_cents(_gov)
 
     # 6. Daily volume headroom with 2% tolerance
     remaining_daily = CONFIG.max_daily_volume_usd - state.daily_volume_usd

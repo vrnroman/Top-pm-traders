@@ -91,7 +91,11 @@ def arm(reason: str = "", by: str = "telegram") -> tuple[bool, str]:
     if CONFIG.preview_mode:
         return (False, "PREVIEW_MODE=true at the process level; arming alone "
                        "will not place orders. Both keys are required.")
-    rec = {"armed": True, "ts": time.time(), "by": by, "reason": reason}
+    prev = read_arm()
+    rec = {"armed": True, "ts": time.time(), "by": by, "reason": reason,
+           # Kept forever once set: the daily real-money line renders only
+           # after the first arm, so it needs to know one ever happened.
+           "first_armed_ts": prev.get("first_armed_ts") or time.time()}
     try:
         os.makedirs(os.path.dirname(_path()), exist_ok=True)
         tmp = _path() + ".tmp"
@@ -106,7 +110,10 @@ def arm(reason: str = "", by: str = "telegram") -> tuple[bool, str]:
 
 def disarm(by: str = "telegram") -> bool:
     """Turn the moment's key back off. Always safe, always allowed."""
+    prev = read_arm()
     rec = {"armed": False, "ts": time.time(), "by": by}
+    if prev.get("first_armed_ts"):
+        rec["first_armed_ts"] = prev["first_armed_ts"]
     try:
         os.makedirs(os.path.dirname(_path()), exist_ok=True)
         tmp = _path() + ".tmp"

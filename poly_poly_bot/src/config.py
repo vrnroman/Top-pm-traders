@@ -300,6 +300,10 @@ class Config:
     # wired and tested but CANNOT fire — flipping this is the owner's action,
     # deliberately not something an agent or a chat message can do alone.
     live_arm_enabled: bool = _opt_bool("LIVE_ARM_ENABLED", False)
+    # The bankroll every live cap is a fraction of (see live_budget). Unset
+    # (0) means live sizing is CLOSED: no real copy is sized until the owner
+    # states a number. 400 SGD, the stated first budget, is about 310 USD.
+    live_budget_usd: float = _opt_float("LIVE_BUDGET_USD", 0.0)
 
     # --- Strategy B: the borrowed-clock (instant-copy) paper book ---
     # A SECOND paper book racing the one above (the 2026-07 A-vs-B experiment).

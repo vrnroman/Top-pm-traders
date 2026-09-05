@@ -28,43 +28,14 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.config import CONFIG  # noqa: E402
-from src.copy_trading import era_state, promotion_gate, zset  # noqa: E402
-from src.copy_trading.copy_paper import PaperCopyLedger, is_dust_fill  # noqa: E402
+from src.copy_trading import era_state, promotion_gate, zset, zset_candidates  # noqa: E402
+from src.copy_trading.copy_paper import PaperCopyLedger  # noqa: E402
 
-# A wallet needs at least this many clean-era rows in the OTHER book before its
-# disagreement counts as evidence rather than noise.
-CONTRADICTION_MIN_N = 10
-
-
-def _num(x) -> float:
-    try:
-        return float(x or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _wallet_rows(positions, wallet: str):
-    key = wallet.lower()
-    settled, last_ts = [], 0.0
-    for p in positions:
-        if (getattr(p, "target", "") or "").lower() != key:
-            continue
-        last_ts = max(last_ts, _num(getattr(p, "opened_ts", 0.0)),
-                      _num(getattr(p, "closed_ts", 0.0)))
-        if getattr(p, "closed", False) and not is_dust_fill(p):
-            settled.append(p)
-    return settled, (last_ts or None)
-
-
-def _clean_roi(settled, era):
-    rows = [p for p in settled
-            if _num(getattr(p, "opened_ts", 0.0)) >= (era or 0)
-            and _num(getattr(p, "spent", 0.0)) > 0]
-    if not rows:
-        return (None, 0)
-    spent = sum(_num(p.spent) for p in rows)
-    ideal = sum(_num(getattr(p, "ideal_pnl", 0.0)) for p in rows)
-    return ((ideal / spent) if spent else None, len(rows))
+# One gate: the per-wallet evaluation lives in zset_candidates and is the same
+# one the Telegram cards and the owner's admit button run.
+CONTRADICTION_MIN_N = zset_candidates.CONTRADICTION_MIN_N
+_wallet_rows = zset_candidates.wallet_rows
+_clean_roi = zset_candidates.clean_roi
 
 
 def main(argv=None) -> int:
@@ -89,8 +60,6 @@ def main(argv=None) -> int:
                   sorted({(getattr(p, "target", "") or "").lower()
                           for p in b_positions if getattr(p, "target", None)}))
 
-    honest = promotion_gate.honest_kwargs_from(CONFIG)
-    floor_kwargs = promotion_gate.floor_kwargs_from(CONFIG)
     book_corr = promotion_gate.split_half_corr(b_positions, min_opened_ts=era)
 
     print(f"era floor: {era}   candidates: {len(candidates)}   "
@@ -99,41 +68,15 @@ def main(argv=None) -> int:
 
     admitted, near = [], []
     for w in candidates:
-        settled, last_ts = _wallet_rows(b_positions, w)
-        if not settled:
+        c = zset_candidates.evaluate(w, b_positions, a_positions, era=era,
+                                     now=now, book_corr=book_corr)
+        if c is None:
             continue
-        stats = promotion_gate.compute_stats(w, settled)
-        ideal_roi, n_ideal = promotion_gate.ideal_roi_for(settled, min_opened_ts=era)
-        ready, checks = promotion_gate.golive_check(
-            stats, last_trade_ts=last_ts, now=now,
-            min_settled=CONFIG.copy_golive_min_settled,
-            max_idle_days=CONFIG.copy_golive_max_idle_days,
-            min_roi=CONFIG.copy_golive_min_roi, floor_kwargs=floor_kwargs,
-            ideal_roi=ideal_roi, n_ideal_settled=n_ideal,
-            book_corr=book_corr, **honest)
-
-        # Both extra rails now live in zset.admit, so this script cannot pass
-        # a wallet that admit() would refuse. It only supplies the evidence.
-        a_settled, _ = _wallet_rows(a_positions, w)
-        a_roi, a_n = _clean_roi(a_settled, era)
-        conc_ok, conc_detail = zset.concentration_check(settled, min_opened_ts=era)
-        contra_ok, contra_detail = zset.contradiction_check(a_roi, a_n,
-                                                            CONTRADICTION_MIN_N)
-        bl = zset._blacklist_block(w)
-        all_checks = list(checks) + [
-            ("still positive with its best 3 copies deleted", conc_ok, conc_detail),
-            ("the other book does not contradict it", contra_ok, contra_detail),
-            ("not under the bot's own auto-demote", bl is None,
-             bl or "no active demotion"),
-        ]
-        ok = bool(ready and conc_ok and contra_ok and bl is None)
-        trimmed, _k, _d = zset.trimmed_roi(settled, min_opened_ts=era)
-        n_fail = sum(1 for c in all_checks if not c[1])
-        row = (w, ok, n_fail, len(all_checks), all_checks, ideal_roi, n_ideal,
-               trimmed, settled)
-        if ok:
+        row = (w, c.ok, c.n_fail, len(c.checks), c.checks, c.ideal_roi,
+               c.n_ideal, c.trimmed_roi, c.settled)
+        if c.ok:
             admitted.append(row)
-        elif n_fail <= 2:
+        elif c.n_fail <= 2:
             near.append(row)
 
     # Rank the PASSERS by their concentration-trimmed ROI, not the headline:

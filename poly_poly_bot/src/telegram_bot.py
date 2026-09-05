@@ -52,6 +52,7 @@ BOT_MENU_COMMANDS: list[dict] = [
     {"command": "speed", "description": "Pre-flip: how fast am I told + how much worse is my entry price"},
     {"command": "zset", "description": "Set Z: the only wallets real money may follow"},
     {"command": "live", "description": "The real-money interlock: status, or /live CONFIRM to arm"},
+    {"command": "canary", "description": "One minimum-size real order through the live path (/canary CONFIRM)"},
     {"command": "setkey", "description": "Rotate/clear in-memory private key (e.g. /setkey clear CONFIRM)"},
     {"command": "slice", "description": "Cost-slice @net table for a paper book (/slice A|B)"},
     {"command": "verdict", "description": "One-word era decision after the §7 memo (arms 2026-08-22)"},
@@ -302,6 +303,8 @@ def _handle_command(text: str):
         _handle_speed(text)
     elif text.startswith("/zset"):
         _handle_zset(text)
+    elif text.startswith("/canary"):
+        _handle_canary(text)
     elif text.startswith("/live"):
         _handle_live(text)
     elif text.startswith("/setkey"):
@@ -1186,6 +1189,13 @@ def _handle_help():
         "<code>/golive &lt;wallet&gt;</code> — Re-check a promoted wallet before the real-money flip\n"
         "<code>/history</code> — Last 10 copy trades\n"
         "<code>/check</code> — Verify trading setup (read-only)\n\n"
+        "<b>Real money</b>\n"
+        "<code>/zset</code>: set Z, the only wallets real money may follow\n"
+        "<code>/zset candidates</code>: every wallet the gate passes today, one card each, admit by tap\n"
+        "<code>/zset drop &lt;wallet&gt;</code>: evict a wallet from set Z\n"
+        "<code>/live</code>: the two-key interlock and the bankroll governor\n"
+        "<code>/speed</code>: how fast you are told, how much worse your entry is\n"
+        "<code>/canary CONFIRM</code>: one minimum-size real order through the live path, then the arm comes off\n\n"
         "<b>Safety levers</b>\n"
         "<code>/setkey clear CONFIRM</code> — Wipe in-memory private key\n"
         "<code>/setkey 0xHEX CONFIRM</code> — Replace key in memory\n"
@@ -1684,6 +1694,9 @@ def _handle_zset(text: str) -> None:
     from src.copy_trading import live_mode, zset
 
     parts = text.split()
+    if len(parts) >= 2 and parts[1].lower() == "candidates":
+        _handle_zset_candidates()
+        return
     if len(parts) >= 3 and parts[1].lower() == "drop":
         target = parts[2]
         matches = [w for w in zset.wallets()
@@ -1738,6 +1751,54 @@ def _handle_zset(text: str) -> None:
     _send_chunked("\n".join(lines))
 
 
+def _handle_zset_candidates() -> None:
+    """/zset candidates: every wallet the gate passes today, one card each.
+
+    The gate proposes; the owner admits (ruling, run-review s-p7w2ln). Each
+    card carries what has been measured for the wallet and one button whose
+    label says what the tap does. Nothing here writes set Z.
+    """
+    import time as _time
+
+    from src.copy_trading import shadow_quote, virtual_ledger, zset
+    from src.copy_trading import zset_candidates as zc
+
+    now = _time.time()
+    era, b_pos, a_pos = zc.load_books()
+    passers, near, corr = zc.candidates(b_pos, a_pos, era=era, now=now)
+    quote_rows = shadow_quote.load_rows()
+    quotes = virtual_ledger.quote_map(quote_rows)
+    z = zset.wallet_set()
+
+    cards = {c.wallet.lower(): c for c in passers}
+    # Set Z's own members get the same card, so the owner sees the evidence
+    # behind what is already live next to what could be, and never a button.
+    for w in z:
+        if w not in cards:
+            c = zc.evaluate(w, b_pos, a_pos, era=era, now=now, book_corr=corr)
+            if c is not None:
+                cards[w] = c
+    rows = [(c, zc.real_quote_slice(c.wallet, b_pos, quotes, era))
+            for c in cards.values()]
+    rows.sort(key=lambda t: -t[1]["n_matched"])
+
+    send_message(zc.header(len(passers), len(z), len(near)))
+    if not rows:
+        send_message("Nothing passes the gate today and set Z is empty. "
+                     "An empty Z is a safe state: with nothing in it, arming trades nothing.")
+        return
+    for c, rq in rows:
+        in_z = c.wallet.lower() in z
+        text = zc.render_card(
+            c, rq=rq, pen=zc.penalty_slice(c.wallet, quote_rows),
+            ex=zc.exits_share(c.settled, era),
+            slices=zc.slice_lines(c.settled, era), now=now, in_z=in_z, esc=_esc)
+        if in_z:
+            send_message(text)
+        else:
+            send_message(text, reply_markup=zc.admit_keyboard(c.wallet))
+
+
 def _handle_live(text: str) -> None:
     """/live, the real-money interlock. Status by default; CONFIRM to arm.
 
@@ -1758,10 +1819,27 @@ def _handle_live(text: str) -> None:
     if len(parts) > 1 and parts[1].upper() == "CONFIRM":
         ok, detail = live_mode.arm(reason=" ".join(parts[2:])[:200], by="telegram")
         if ok:
-            send_message(
-                "🔴 <b>ARMED for real orders.</b>\n"
-                "Both interlock keys are turned. Copies from here place real "
-                "money.\n\n<code>/live DISARM</code> to stop.")
+            from src.copy_trading import canary
+            lines = ["🔴 <b>ARMED for real orders.</b>",
+                     "Both interlock keys are turned. Copies from here place real "
+                     "money."]
+            # The first live session is bounded to one ticket unless the owner
+            # says otherwise: a canary that has never fired is staged here, so
+            # the arm and the canary are one motion, not two he has to hold.
+            if not canary.has_fired():
+                c_ok, c_detail = canary.stage(by="telegram:/live")
+                if c_ok:
+                    lines.append("")
+                    lines.append("🐤 <b>Canary staged</b>: the first copy that passes "
+                                 "the rails goes out at minimum size and the arm "
+                                 "comes off after it. <code>/canary CANCEL</code> "
+                                 "to trade at full size instead.")
+                else:
+                    lines.append("")
+                    lines.append(f"🐤 Canary not staged: {_esc(c_detail)}")
+            lines.append("")
+            lines.append("<code>/live DISARM</code> to stop.")
+            send_message("\n".join(lines))
         else:
             send_message(f"⏸ <b>Not armed.</b> {_esc(detail)}")
         return
@@ -1774,6 +1852,14 @@ def _handle_live(text: str) -> None:
                  f"PREVIEW_MODE={'false' if st['process_live'] else 'true'}")
     lines.append(f"  {'✅' if st['env_key'] else '❌'} owner key: LIVE_ARM_ENABLED")
     lines.append(f"  {'✅' if st['runtime_armed'] else '❌'} runtime arm: /live CONFIRM")
+
+    # The bankroll governor: what a copy would be sized at, from the budget
+    # the owner stated and (live) the balance the chain reports.
+    from src.copy_trading import live_budget
+    lines.append("")
+    lines.append("<b>Bankroll governor</b>")
+    for ln in live_budget.status_lines():
+        lines.append(f"  {_esc(ln)}")
 
     blockers = live_mode.blocking_reasons()
     if blockers:
@@ -1789,6 +1875,47 @@ def _handle_live(text: str) -> None:
     lines.append("  • <code>/speed</code>, how fast you are told, how much worse your entry is")
     lines.append("  • <code>/golive &lt;wallet&gt;</code>, the per-wallet bar")
     lines.append("  • ROADMAP §9.7, what the gate does NOT check")
+    _send_chunked("\n".join(lines))
+
+
+def _handle_canary(text: str) -> None:
+    """/canary [CONFIRM|CANCEL|RESET], the one-cent canary.
+
+    Status by default. CONFIRM stages one minimum-size real order through
+    the whole live path; it needs every interlock key, and the arm comes off
+    the moment that order is posted.
+    """
+    from src.copy_trading import canary
+
+    parts = text.split()
+    verb = parts[1].upper() if len(parts) > 1 else ""
+    if verb == "CONFIRM":
+        ok, detail = canary.stage(by="telegram")
+        if ok:
+            send_message("🐤 <b>Canary staged.</b> The next set-Z copy that passes "
+                         "every rail goes out at the market's minimum size, then the "
+                         "arm comes off. Expires unfired after 24h.\n"
+                         "<code>/canary CANCEL</code> to unstage.")
+        else:
+            send_message(f"🐤 <b>Not staged.</b> {_esc(detail)}")
+        return
+    if verb == "CANCEL":
+        send_message("🐤 Canary cancelled; live copies size normally."
+                     if canary.cancel(by="telegram") else "🐤 Nothing was staged.")
+        return
+    if verb == "RESET":
+        canary.reset(by="telegram")
+        send_message("🐤 Canary record cleared. <code>/canary CONFIRM</code> stages a new one.")
+        return
+    lines = ["🐤 <b>Canary</b>, one minimum-size real order through the live path", ""]
+    for ln in canary.status_lines():
+        lines.append(f"  {_esc(ln)}")
+    if canary.has_fired():
+        lines.append("")
+        lines.append(canary.report_text())
+    lines.append("")
+    lines.append("<code>/canary CONFIRM</code> to stage · <code>/canary CANCEL</code> "
+                 "to unstage · <code>/canary RESET</code> after it fired")
     _send_chunked("\n".join(lines))
 
 
@@ -1875,8 +2002,10 @@ def _handle_golive(text: str) -> None:
     _send_chunked("\n".join(lines))
 
 
-def _handle_callback(data: str) -> tuple[str, str | None]:
-    """Process an inline-button tap. Returns (toast, edited_message_text|None)."""
+def _handle_promote_tap(data: str) -> tuple[str, str | None]:
+    """The legacy one-tap promote and dismiss. Writes the OLD promoted store
+    only; that store no longer feeds live trading, and nothing here may touch
+    set Z (pinned by test_promote_button_cannot_write_set_z)."""
     if data.startswith("promo:"):
         wallet = data[len("promo:"):]
         tier = _default_promote_tier()
@@ -1887,10 +2016,38 @@ def _handle_callback(data: str) -> tuple[str, str | None]:
             f"✅ <b>Promoted</b> <code>{_esc(wallet)}</code> → tier {tier} "
             "(System A, still PREVIEW/paper).",
         )
-    if data.startswith("dism:"):
-        wallet = data[len("dism:"):]
-        promotion_state.record_offer(wallet, status="dismissed")
-        return ("Dismissed", f"✖ Dismissed <code>{_esc(wallet)}</code> — not promoted.")
+    wallet = data[len("dism:"):]
+    promotion_state.record_offer(wallet, status="dismissed")
+    return ("Dismissed", f"✖ Dismissed <code>{_esc(wallet)}</code>, not promoted.")
+
+
+def _handle_zset_admit_tap(wallet: str) -> tuple[str, str | None]:
+    """The owner's admit tap. The gate re-runs at THIS moment and the set's
+    own ``admit`` decides; a card rendered an hour ago cannot admit a wallet
+    that has since decayed, and there is no force path. This is the ruling:
+    the gate proposes, approval of which wallets go live is his alone."""
+    from src.copy_trading import zset_candidates as zc
+    era, b_pos, a_pos = zc.load_books()
+    ok, checks, _c = zc.admit(wallet, era=era, b_positions=b_pos, a_positions=a_pos)
+    if ok:
+        from src.copy_trading.zset import wallets as _z_wallets
+        n = len(_z_wallets())
+        return ("Admitted to set Z",
+                f"✅ <b>Admitted to set Z</b> <code>{_esc(wallet)}</code>\n"
+                f"Real money may follow it once armed. {n} wallet(s) in Z.")
+    fails = [f"{lab} ({det})" for lab, good, det in checks if not good]
+    return ("Not admitted",
+            f"⏸ <b>Not admitted</b> <code>{_esc(wallet)}</code>\n"
+            "The gate re-ran at your tap and refused:\n"
+            + "\n".join(f"• {_esc(x)}" for x in fails))
+
+
+def _handle_callback(data: str) -> tuple[str, str | None]:
+    """Process an inline-button tap. Returns (toast, edited_message_text|None)."""
+    if data.startswith("promo:") or data.startswith("dism:"):
+        return _handle_promote_tap(data)
+    if data.startswith("zadm:"):
+        return _handle_zset_admit_tap(data[len("zadm:"):])
     return ("Unknown action", None)
 
 

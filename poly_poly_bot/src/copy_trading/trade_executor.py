@@ -597,6 +597,18 @@ async def place_trade_orders(
                 placed += 1
                 continue
 
+            # --- The canary: one minimum-size order, then the arm comes off ---
+            # Read once per trade. It only ever LOWERS the size of an order
+            # every rail above has already admitted; it cannot admit one.
+            from src.copy_trading import canary
+            canary_shot = canary.is_staged()
+            if canary_shot:
+                from src.copy_trading.order_executor import quote_copy_order
+                _cp = quote_copy_order(trade.side, trade.price, snapshot)
+                copy_size = canary.size_for(clob_client, trade.token_id, _cp or trade.price)
+                logger.warn(f"[exec] canary: sizing this copy at the minimum, "
+                            f"${copy_size:.2f}")
+
             # --- Live order placement ---
             order_submitted_at = time.time() * 1000
             result = await _execute_copy_order(clob_client, trade, copy_size, snapshot)
@@ -611,6 +623,27 @@ async def place_trade_orders(
                 f"[LIVE] {trade.side} ${copy_size:.2f} on '{trade.market[:40]}' "
                 f"@ {result.order_price:.4f} — order {result.order_id[:12]}..."
             )
+            if canary_shot:
+                # The one shot is out. Disarm BEFORE any bookkeeping so a
+                # failure below cannot leave the session armed for a second.
+                canary.record_fired(
+                    order_id=result.order_id, market=trade.market,
+                    token_id=trade.token_id, their_price=trade.price,
+                    quoted_ask=(snapshot or {}).get("best_ask"),
+                    order_price=result.order_price, copy_size=copy_size,
+                    notify_latency_s=(
+                        (qt.received_at_ms - qt.source_detected_at) / 1000.0
+                        if getattr(qt, "received_at_ms", None) else None))
+                live_mode.disarm(by="canary")
+                try:
+                    from src.copy_trading.telegram_notifier import _send_message
+                    await _send_message(
+                        f"🐤 <b>Canary fired</b>: ${copy_size:.2f} on "
+                        f"'{trade.market[:50]}' at {result.order_price:.4f} "
+                        f"(theirs {trade.price:.4f}). The arm is off; the fill "
+                        f"report follows when the verifier sees it.")
+                except Exception as exc:
+                    logger.warn(f"[canary] fired message failed: {exc}")
 
             # Critical operation order: record → enqueue → mark seen
             # 1. Record placement in risk accounting
@@ -712,6 +745,16 @@ async def process_verifications(
 
         try:
             fill = await _verify_order_fill(clob_client, po.order_id)
+
+            # The canary's fate, reported once, whatever it was.
+            from src.copy_trading import canary
+            _canary_report = canary.record_fill(po.order_id, fill)
+            if _canary_report:
+                try:
+                    from src.copy_trading.telegram_notifier import _send_message
+                    await _send_message(_canary_report)
+                except Exception as exc:
+                    logger.warn(f"[canary] report message failed: {exc}")
 
             if fill.status == "FILLED":
                 # Full fill

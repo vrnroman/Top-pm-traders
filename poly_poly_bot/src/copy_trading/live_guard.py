@@ -211,12 +211,16 @@ def redeemable_positions(proxy_wallet: str) -> list:
 
 def should_self_disarm(*, crash_streak: int = 0,
                        unredeemed: int = 0,
-                       feed_stale_s: Optional[float] = None) -> tuple[bool, str]:
+                       feed_stale_s: Optional[float] = None,
+                       equity_usd: Optional[float] = None,
+                       floor_usd: Optional[float] = None) -> tuple[bool, str]:
     """Has the session lost enough trust in its own state to stop trading?
 
-    Every trigger is a statement about OUR reliability, not about the market.
-    A losing session is not a reason to disarm; a session that cannot tell you
-    what it holds is.
+    Three triggers are statements about OUR reliability, not about the
+    market. The fourth is different in kind: a losing session is not a trust
+    failure, but a bankroll below the floor the owner set is a stop of a
+    different kind, and it is his to override (a fresh /live CONFIRM after
+    the trip counts as that override; see ``run_once``).
     """
     if crash_streak >= CRASH_LOOP_N:
         return (True, f"{crash_streak} consecutive cycle failures: the session "
@@ -227,7 +231,27 @@ def should_self_disarm(*, crash_streak: int = 0,
     if feed_stale_s is not None and feed_stale_s > 900:
         return (True, f"no trade data for {feed_stale_s / 60:.0f} minutes: "
                       f"copying blind is worse than not copying")
+    if (equity_usd is not None and floor_usd is not None
+            and float(equity_usd) < float(floor_usd)):
+        return (True, f"bankroll ${float(equity_usd):,.0f} is under the floor "
+                      f"${float(floor_usd):,.0f} you set: a losing session is not "
+                      f"a trust failure, but a bankroll below the floor is a stop "
+                      f"of a different kind. /live CONFIRM overrides it")
     return (False, "")
+
+
+def _floor_overridden(state: dict) -> bool:
+    """Did the owner re-arm AFTER the floor last tripped? Then the floor is
+    his to ignore for this arm session: the guard hands him the override, not
+    the decision, and does not fight him for it every pass."""
+    trip = state.get("floor_trip_ts")
+    if not trip:
+        return False
+    try:
+        arm = live_mode.read_arm()
+        return arm.get("armed") is True and float(arm.get("ts") or 0.0) > float(trip)
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -239,6 +263,8 @@ def run_once(*, pending_orders: Optional[list] = None,
              redeemable: Optional[list] = None,
              crash_streak: int = 0,
              feed_stale_s: Optional[float] = None,
+             equity_usd: Optional[float] = None,
+             floor_usd: Optional[float] = None,
              send: Optional[Callable] = None,
              cancel_order: Optional[Callable] = None,
              now: Optional[float] = None) -> dict:
@@ -281,20 +307,36 @@ def run_once(*, pending_orders: Optional[list] = None,
             except Exception as exc:
                 logger.error(f"[guard] could not cancel {oid}: {exc}")
 
+    # The floor: silenced for THIS arm session once the owner has re-armed
+    # after a trip. The number still renders in the daily line; only the
+    # automatic stop steps aside.
+    overridden = _floor_overridden(st)
+    eq_for_trigger = None if overridden else equity_usd
     disarm, why = should_self_disarm(
         crash_streak=crash_streak,
         unredeemed=0 if redeem_unknown else len(unred),
-        feed_stale_s=feed_stale_s)
+        feed_stale_s=feed_stale_s,
+        equity_usd=eq_for_trigger, floor_usd=floor_usd)
+    if (disarm and eq_for_trigger is not None and floor_usd is not None
+            and float(eq_for_trigger) < float(floor_usd)):
+        st["floor_trip_ts"] = now
     disarmed = False
+    # The self-disarm edge is still DETECTED and logged while unarmed, which
+    # is how it gets exercised before there is money on it. It is only
+    # MESSAGED when there is an arm to pull: "self-disarmed, back to paper"
+    # sent to a session that was never off paper is noise, and 255 of them
+    # went out in 20 days.
+    disarm_send = send if armed else None
     if disarm:
         # Always allowed, armed or not: this can only move toward preview.
         if armed:
             live_mode.disarm(by="live-guard")
             disarmed = True
         edge("self_disarm", True,
-             f"🛑 <b>Self-disarmed</b>, back to paper.\n{why}", send, st)
+             f"🛑 <b>Self-disarmed</b>, back to paper.\n{why}", disarm_send, st)
     else:
-        edge("self_disarm", False, "self-disarm condition cleared", send, st)
+        edge("self_disarm", False, "self-disarm condition cleared",
+             disarm_send, st)
 
     _write_state(st)
     return {
@@ -304,4 +346,5 @@ def run_once(*, pending_orders: Optional[list] = None,
         "cancelled": acted,
         "self_disarmed": disarmed,
         "disarm_reason": why,
+        "floor_overridden": overridden,
     }

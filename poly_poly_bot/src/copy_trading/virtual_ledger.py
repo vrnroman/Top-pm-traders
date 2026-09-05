@@ -39,35 +39,66 @@ def _num(x) -> float:
         return 0.0
 
 
-def replay(ledger_path: str, quote_rows: Optional[list[dict]] = None,
-           min_opened_ts: Optional[float] = None) -> dict:
-    """Re-settle a paper book at the observed real quote prices.
+def quote_map(quote_rows: Optional[list[dict]] = None) -> dict:
+    """copy_id -> the real price a copy order would have taken.
 
-    Returns the paper figures and the counterfactual side by side, plus the
-    join accounting — how many settled rows had a quote and how many did not,
-    because a counterfactual computed on an unstated fraction of the book is
-    not a comparison.
+    Same validity filter the headline figures use. A quote taken long after
+    detection, or one from the backlog flushed after a restart, prices a book
+    that has had minutes to move; re-settling at those entries would report
+    drift as execution cost. Where both detectors quoted the same copy, the
+    per-wallet prober's quote wins: it is the detection speed a set-Z copier
+    actually gets.
     """
     rows = quote_rows if quote_rows is not None else shadow_quote.load_rows()
-    quotes = {}
+    quotes: dict = {}
+    fast: set = set()
     for r in rows:
         cid = r.get("copy_id")
         price = r.get("our_price")
-        # Same validity filter the headline figures use. A quote taken long
-        # after detection, or one from the backlog flushed after a restart,
-        # prices a book that has had minutes to move — re-settling the book at
-        # those entries would report drift as execution cost.
-        if cid and price and shadow_quote.usable_quote(r):
-            quotes[cid] = float(price)
+        if not (cid and price and shadow_quote.usable_quote(r)):
+            continue
+        is_fast = (r.get("source") or "feed") == shadow_quote.FAST_SOURCE
+        if cid in fast and not is_fast:
+            continue
+        quotes[cid] = float(price)
+        if is_fast:
+            fast.add(cid)
+    return quotes
 
-    positions = list(PaperCopyLedger(ledger_path).positions.values())
-    settled = [p for p in positions
-               if getattr(p, "closed", False)
-               and not is_dust_fill(p)
-               and _num(getattr(p, "spent", 0)) > 0
-               and (min_opened_ts is None
-                    or _num(getattr(p, "opened_ts", 0)) >= min_opened_ts)]
 
+def settled_rows(positions, min_opened_ts: Optional[float] = None) -> list:
+    """The rows a counterfactual may re-settle: closed, non-dust, funded."""
+    return [p for p in positions
+            if getattr(p, "closed", False)
+            and not is_dust_fill(p)
+            and _num(getattr(p, "spent", 0)) > 0
+            and (min_opened_ts is None
+                 or _num(getattr(p, "opened_ts", 0)) >= min_opened_ts)]
+
+
+def real_pnl_for(p, our_price: float, spent: Optional[float] = None) -> float:
+    """One position re-settled at the real entry price.
+
+    ``spent`` overrides the paper stake (the rehearsal ledger sizes at the
+    owner's caps); the share count follows from the real price, and an early
+    exit keeps the book's exit price because only the entry is re-priced.
+    """
+    s = _num(p.spent) if spent is None else float(spent)
+    shares_real = s / our_price if our_price > 0 else 0.0
+    if getattr(p, "exited_early", False):
+        book_shares = _num(p.shares)
+        proceeds = _num(p.pnl) + _num(p.spent)
+        exit_price = (proceeds / book_shares) if book_shares > 0 else 0.0
+        return shares_real * exit_price - s
+    payout = shares_real if getattr(p, "won", False) else 0.0
+    return payout - s
+
+
+def replay_positions(positions, quotes: dict,
+                     min_opened_ts: Optional[float] = None) -> dict:
+    """The counterfactual over an in-memory set of positions (a book, or one
+    wallet's slice of it). Same output shape as ``replay``."""
+    settled = settled_rows(positions, min_opened_ts)
     matched, unmatched = [], 0
     for p in settled:
         if getattr(p, "copy_id", None) in quotes:
@@ -77,25 +108,9 @@ def replay(ledger_path: str, quote_rows: Optional[list[dict]] = None,
 
     spent = sum(_num(p.spent) for p in matched)
     paper_pnl = sum(_num(p.pnl) for p in matched)
+    ideal_pnl = sum(_num(getattr(p, "ideal_pnl", 0.0)) for p in matched)
     paper_cost = sum(_num(getattr(p, "cost_usd", 0.0)) for p in matched)
-    real_pnl = 0.0
-
-    for p in matched:
-        our_price = quotes[p.copy_id]
-        s = _num(p.spent)
-        # Same USD deployed (sizing is unchanged), fewer/more shares because
-        # the real book priced us differently than the model did.
-        shares_real = s / our_price if our_price > 0 else 0.0
-        if getattr(p, "exited_early", False):
-            # The book closed this by mirroring the target's SELL. Keep that
-            # exit price; only the entry is being re-priced.
-            book_shares = _num(p.shares)
-            proceeds = _num(p.pnl) + s
-            exit_price = (proceeds / book_shares) if book_shares > 0 else 0.0
-            real_pnl += shares_real * exit_price - s
-        else:
-            payout = shares_real if getattr(p, "won", False) else 0.0
-            real_pnl += payout - s
+    real_pnl = sum(real_pnl_for(p, quotes[p.copy_id]) for p in matched)
 
     def _roi(v):
         return (v / spent) if spent else None
@@ -108,6 +123,8 @@ def replay(ledger_path: str, quote_rows: Optional[list[dict]] = None,
         "spent": round(spent, 2),
         "paper_pnl": round(paper_pnl, 2),
         "paper_roi": _roi(paper_pnl),
+        "ideal_pnl": round(ideal_pnl, 2),
+        "ideal_roi": _roi(ideal_pnl),
         "real_pnl": round(real_pnl, 2),
         "real_roi": _roi(real_pnl),
         "real_pnl_net": round(real_pnl - paper_cost, 2),
@@ -119,3 +136,17 @@ def replay(ledger_path: str, quote_rows: Optional[list[dict]] = None,
             if spent and paper_pnl is not None else None),
         "counterfactual": True,
     }
+
+
+def replay(ledger_path: str, quote_rows: Optional[list[dict]] = None,
+           min_opened_ts: Optional[float] = None) -> dict:
+    """Re-settle a paper book at the observed real quote prices.
+
+    Returns the paper figures and the counterfactual side by side, plus the
+    join accounting: how many settled rows had a quote and how many did not,
+    because a counterfactual computed on an unstated fraction of the book is
+    not a comparison.
+    """
+    quotes = quote_map(quote_rows)
+    positions = list(PaperCopyLedger(ledger_path).positions.values())
+    return replay_positions(positions, quotes, min_opened_ts)

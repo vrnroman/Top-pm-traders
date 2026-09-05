@@ -236,6 +236,31 @@ def get_duplicate_count(market_key: str, side: str) -> int:
 _latency_samples: list[float] = []
 
 
+# ---------------------------------------------------------------------------
+# Live poller liveness: the guard's stale-feed input
+# ---------------------------------------------------------------------------
+
+_last_poll_ok_ts: Optional[float] = None
+
+
+def record_poll_ok(ts: Optional[float] = None) -> None:
+    """The live source completed a poll and the watched wallets answered.
+
+    A statement about OUR pipeline, never about the market: a quiet wallet
+    still answers a poll, an outage does not. The guard's stale-feed trigger
+    used to read the newest shadow-quote row instead, so every quiet hour
+    (nothing to detect) looked like a dead feed and it flapped 255 times in
+    20 days, messaging the owner each time, about nothing.
+    """
+    global _last_poll_ok_ts
+    _last_poll_ok_ts = time.time() if ts is None else float(ts)
+
+
+def last_poll_ok_ts() -> Optional[float]:
+    """When the live poller last succeeded, or None before the first poll."""
+    return _last_poll_ok_ts
+
+
 def record_reaction_latency(latency_ms: float) -> None:
     """Record a reaction latency sample (ms from detection to order submission)."""
     _latency_samples.append(latency_ms)

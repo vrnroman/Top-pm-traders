@@ -6,8 +6,9 @@ on-chain. Skips neg-risk positions. Calculates P&L for reporting.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 from web3 import Web3
@@ -32,23 +33,52 @@ def _build_index_sets(outcome_count: int) -> list[int]:
     return [1 << i for i in range(outcome_count)]
 
 
-async def _fetch_redeemable_positions(proxy_wallet: str) -> list[dict]:
+class RedeemFetchError(RuntimeError):
+    """The positions read failed after every retry.
+
+    Raised, not swallowed. An empty list means "nothing to redeem"; a failed
+    read means "we do not know", and the live guard's unredeemed trigger
+    treats those two differently. Returning [] here made 27 rate-limit
+    failures in 20 days read as 27 clean passes.
+    """
+
+
+# The data API answered 429 to the redeemer 27 times in 20 days. Three retries
+# with backoff cover a rate-limit window; a longer outage is raised, not hidden.
+_FETCH_RETRY_DELAYS_S: tuple[float, ...] = (1.0, 3.0, 9.0)
+
+
+async def _fetch_redeemable_positions(
+    proxy_wallet: str,
+    *,
+    sleep: Callable = asyncio.sleep,
+) -> list[dict]:
     """Fetch positions eligible for redemption from the Data API.
 
     Returns a list of position dicts with at minimum:
       conditionId, tokenId, size, market/title, avgPrice, resolved, curPrice, negRisk
+    Raises ``RedeemFetchError`` when the read fails after retries.
     """
     url = f"{CONFIG.data_api_url}/positions"
     params = {"user": proxy_wallet}
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception as exc:
-        logger.error(f"[redeemer] Failed to fetch positions: {error_message(exc)}")
-        return []
+    data = None
+    attempts = (*_FETCH_RETRY_DELAYS_S, None)
+    for attempt, delay in enumerate(attempts, start=1):
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+            break
+        except Exception as exc:
+            if delay is None:
+                logger.error(f"[redeemer] Failed to fetch positions after "
+                             f"{attempt} attempts: {error_message(exc)}")
+                raise RedeemFetchError(error_message(exc)) from exc
+            logger.warn(f"[redeemer] positions fetch failed (attempt {attempt}): "
+                        f"{error_message(exc)}; retrying in {delay:.0f}s")
+            await sleep(delay)
 
     if not isinstance(data, list):
         return []
@@ -112,7 +142,13 @@ async def check_and_redeem_positions(private_key: str) -> RedeemResult:
         logger.warn("[redeemer] No proxy wallet configured, skipping redemption")
         return RedeemResult()
 
-    positions = await _fetch_redeemable_positions(proxy_wallet)
+    try:
+        positions = await _fetch_redeemable_positions(proxy_wallet)
+    except RedeemFetchError as exc:
+        # Skip THIS pass and say so. The next pass (30 minutes) retries; the
+        # guard sees the failed read as unknown, not as "nothing stuck".
+        logger.warn(f"[redeemer] skipping this pass, positions unreadable: {exc}")
+        return RedeemResult()
     if not positions:
         return RedeemResult()
 
@@ -212,6 +248,10 @@ async def check_and_redeem_positions(private_key: str) -> RedeemResult:
                         "tier": inv_pos.get("tier", ""),
                         "trader_address": inv_pos.get("trader_address", ""),
                         "exit": "resolution",
+                        # Provenance: the preview resolver writes the same
+                        # shape into the same file. The daily real-money
+                        # line must never count paper as realized.
+                        "source": "redeemer",
                     })
                 except Exception as led_err:
                     logger.warn(f"[redeemer] Failed to record realized P&L: {error_message(led_err)}")

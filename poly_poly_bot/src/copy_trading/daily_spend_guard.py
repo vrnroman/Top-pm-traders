@@ -86,7 +86,9 @@ def can_spend(amount_usd: float) -> tuple[bool, str]:
     """
     if amount_usd <= 0:
         return True, ""
-    cap = CONFIG.max_daily_volume_usd
+    # The env cap, lowered by the bankroll governor when a budget is stated.
+    from src.copy_trading import live_budget
+    cap = live_budget.daily_cap()
     with _lock:
         _load_locked()
         spent = _state.spent_usd

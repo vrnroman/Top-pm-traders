@@ -131,6 +131,7 @@ def drill_self_disarm_triggers() -> None:
         ("crash loop", dict(crash_streak=live_guard.CRASH_LOOP_N)),
         ("stuck redemptions", dict(unredeemed=3)),
         ("stale feed", dict(feed_stale_s=3600)),
+        ("bankroll under the floor", dict(equity_usd=200.0, floor_usd=217.0)),
     ]
     for label, kw in cases:
         fires, why = live_guard.should_self_disarm(**kw)
@@ -178,6 +179,62 @@ def drill_caps_are_sane() -> None:
           f"a full day unreachable costs at most ${daily:,.0f} of new exposure")
 
 
+def drill_bankroll_governor() -> None:
+    """Live sizing must be closed without a budget and bounded with one."""
+    print("\n[8] bankroll governor")
+    from src.copy_trading import live_budget
+    from src.copy_trading.strategy_config import TIER_1B
+    saved = CONFIG.live_budget_usd
+    try:
+        CONFIG.live_budget_usd = 0.0
+        _cfg, why = live_budget.govern_tier(TIER_1B, live=True)
+        check("no budget means no live sizing", why is not None, (why or "")[:70])
+        CONFIG.live_budget_usd = 310.0
+        c = live_budget.caps(live=True, balance=310.0)
+        check("caps are fractions of the budget",
+              c is not None and c.per_copy_usd == 7.75 and c.daily_usd == 93.0
+              and c.exposure_usd == 248.0,
+              f"copy ${c.per_copy_usd} day ${c.daily_usd} open ${c.exposure_usd}"
+              if c else "no caps")
+        c2 = live_budget.caps(live=True, balance=120.0)
+        check("the chain balance bounds the stated budget",
+              c2 is not None and c2.effective_usd == 120.0,
+              f"effective ${c2.effective_usd}" if c2 else "no caps")
+        cfg, why2 = live_budget.govern_tier(TIER_1B, live=True, balance=310.0)
+        check("the tier copies from the evidence base's trade size",
+              why2 is None and cfg.min_trader_bet == CONFIG.copy_paper_min_usd
+              and cfg.max_bet <= 7.75,
+              f"min trader bet ${cfg.min_trader_bet:.0f}, max bet ${cfg.max_bet}")
+    finally:
+        CONFIG.live_budget_usd = saved
+
+
+def drill_canary_is_bounded() -> None:
+    """The canary cannot stage without every key, and fires exactly once."""
+    print("\n[9] canary")
+    from src.copy_trading import canary
+    ok, why = canary.stage(by="drill")
+    check("it cannot stage in this configuration", ok is False, why[:70])
+
+    class _Book:
+        min_order_size = 5.0
+
+    class _Clob:
+        def get_order_book(self, token_id):
+            return _Book()
+    check("it sizes at the market minimum, never under the bot minimum",
+          canary.size_for(_Clob(), "tok", 0.5) == max(5.0 * 0.5, CONFIG.min_order_size_usd))
+    canary.reset(by="drill")
+    canary._write({"staged": True, "staged_ts": 0.0, "expires_ts": 9e12,
+                   "fired": None, "fill": None})
+    canary.record_fired(order_id="drill-1", market="m", token_id="t",
+                        their_price=0.5, quoted_ask=0.51, order_price=0.51,
+                        copy_size=5.0, notify_latency_s=3.0)
+    check("once fired it is no longer staged", canary.is_staged() is False)
+    ok2, why2 = canary.stage(by="drill", force_restage=True)
+    check("a fired canary does not restage without RESET", ok2 is False, why2[:60])
+
+
 def main() -> int:
     # Run the guard drills against a THROWAWAY data dir. The first version ran
     # them against the live one, which flipped live_guard.json's edge state to
@@ -202,11 +259,13 @@ def main() -> int:
         live_guard.CONFIG.data_dir = sandbox
         drill_guard_detects_without_acting()
         drill_self_disarm_triggers()
+        drill_canary_is_bounded()
     finally:
         CONFIG.data_dir = real_data_dir
         live_guard.CONFIG.data_dir = real_data_dir
     drill_recovery_paths_exist()
     drill_caps_are_sane()
+    drill_bankroll_governor()
 
     failed = [r for r in _results if not r[1]]
     print("\n" + "=" * 66)

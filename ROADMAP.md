@@ -1111,3 +1111,96 @@ about the strategy from the fill count.
 auto-redeemer and inventory reconcile against the real proxy wallet — real
 on-chain transactions that cost gas, before any order and regardless of the
 arm. `/live` renders this warning at the point the decision is made.
+
+---
+
+## 11. Month one on real money — 2026-09-05 (run s-yr3unh)
+
+The month's read, the go-live footing, and the owner's remaining steps. No
+derived number is written here (the §9 rule): every figure lives behind a
+command, and the run report on the Desk carries the snapshot with its date.
+
+### 11.1 How to read the month
+
+```
+# the honest book read, clean era (realized, at their price, net, persistence)
+docker exec poly-poly-bot python scripts/rebaseline_ledger.py --era
+
+# the counterfactual at the REAL quoted book, per book (coverage is stated)
+docker exec poly-poly-bot python -c "
+from src.copy_trading import virtual_ledger, era_state; import json
+era = era_state.era_floor_ts('/app/data/ab_race_state.json')
+for lab, p in [('B', '/app/data/copy_paper_ledger_b.jsonl'), ('A', '/app/data/copy_paper_ledger.jsonl')]:
+    print(lab, json.dumps(virtual_ledger.replay(p, min_opened_ts=era), indent=1))"
+
+# who passes the go-live gate plus set Z's rails today (dry run, decides nothing)
+docker exec poly-poly-bot python scripts/seed_zset.py
+
+# every never-run real-money path, as checks that can fail
+docker exec poly-poly-bot python scripts/golive_drills.py
+```
+
+In Telegram: `/zset candidates` (one card per passer, admit by tap),
+`/live` (interlock plus the bankroll governor), `/speed`, `/canary`.
+
+### 11.2 What this run changed on the money path
+
+- **The bankroll governor** (`live_budget.py`). One knob, `LIVE_BUDGET_USD`
+  (deploy default 310, for 400 SGD), derives every live cap as a fraction:
+  per copy, per market (two copies a side), per day, open at once. Live
+  sizing is CLOSED without it; live, the effective budget is the smaller of
+  the stated number and the on-chain USDC. The tier's copy trigger is now the
+  evidence base's `COPY_PAPER_MIN_USD`, not `STRATEGY_1B_MIN_TRADER_BET`: the
+  strategy that trades is the strategy the paper book measured.
+- **The floor.** A fourth self-disarm trigger: realized equity (USDC plus open
+  positions at cost, never marked) under `LIVE_BUDGET_DRAWDOWN_FRAC` below the
+  stated budget pulls the arm and says why. A fresh `/live CONFIRM` after the
+  trip overrides it for that arm session.
+- **The guard's clock.** Stale-feed now means the live poller has not
+  completed a successful poll, not that the market was quiet; the self-disarm
+  edge is logged while unarmed and messaged only when there is an arm to pull.
+- **The redeemer** retries its positions read with backoff and raises after
+  the last attempt; a failed read is unknown, never "nothing to redeem".
+- **Set-Z admission is the owner's tap.** `/zset candidates` renders every
+  gate passer as one card (clean-era ROI, real-quote replay with its sample
+  size, entry penalty, the concentration rail with its reason, share of profit
+  from mirrored exits, slices, idle days) and one button; the tap re-runs the
+  gate at that moment and `zset.admit` decides. The seeding script and the
+  cards share one evaluation (`zset_candidates.evaluate`).
+- **The canary.** `/canary CONFIRM` makes the next set-Z copy that passes every
+  rail go out at the market's minimum size, pulls the arm the moment it
+  posts, and reports their price, quoted ask, order price, fill, penalty and
+  latency once the verifier sees the fill. The first `/live CONFIRM` that has
+  never seen a canary fire stages it by default.
+- **The rehearsal ledger** (`rehearsal.py`): the counterfactual at the owner's
+  caps in dollars, per set-Z wallet, in the 08:00 UTC block next to a
+  real-money line (bankroll, distance to the floor, realized today from
+  redeemer rows only).
+
+### 11.3 What the data said, in words (the numbers are behind §11.1)
+
+Book A is dead at any price. Book B is marginally positive at their price and
+negative once re-settled at the real quoted book, and its clean-era profit
+sits in mirrored exits; the two set-Z wallets are pure hold-to-settlement and
+carry none of that edge, so the go-live rests on their own real-quote records
+and on the rehearsal dollars. A live entry-penalty cap was tested against the
+replay and rejected: the high-penalty copies did better, not worse. Real-quote
+coverage exists only from 2026-08-16, so the read leans on about three weeks.
+
+### 11.4 The owner's steps, in order
+
+1. Fund the proxy wallet with USDC and the EOA with POL for gas (approvals
+   fire at the first live boot; every redeem is a transaction).
+2. Merge the go-live PR (`PREVIEW_MODE=false` plus `LIVE_ARM_ENABLED=true` in
+   deploy.yml). Merging is turning the key; the deploy boots the bot live.
+3. `/live CONFIRM`. The canary is staged automatically.
+4. After the canary report, `/live CONFIRM` again to trade at the governor's
+   size. `/zset candidates` to widen Z; `/zset drop` to narrow it.
+
+### 11.5 Deferred, with grounds
+
+- Per-slice copying inside an admitted wallet (category or price band):
+  defer[scope] until the real ledger holds per-slice evidence; then mirror the
+  P1-6 gate at the same knob and floor, never a second way.
+- Prober headroom for a set Z wider than three wallets: defer[scope].
+- Depth-priced ticket sizing: rejected at this bankroll.

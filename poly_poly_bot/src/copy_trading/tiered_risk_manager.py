@@ -239,6 +239,20 @@ def evaluate_tiered_trade(
             alert_only=False,
             reason=f"Tier {tier} is disabled",
         )
+    # The bankroll governor: the tier's caps lowered to fractions of the money
+    # that is actually there, and the copy trigger aligned to the evidence
+    # base. Closed (live, no budget) means refused with the reason, not sized
+    # on caps written for a bankroll that does not exist.
+    from src.copy_trading import live_budget
+    cfg, closed = live_budget.govern_tier(cfg)
+    if closed:
+        return TieredCopyDecision(
+            should_copy=False,
+            copy_size=0,
+            tier=tier,
+            alert_only=False,
+            reason=closed,
+        )
     exposure = _tier_exposures.get(tier, TierExposure())
     return _evaluate_tiered_trade_with_state(trade, tier, exposure, cfg)
 
