@@ -61,6 +61,7 @@ def rehearse(*, budget_usd: float, positions, quotes: dict,
     per: dict = {}
     for w in keys:
         per[w] = {"n_settled": 0, "n_matched": 0, "n_taken": 0, "n_held": 0,
+                  "held_day": 0, "held_exposure": 0,
                   "spent": 0.0, "real_pnl": 0.0, "ideal_pnl": 0.0, "paper_roi_num": 0.0,
                   "paper_spent": 0.0}
     open_heap: list = []          # (closed_ts, spent)
@@ -85,9 +86,14 @@ def rehearse(*, budget_usd: float, positions, quotes: dict,
             _, s = heapq.heappop(open_heap)
             open_total -= s
         day = _day(opened)
-        if open_total + per_copy > exposure_cap + 1e-9 or \
-                day_spent.get(day, 0.0) + per_copy > daily_cap + 1e-9:
+        # Which cap held it is the question the sweep answers, so count each.
+        if open_total + per_copy > exposure_cap + 1e-9:
             d["n_held"] += 1
+            d["held_exposure"] += 1
+            continue
+        if day_spent.get(day, 0.0) + per_copy > daily_cap + 1e-9:
+            d["n_held"] += 1
+            d["held_day"] += 1
             continue
         d["n_taken"] += 1
         d["spent"] += per_copy
@@ -99,7 +105,8 @@ def rehearse(*, budget_usd: float, positions, quotes: dict,
         ideal_roi = (_num(getattr(p, "ideal_pnl", 0.0)) / paper_spent) if paper_spent > 0 else 0.0
         d["ideal_pnl"] += per_copy * ideal_roi
 
-    total = {"n_taken": 0, "n_held": 0, "spent": 0.0, "real_pnl": 0.0, "ideal_pnl": 0.0}
+    total = {"n_taken": 0, "n_held": 0, "held_day": 0, "held_exposure": 0,
+             "spent": 0.0, "real_pnl": 0.0, "ideal_pnl": 0.0}
     for d in per.values():
         for k in total:
             total[k] += d[k]
@@ -133,7 +140,8 @@ def render(res: dict) -> str:
                          f"quote, none taken")
             continue
         thin = " · thin, under 5 taken" if d["thin"] else ""
-        lines.append(f"{tag}: {d['n_taken']} taken, {d['n_held']} held by caps, "
+        cap = f" ({binding_cap(d)})" if d["n_held"] else ""
+        lines.append(f"{tag}: {d['n_taken']} taken, {d['n_held']} held by caps{cap}, "
                      f"{d['n_settled'] - d['n_matched']} unquoted → "
                      f"${d['real_pnl']:+,.2f} at real quotes, ${d['ideal_pnl']:+,.2f} at "
                      f"their price, on ${d['spent']:,.0f} cycled{thin}")
@@ -144,6 +152,106 @@ def render(res: dict) -> str:
     return "\n".join(lines)
 
 
+def binding_cap(d: dict) -> str:
+    """Which cap actually held copies for this wallet, in words."""
+    if d.get("held_day", 0) == 0 and d.get("held_exposure", 0) == 0:
+        return "none"
+    if d.get("held_day", 0) >= d.get("held_exposure", 0):
+        return "day cap"
+    return "open exposure"
+
+
+def _load_inputs(now: float):
+    """Books, quotes and set Z, read once for a sweep or the daily line."""
+    import os as _os
+
+    from src.copy_trading import era_state, shadow_quote, zset
+    from src.copy_trading.copy_paper import PaperCopyLedger
+    era = era_state.era_floor_ts(_os.path.join(CONFIG.data_dir, "ab_race_state.json"))
+    positions = list(PaperCopyLedger(CONFIG.copy_paper_b_ledger).positions.values())
+    quotes = virtual_ledger.quote_map(shadow_quote.load_rows(since_ts=now - 31 * 86400))
+    return era, positions, quotes, zset.wallets()
+
+
+DEFAULT_SWEEP_USD = (250.0, 310.0, 400.0, 500.0)
+MAX_SWEEP_VALUES = 6
+
+
+def sweep(budgets: Iterable[float], *, positions, quotes, wallets, since_ts: float,
+          era: Optional[float] = None) -> list[dict]:
+    """The rehearsal at each budget, with the cap that bound per wallet.
+
+    A budget whose per-copy size falls under the order minimum is reported as
+    refused with the opening budget named, exactly as the governor would.
+    """
+    out: list[dict] = []
+    min_order = float(CONFIG.min_order_size_usd)
+    for b in budgets:
+        per_copy = round(float(b) * live_budget.PER_COPY_FRAC, 2)
+        if per_copy < min_order:
+            out.append({"budget_usd": float(b), "refused": True, "per_copy_usd": per_copy,
+                        "opening_budget_usd": round(min_order / live_budget.PER_COPY_FRAC, 2)})
+            continue
+        res = rehearse(budget_usd=float(b), positions=positions, quotes=quotes,
+                       wallets=wallets, since_ts=since_ts, era=era)
+        res["refused"] = False
+        out.append(res)
+    return out
+
+
+def render_sweep(rows: list[dict], *, stated: Optional[float]) -> str:
+    """One line per budget, wallets inline, the binding cap named."""
+    lines = ["🎯 <b>Rehearsal sweep</b> (counterfactual, not a book): the same copies at "
+             "each budget, at real quotes"]
+    lines.append(f"stated LIVE_BUDGET_USD: {'$%.0f' % stated if stated else 'not set'}")
+    first = next((r.get("first_matched_ts") for r in rows
+                  if not r.get("refused") and r.get("first_matched_ts")), None)
+    if first:
+        lines.append(f"window from {_day(first)} (first real quote)")
+    for r in rows:
+        b = r["budget_usd"]
+        mark = " (stated)" if stated and abs(b - stated) < 0.005 else ""
+        if r.get("refused"):
+            lines.append(f"${b:,.0f}{mark}: refused, per copy ${r['per_copy_usd']:.2f} is under "
+                         f"the ${float(CONFIG.min_order_size_usd):.0f} order minimum; "
+                         f"opens at ${r['opening_budget_usd']:,.0f}")
+            continue
+        parts = []
+        for w, d in sorted(r["wallets"].items(), key=lambda kv: -kv[1]["n_taken"]):
+            if d["n_taken"] == 0:
+                parts.append(f"<code>{w[:8]}…</code> none taken")
+                continue
+            thin = ", thin" if d["thin"] else ""
+            held = (f", held {d['n_held']} by {binding_cap(d)}" if d["n_held"] else "")
+            parts.append(f"<code>{w[:8]}…</code> {d['n_taken']} taken → ${d['real_pnl']:+,.0f} "
+                         f"real (${d['ideal_pnl']:+,.0f} theirs){held}{thin}")
+        t = r["total"]
+        lines.append(f"${b:,.0f}{mark}: copy ${r['per_copy_usd']:.2f}, day ${r['daily_cap_usd']:.0f}, "
+                     f"open ${r['exposure_cap_usd']:.0f} · " + "; ".join(parts)
+                     + f" · <b>total ${t['real_pnl']:+,.0f}</b> on ${t['spent']:,.0f} cycled")
+    return "\n".join(lines)
+
+
+def sweep_message(budgets: Optional[Iterable[float]] = None,
+                  now: Optional[float] = None) -> str:
+    """The /rehearse reply. The stated budget always rides the sweep."""
+    now = time.time() if now is None else now
+    stated = live_budget.stated_budget()
+    vals = [float(b) for b in (budgets if budgets is not None else DEFAULT_SWEEP_USD)]
+    if stated is not None and all(abs(v - stated) >= 0.005 for v in vals):
+        vals.append(stated)
+    vals = sorted(set(vals))
+    try:
+        era, positions, quotes, wallets = _load_inputs(now)
+    except Exception as exc:
+        return f"🎯 rehearsal sweep: could not load the books ({exc})"
+    if not wallets:
+        return "🎯 rehearsal sweep: set Z is empty, nothing to rehearse"
+    rows = sweep(vals, positions=positions, quotes=quotes, wallets=wallets,
+                 since_ts=now - 30 * 86400, era=era)
+    return render_sweep(rows, stated=stated)
+
+
 def daily_message(now: Optional[float] = None) -> str:
     """The two month-one lines for the 08:00 block: the rehearsal for set Z
     and the real-money line. Fails soft: a line that cannot be computed says
@@ -151,19 +259,13 @@ def daily_message(now: Optional[float] = None) -> str:
     now = time.time() if now is None else now
     parts: list[str] = []
     try:
-        from src.copy_trading import era_state, shadow_quote, zset
-        from src.copy_trading.copy_paper import PaperCopyLedger
-        import os as _os
         budget = live_budget.stated_budget()
-        wallets = zset.wallets()
+        era, positions, quotes, wallets = _load_inputs(now)
         if budget is None:
             parts.append("🎯 rehearsal: LIVE_BUDGET_USD not set, nothing to size")
         elif not wallets:
             parts.append("🎯 rehearsal: set Z is empty, nothing to rehearse")
         else:
-            era = era_state.era_floor_ts(_os.path.join(CONFIG.data_dir, "ab_race_state.json"))
-            positions = list(PaperCopyLedger(CONFIG.copy_paper_b_ledger).positions.values())
-            quotes = virtual_ledger.quote_map(shadow_quote.load_rows(since_ts=now - 31 * 86400))
             res = rehearse(budget_usd=budget, positions=positions, quotes=quotes,
                            wallets=wallets, since_ts=now - 30 * 86400, era=era)
             parts.append(render(res))

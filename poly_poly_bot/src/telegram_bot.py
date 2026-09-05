@@ -53,6 +53,7 @@ BOT_MENU_COMMANDS: list[dict] = [
     {"command": "zset", "description": "Set Z: the only wallets real money may follow"},
     {"command": "live", "description": "The real-money interlock: status, or /live CONFIRM to arm"},
     {"command": "canary", "description": "One minimum-size real order through the live path (/canary CONFIRM)"},
+    {"command": "rehearse", "description": "What your budget would have made at real quotes, at several budgets"},
     {"command": "setkey", "description": "Rotate/clear in-memory private key (e.g. /setkey clear CONFIRM)"},
     {"command": "slice", "description": "Cost-slice @net table for a paper book (/slice A|B)"},
     {"command": "verdict", "description": "One-word era decision after the §7 memo (arms 2026-08-22)"},
@@ -305,6 +306,8 @@ def _handle_command(text: str):
         _handle_zset(text)
     elif text.startswith("/canary"):
         _handle_canary(text)
+    elif text.startswith("/rehearse"):
+        _handle_rehearse(text)
     elif text.startswith("/live"):
         _handle_live(text)
     elif text.startswith("/setkey"):
@@ -1195,7 +1198,8 @@ def _handle_help():
         "<code>/zset drop &lt;wallet&gt;</code>: evict a wallet from set Z\n"
         "<code>/live</code>: the two-key interlock and the bankroll governor\n"
         "<code>/speed</code>: how fast you are told, how much worse your entry is\n"
-        "<code>/canary CONFIRM</code>: one minimum-size real order through the live path, then the arm comes off\n\n"
+        "<code>/canary CONFIRM</code>: one minimum-size real order through the live path, then the arm comes off\n"
+        "<code>/rehearse [budgets]</code>: what your budget would have made at real quotes, and which cap bound\n\n"
         "<b>Safety levers</b>\n"
         "<code>/setkey clear CONFIRM</code> — Wipe in-memory private key\n"
         "<code>/setkey 0xHEX CONFIRM</code> — Replace key in memory\n"
@@ -1831,7 +1835,8 @@ def _handle_live(text: str) -> None:
                 if c_ok:
                     lines.append("")
                     lines.append("🐤 <b>Canary staged</b>: the first copy that passes "
-                                 "the rails goes out at minimum size and the arm "
+                                 "the rails goes out at the $5 order minimum (or the "
+                                 "market's minimum if that is higher) and the arm "
                                  "comes off after it. <code>/canary CANCEL</code> "
                                  "to trade at full size instead.")
                 else:
@@ -1878,6 +1883,28 @@ def _handle_live(text: str) -> None:
     _send_chunked("\n".join(lines))
 
 
+def _handle_rehearse(text: str) -> None:
+    """/rehearse [budget ...]: the rehearsal at several budgets, with the cap
+    that bound per wallet. Read-only; it sets nothing."""
+    from src.copy_trading import rehearsal
+
+    usage = ("Usage: <code>/rehearse</code> (sweeps $250, $310, $400, $500 plus the "
+             f"stated budget) or <code>/rehearse 350 600</code> (up to "
+             f"{rehearsal.MAX_SWEEP_VALUES} budgets in USD).")
+    parts = text.split()[1:]
+    budgets = None
+    if parts:
+        try:
+            budgets = [float(p) for p in parts]
+        except ValueError:
+            send_message(usage)
+            return
+        if len(budgets) > rehearsal.MAX_SWEEP_VALUES or any(b <= 0 for b in budgets):
+            send_message(usage)
+            return
+    _send_chunked(rehearsal.sweep_message(budgets))
+
+
 def _handle_canary(text: str) -> None:
     """/canary [CONFIRM|CANCEL|RESET], the one-cent canary.
 
@@ -1893,8 +1920,9 @@ def _handle_canary(text: str) -> None:
         ok, detail = canary.stage(by="telegram")
         if ok:
             send_message("🐤 <b>Canary staged.</b> The next set-Z copy that passes "
-                         "every rail goes out at the market's minimum size, then the "
-                         "arm comes off. Expires unfired after 24h.\n"
+                         "every rail goes out at the $5 order minimum (or the market's "
+                         "minimum if that is higher), then the arm comes off. Expires "
+                         "unfired after 24h.\n"
                          "<code>/canary CANCEL</code> to unstage.")
         else:
             send_message(f"🐤 <b>Not staged.</b> {_esc(detail)}")

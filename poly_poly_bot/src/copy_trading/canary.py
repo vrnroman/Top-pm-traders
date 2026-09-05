@@ -8,10 +8,11 @@ with real money, bounded to one ticket at the exchange minimum.
 
 Shape. ``stage()`` arms a one-shot. The next set-Z BUY that passes every
 normal rail (Z membership, tier, bankroll governor, drift, spread) is placed
-at the market's minimum size instead of the governor's per-copy size; the
-runtime arm is pulled the moment the order is posted, so a second order cannot
-follow; the fill report posts when the verifier sees the fill. Unfired after
-24 hours it expires and says so once.
+at the $5 order minimum (or the market's own minimum if that is higher)
+instead of the governor's per-copy size; the runtime arm is pulled the moment
+the order is posted, so a second order cannot follow; the fill report posts
+when the verifier sees the fill, as one row next to what the models said that
+copy would cost. Unfired after 24 hours it expires and says so once.
 
 It requires every interlock key. Nothing here can place an order on its own:
 it only changes the size of the one the live path would have placed anyway,
@@ -168,6 +169,14 @@ def size_for(clob_client, token_id: str, order_price: float) -> float:
     return round(floor, 2)
 
 
+def model_price(their_price: float) -> float:
+    """What paper book B would have booked this entry at: their price plus
+    the flat slippage model the book uses. Stored at fire time so the report
+    never recomputes it from a book that has moved."""
+    bps = float(getattr(CONFIG, "copy_paper_b_slippage_bps", 100) or 100)
+    return round(float(their_price) * (1.0 + bps / 10000.0), 4)
+
+
 def record_fired(*, order_id: str, market: str, token_id: str,
                  their_price: float, quoted_ask: Optional[float],
                  order_price: float, copy_size: float,
@@ -179,6 +188,7 @@ def record_fired(*, order_id: str, market: str, token_id: str,
     d["fired"] = {
         "order_id": order_id, "market": market, "token_id": token_id,
         "their_price": their_price, "quoted_ask": quoted_ask,
+        "model_price": model_price(their_price),
         "order_price": order_price, "copy_size": copy_size,
         "notify_latency_s": notify_latency_s, "placed_ts": now,
     }
@@ -241,10 +251,33 @@ def report_text(d: Optional[dict] = None) -> str:
                      f"shares at {fp:.4f} (${_num(fill.get('filled_usd')):.2f})")
         lines.append(f"entry penalty vs their price: "
                      f"{pen:+.0f}bps" if pen is not None else "entry penalty: n/a (no fill price)")
+        lines.extend(_one_row(f, fp))
     else:
         lines.append("fill: waiting for the verifier")
     lines.append("The arm came off when this order was posted. /live CONFIRM arms again.")
     return "\n".join(lines)
+
+
+def _one_row(f: dict, fill_price: float) -> list[str]:
+    """Two ledgers, one row: what the models said this copy would cost, next
+    to what it cost. A plain diff, labelled thin at n=1, no stamp."""
+    if fill_price <= 0:
+        return ["models vs fill: n/a (no fill price)"]
+    size = _num(f.get("copy_size"))
+    model = _num(f.get("model_price")) or model_price(_num(f.get("their_price")))
+    quoted = _num(f.get("quoted_ask"))
+
+    def delta(ref: float) -> str:
+        if ref <= 0:
+            return "n/a"
+        bps = (fill_price - ref) / ref * 10000.0
+        cents = size * (fill_price - ref) / ref
+        return f"{bps:+.0f}bps ({cents:+.2f} on ${size:.2f})"
+    return [
+        f"models vs fill, n=1, thin: paper model {model:.4f} · quoted ask at detection "
+        f"{quoted:.4f} · fill {fill_price:.4f}",
+        f"  fill vs paper model {delta(model)} · fill vs quoted ask {delta(quoted)}",
+    ]
 
 
 def status_lines() -> list[str]:

@@ -712,3 +712,82 @@ def test_real_money_line_counts_only_redeemer_rows(tmp_path, monkeypatch, budget
 def test_the_daily_block_sends_the_rehearsal_line():
     import main
     assert "rehearsal.daily_message()" in inspect.getsource(main._ab_race_reporter_loop)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2: one row for the canary, and the rehearsal sweep
+# --------------------------------------------------------------------------- #
+
+def test_canary_report_prints_the_models_next_to_the_fill(canary_env, monkeypatch):
+    canary = canary_env
+    monkeypatch.setattr(CONFIG, "copy_paper_b_slippage_bps", 100)
+    canary._write({"staged": True, "staged_ts": 0.0, "expires_ts": 9e12, "fired": None, "fill": None})
+    canary.record_fired(order_id="o9", market="m", token_id="t", their_price=0.5,
+                        quoted_ask=0.51, order_price=0.51, copy_size=5.0,
+                        notify_latency_s=2.0, now=10.0)
+    assert canary.read()["fired"]["model_price"] == 0.505, "stored at fire time"
+
+    class _Fill:
+        status, fill_price, filled_shares, filled_usd = "FILLED", 0.52, 9.6, 5.0
+    rep = canary.record_fill("o9", _Fill(), now=11.0)
+    assert "models vs fill, n=1, thin: paper model 0.5050 · quoted ask at detection 0.5100 · fill 0.5200" in rep
+    assert "fill vs paper model +297bps (+0.15 on $5.00)" in rep
+    assert "fill vs quoted ask +196bps (+0.10 on $5.00)" in rep
+    assert "PASS" not in rep and "FAIL" not in rep, "a diff row, never a stamp"
+
+
+def test_rehearsal_names_the_cap_that_bound(budget):
+    from src.copy_trading import rehearsal
+    budget(310.0)
+    pos = [_Pos(f"c{i}", W1, 10_000.0 + i, closed_after=86400.0 * 10) for i in range(40)]
+    quotes = {f"c{i}": 0.5 for i in range(40)}
+    res = rehearsal.rehearse(budget_usd=310.0, positions=pos, quotes=quotes, wallets=[W1], since_ts=0.0)
+    d = res["wallets"][W1.lower()]
+    assert (d["held_day"], d["held_exposure"]) == (28, 0)
+    assert rehearsal.binding_cap(d) == "day cap"
+    assert "held by caps (day cap)" in rehearsal.render(res)
+
+
+def test_sweep_refuses_a_budget_under_the_order_minimum_and_marks_the_stated_one(budget, monkeypatch):
+    from src.copy_trading import rehearsal
+    budget(310.0)
+    pos = [_Pos(f"c{i}", W1, 10_000.0 + i * 100) for i in range(6)]
+    quotes = {f"c{i}": 0.51 for i in range(6)}
+    rows = rehearsal.sweep([100.0, 310.0], positions=pos, quotes=quotes, wallets=[W1], since_ts=0.0)
+    assert rows[0]["refused"] is True and rows[0]["opening_budget_usd"] == 200.0
+    assert rows[1]["refused"] is False and rows[1]["total"]["n_taken"] == 6
+    text = rehearsal.render_sweep(rows, stated=310.0)
+    assert "$100: refused, per copy $2.50 is under the $5 order minimum; opens at $200" in text
+    assert "$310 (stated): copy $7.75" in text and "counterfactual" in text
+
+
+def test_rehearse_command_sweeps_and_validates_input(budget, monkeypatch):
+    import src.telegram_bot as tb
+    from src.copy_trading import rehearsal
+    budget(310.0)
+    calls: list = []
+    monkeypatch.setattr(rehearsal, "sweep_message", lambda budgets=None, now=None: calls.append(budgets) or "sweep")
+    sent: list = []
+    with patch.object(tb, "send_message", lambda x, **k: sent.append(x)), \
+         patch.object(tb, "_send_chunked", lambda x: sent.append(x)):
+        tb._handle_rehearse("/rehearse")
+        tb._handle_rehearse("/rehearse 350 600")
+        tb._handle_rehearse("/rehearse lots")
+        tb._handle_rehearse("/rehearse 1 2 3 4 5 6 7")
+    assert calls == [None, [350.0, 600.0]]
+    assert sent[0] == "sweep" and sent[1] == "sweep"
+    assert sent[2].startswith("Usage") and sent[3].startswith("Usage")
+
+
+def test_sweep_message_always_includes_the_stated_budget(budget, monkeypatch):
+    from src.copy_trading import rehearsal
+    budget(333.0)
+    seen: dict = {}
+
+    def fake_sweep(budgets, **k):
+        seen["b"] = list(budgets)
+        return []
+    monkeypatch.setattr(rehearsal, "_load_inputs", lambda now: (1.0, [], {}, [W1]))
+    monkeypatch.setattr(rehearsal, "sweep", fake_sweep)
+    rehearsal.sweep_message([250.0, 400.0])
+    assert seen["b"] == [250.0, 333.0, 400.0]
