@@ -135,6 +135,24 @@ jobs:
           ensure_env LIVE_BUDGET_DAILY_FRAC 0.50
           ensure_env LIVE_BUDGET_EXPOSURE_FRAC 0.80
           ensure_env LIVE_BUDGET_DRAWDOWN_FRAC 0.30
+
+          # ---- GO LIVE. Merging this PR is turning the owner's key. ----
+          # Together these take the bot off paper on the next deploy: the
+          # process boots live, and LIVE_ARM_ENABLED lets /live CONFIRM do
+          # anything at all. Neither one alone places an order.
+          #
+          # The VM's .env is regenerated from the ENV_FILE secret on every
+          # deploy, so a hand edit on the box does not survive, and that
+          # secret holds the private key. This is the one line in version
+          # control that flips it.
+          #
+          # Checked on chain 2026-09-05 before merging: the funder's
+          # collateral allowance and conditional-token approval are already
+          # set on both current exchanges, so check_and_set_approvals reads
+          # them as satisfied and sends NO transaction. The first live boot
+          # therefore needs no gas.
+          sed -i -E 's#^PREVIEW_MODE=.*#PREVIEW_MODE=false#' .env
+          ensure_env LIVE_ARM_ENABLED true
           secret_env CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
           secret_env LANGFUSE_PUBLIC_KEY "$LANGFUSE_PUBLIC_KEY"
           secret_env LANGFUSE_SECRET_KEY "$LANGFUSE_SECRET_KEY"
