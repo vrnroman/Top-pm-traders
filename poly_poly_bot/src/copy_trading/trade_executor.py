@@ -342,9 +342,17 @@ async def _verify_order_fill(
 
 
 async def _cancel_order(clob_client: ClobClient, order_id: str) -> bool:
-    """Attempt to cancel an order. Returns True if successful."""
+    """Attempt to cancel an order. Returns True if successful.
+
+    The v2 client has NO `cancel`; it has `cancel_order(OrderPayload)`. The
+    old call raised AttributeError every time, so an unfilled order was never
+    withdrawn and the live guard's stuck-order action could not act either.
+    Same class as the order-args dict: a shape the fakes accepted and the real
+    client does not.
+    """
     try:
-        clob_client.cancel(order_id)
+        from py_clob_client_v2 import OrderPayload
+        clob_client.cancel_order(OrderPayload(orderID=order_id))
         return True
     except Exception as exc:
         logger.warn(f"[exec] Cancel failed for {order_id}: {error_message(exc)}")

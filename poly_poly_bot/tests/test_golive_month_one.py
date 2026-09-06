@@ -1598,3 +1598,33 @@ def test_a_clob_that_rejects_a_dict_makes_the_executor_fail_not_pretend():
     assert _run(trade_executor._execute_copy_order(
         _StrictClob(), trade, 6.40, {"best_bid": 0.49, "best_ask": 0.51,
                                      "midpoint": 0.50, "spread_bps": 400})) is None
+
+
+def test_cancelling_an_order_uses_a_method_the_client_actually_has():
+    """The v2 client has no `cancel`, only `cancel_order(OrderPayload)`. The
+    old call raised every time, so an unfilled order was never withdrawn and
+    the guard's stuck-order action could not act. Same shape class as the
+    order-args dict, so the fake mirrors the real client's surface."""
+    import inspect
+
+    from py_clob_client_v2 import ClobClient, OrderPayload
+    from src.copy_trading import trade_executor
+
+    assert not hasattr(ClobClient, "cancel"), "if this ever exists, revisit"
+    assert hasattr(ClobClient, "cancel_order")
+
+    seen = {}
+
+    class _RealisticClob:
+        # deliberately exposes ONLY what the real client exposes
+        def cancel_order(self, payload):
+            seen["type"] = type(payload).__name__
+            seen["orderID"] = payload.orderID
+            return {"canceled": [payload.orderID]}
+
+    assert _run(trade_executor._cancel_order(_RealisticClob(), "0xdead")) is True
+    assert seen == {"type": "OrderPayload", "orderID": "0xdead"}
+
+    class _NoCancel:
+        pass
+    assert _run(trade_executor._cancel_order(_NoCancel(), "0xdead")) is False
