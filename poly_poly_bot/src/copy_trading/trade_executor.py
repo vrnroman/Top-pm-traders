@@ -260,15 +260,22 @@ async def _execute_copy_order(
         if shares <= 0:
             return None
 
+        from py_clob_client_v2 import OrderArgs
         from py_clob_client_v2.order_builder.constants import BUY, SELL
         side = BUY if trade.side == "BUY" else SELL
 
-        order_args = {
-            "token_id": trade.token_id,
-            "price": order_price,
-            "size": round(shares, 2),
-            "side": side,
-        }
+        # A DATACLASS, not a dict. `create_and_post_order` reads
+        # `order_args.token_id`, so the dict this used to pass raised
+        # "'dict' object has no attribute 'token_id'" on every call and the
+        # order path could never have placed anything. The suite never caught
+        # it because its fakes accept a dict happily; the canary caught it on
+        # the first real order, which is what the canary is for.
+        order_args = OrderArgs(
+            token_id=trade.token_id,
+            price=order_price,
+            size=round(shares, 2),
+            side=side,
+        )
 
         resp = clob_client.create_and_post_order(order_args)
         order_id = resp.get("orderID", "") or resp.get("id", "")

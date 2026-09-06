@@ -1534,3 +1534,67 @@ def test_the_stuck_order_detector_is_not_shadowed_by_the_redeemable_filter(tmp_p
         now=now)
     assert out["stuck_orders"] == 1, "the order detector still sees its order"
     assert out["unredeemed"] == 0, "and the worthless position is still excluded"
+
+
+def test_the_executor_hands_the_clob_the_object_the_library_reads():
+    """'dict' object has no attribute 'token_id', on the first real order.
+
+    `create_and_post_order` reads `order_args.token_id`, so the dict the
+    executor used to build raised on EVERY call: the live order path could
+    never have placed anything. The suite missed it because its fakes take a
+    dict happily. This fake keys off the REAL request shape, which is the
+    standing rule after four defects of exactly this kind.
+    """
+    from datetime import datetime, timezone
+
+    from py_clob_client_v2.clob_types import OrderArgsV2
+    from src.copy_trading import trade_executor
+    from src.models import DetectedTrade
+
+    seen = {}
+
+    class _RealisticClob:
+        def create_and_post_order(self, order_args, *a, **k):
+            # exactly what the library does: attribute access, no .get()
+            seen["type"] = type(order_args).__name__
+            seen["token_id"] = order_args.token_id
+            seen["price"] = order_args.price
+            seen["size"] = order_args.size
+            seen["side"] = order_args.side
+            assert isinstance(order_args, OrderArgsV2), "the library's own type"
+            return {"orderID": "0xabc"}
+
+    trade = DetectedTrade(id="t", trader_address=W1,
+                          timestamp=datetime.now(timezone.utc).isoformat(),
+                          market="m", token_id="tok-123", condition_id="c",
+                          side="BUY", size=900.0, price=0.50)
+    res = _run(trade_executor._execute_copy_order(
+        _RealisticClob(), trade, 6.40, {"best_bid": 0.49, "best_ask": 0.51,
+                                        "midpoint": 0.50, "spread_bps": 400}))
+    assert res is not None and res.order_id == "0xabc"
+    assert seen["type"] == "OrderArgsV2" and seen["token_id"] == "tok-123"
+    assert seen["side"] == "BUY" and seen["size"] > 0
+    # the order lifts the ask, and buys about what the money buys at that price
+    assert seen["price"] == 0.51
+    assert abs(seen["size"] - round(6.40 / 0.51, 2)) < 0.02
+
+
+def test_a_clob_that_rejects_a_dict_makes_the_executor_fail_not_pretend():
+    """If the shape is ever wrong again, the executor must return None (which
+    spends the canary and disarms), never a fabricated success."""
+    from datetime import datetime, timezone
+
+    from src.copy_trading import trade_executor
+    from src.models import DetectedTrade
+
+    class _StrictClob:
+        def create_and_post_order(self, order_args, *a, **k):
+            raise AttributeError("'dict' object has no attribute 'token_id'")
+
+    trade = DetectedTrade(id="t", trader_address=W1,
+                          timestamp=datetime.now(timezone.utc).isoformat(),
+                          market="m", token_id="tok", condition_id="c",
+                          side="BUY", size=900.0, price=0.50)
+    assert _run(trade_executor._execute_copy_order(
+        _StrictClob(), trade, 6.40, {"best_bid": 0.49, "best_ask": 0.51,
+                                     "midpoint": 0.50, "spread_bps": 400})) is None
