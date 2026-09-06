@@ -486,6 +486,10 @@ def _open_the_door(monkeypatch, canary):
     class _C:
         tradeable = True
         per_copy_usd = 7.75
+        daily_usd = 93.0
+        exposure_usd = 248.0
+        effective_usd = 310.0
+        min_trader_bet_usd = 300.0
     monkeypatch.setattr(canary.live_budget, "caps", lambda **k: _C())
 
 
@@ -550,7 +554,7 @@ def test_canary_expires_unfired_and_says_so_once(canary_env, monkeypatch):
     canary.stage(by="test", now=1000.0)
     sent: list = []
     assert canary.expire_if_due(send=sent.append, now=1000.0 + canary.TTL_S + 1) is True
-    assert len(sent) == 1 and "expired" in sent[0]
+    assert len(sent) == 1 and "lapsed" in sent[0]
     assert canary.expire_if_due(send=sent.append, now=1000.0 + canary.TTL_S + 2) is False
     assert len(sent) == 1 and canary.is_staged() is False
 
@@ -573,19 +577,6 @@ def test_the_guard_loop_expires_a_stale_canary():
     import main
     assert "canary.expire_if_due" in inspect.getsource(main._live_guard_loop)
 
-
-def test_the_first_arm_stages_the_canary_by_default(canary_env, monkeypatch):
-    import src.telegram_bot as tb
-    canary = canary_env
-    monkeypatch.setattr(tb.live_mode if hasattr(tb, "live_mode") else live_mode, "arm",
-                        lambda reason="", by="": (True, "armed"))
-    monkeypatch.setattr(live_mode, "arm", lambda reason="", by="": (True, "armed"))
-    _open_the_door(monkeypatch, canary)
-    sent: list = []
-    with patch.object(tb, "send_message", lambda x, **k: sent.append(x)):
-        tb._handle_live("/live CONFIRM")
-    assert "ARMED" in sent[0] and "Canary staged" in sent[0]
-    assert canary.is_staged()
 
 
 def test_canary_status_renders_without_a_record(canary_env, monkeypatch):
@@ -810,7 +801,7 @@ def test_real_money_line_counts_only_redeemer_rows(tmp_path, monkeypatch, budget
 
 def test_the_daily_block_sends_the_rehearsal_line():
     import main
-    assert "rehearsal.daily_message()" in inspect.getsource(main._ab_race_reporter_loop)
+    assert "rehearsal.daily_parts()" in inspect.getsource(main._ab_race_reporter_loop)
 
 
 # --------------------------------------------------------------------------- #
@@ -1348,19 +1339,6 @@ def test_the_canary_holds_a_full_size_order_until_the_shot_fires(tmp_path, monke
     assert canary.is_staged() is True and live_mode.is_armed() is True
 
 
-def test_an_expired_canary_takes_the_arm_with_it(canary_env, monkeypatch):
-    """Otherwise a stale-canary session silently became a full-size live one."""
-    canary = canary_env
-    _open_the_door(monkeypatch, canary)
-    canary.stage(by="test", now=1000.0)
-    pulled: list = []
-    monkeypatch.setattr(canary.live_mode, "is_armed", lambda: True)
-    monkeypatch.setattr(canary.live_mode, "disarm", lambda by="": pulled.append(by) or True)
-    sent: list = []
-    assert canary.expire_if_due(send=sent.append, now=1000.0 + canary.TTL_S + 1) is True
-    assert pulled == ["canary-expiry"]
-    assert "arm came off with it" in sent[0] and "/live CONFIRM again" in sent[0]
-
 
 # --------------------------------------------------------------------------- #
 # The collateral migration: pUSD, not USDC.e
@@ -1450,8 +1428,7 @@ def test_the_redeem_pass_is_wired_to_tell_the_owner():
 
     from src.copy_trading import runner
     src = inspect.getsource(runner)
-    assert "check_and_redeem_positions(\n                        get_private_key(), notify=" in src \
-        or "notify=_tb.send_message" in src
+    assert "notify=lambda m: _tb.send_message(m, kind=_tb.KIND_DEAL)" in src
 
 
 def test_the_deploy_sizes_the_governor_to_a_real_ticket():
@@ -1628,3 +1605,265 @@ def test_cancelling_an_order_uses_a_method_the_client_actually_has():
     class _NoCancel:
         pass
     assert _run(trade_executor._cancel_order(_NoCancel(), "0xdead")) is False
+
+
+# =========================================================================== #
+# Run s-kac3t7 (2026-09-06): a trader that actually trades, and a chat he can read
+# =========================================================================== #
+
+def _tb():
+    import src.telegram_bot as tb
+    return tb
+
+
+@pytest.fixture
+def tg(tmp_path, monkeypatch):
+    """Telegram with a capturing transport and an isolated prefs file."""
+    tb = _tb()
+    monkeypatch.setattr(tb.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(tb.CONFIG, "telegram_bot_token", "t")
+    monkeypatch.setattr(tb.CONFIG, "telegram_chat_id", "1")
+    monkeypatch.setattr(tb.CONFIG, "telegram_research_messages", False)
+    monkeypatch.setattr(tb, "_suppressed_research", 0)
+    sent: list = []
+
+    class _R:
+        ok = True
+        status_code = 200
+        text = ""
+    monkeypatch.setattr(tb.requests, "post", lambda url, json=None, timeout=0: sent.append(json) or _R())
+    return tb, sent
+
+
+def test_every_push_carries_its_class_and_replies_carry_none(tg):
+    tb, sent = tg
+    assert tb.send_message("real order", kind=tb.KIND_DEAL)
+    assert tb.send_message("who we follow", kind=tb.KIND_WALLET)
+    assert tb.send_message("the process", kind=tb.KIND_BOT)
+    assert tb.send_message("answer to /pnl")
+    texts = [p["text"] for p in sent]
+    assert texts[0].startswith("<b>[💰 DEAL]</b> real order")
+    assert texts[1].startswith("<b>[👛 WALLET]</b> who we follow")
+    assert texts[2].startswith("<b>[🤖 BOT]</b> the process")
+    assert texts[3] == "answer to /pnl", "a reply is not prefixed"
+
+
+def test_research_is_held_by_default_counted_and_switchable(tg):
+    tb, sent = tg
+    assert tb.send_message("paper offer", kind=tb.KIND_RESEARCH) is False
+    assert tb.send_message("discovery digest", kind=tb.KIND_RESEARCH) is False
+    assert sent == [], "held, not sent"
+    assert tb.suppressed_research_count() == 2
+    assert tb.set_research(True) and tb.research_enabled()
+    assert tb.send_message("paper offer", kind=tb.KIND_RESEARCH) is True
+    assert sent[-1]["text"].startswith("<b>[🔬 RESEARCH]</b>")
+    tb.set_research(False)
+    assert tb.research_enabled() is False, "the runtime switch survives on disk"
+
+
+def test_a_long_research_message_is_held_whole_and_a_long_deal_prefixed_once(tg):
+    tb, sent = tg
+    long = "\n".join(f"line {i} " + "x" * 60 for i in range(120))
+    assert tb._send_chunked(long, kind=tb.KIND_RESEARCH) is False and sent == []
+    assert tb._send_chunked(long, kind=tb.KIND_DEAL) is True
+    assert len(sent) >= 2
+    assert sent[0]["text"].startswith("<b>[💰 DEAL]</b>")
+    assert not any(p["text"].startswith("<b>[") for p in sent[1:]), "prefix once"
+
+
+def test_the_paper_book_offer_is_research_and_the_admit_card_is_not(tg, monkeypatch):
+    tb, sent = tg
+    assert tb.send_promotion_offer("0x" + "a" * 40, 15, 0.2, 30.0) is False, "held: paper"
+    assert sent == []
+
+
+def test_every_push_site_in_main_names_a_class():
+    """Replies to the owner carry no class; every PUSH must, or a message he
+    never asked for arrives unlabelled. The daily block, the guard, the
+    canary, the redeemer, discovery and the paper books all route here."""
+    import re
+    src = open("main.py", encoding="utf-8").read()
+    bare = []
+    for m in re.finditer(r'telegram_bot\.(send_message|_send_chunked)\(', src):
+        seg = src[m.start(): m.start() + 200]
+        if "kind=" not in seg:
+            bare.append(src[:m.start()].count("\n") + 1)
+    assert bare == [], f"unclassed push at main.py lines {bare}"
+    assert "def _send_deal" in src
+    assert "send=_send_deal" in src
+
+
+def test_the_daily_block_sends_research_and_deal_separately(monkeypatch, budget):
+    from src.copy_trading import rehearsal
+    budget(80.0)
+    monkeypatch.setattr(rehearsal, "_rehearsal_part", lambda now: "🎯 counterfactual")
+    monkeypatch.setattr(rehearsal, "real_money_line", lambda now=None: "💵 real money")
+    a, b = rehearsal.daily_parts(now=1.0)
+    assert a == "🎯 counterfactual" and b == "💵 real money"
+    assert rehearsal.daily_message(now=1.0) == "🎯 counterfactual\n\n💵 real money"
+    import main
+    src = inspect.getsource(main._ab_race_reporter_loop)
+    assert "rehearsal.daily_parts()" in src
+    assert "kind=telegram_bot.KIND_RESEARCH" in src and "kind=telegram_bot.KIND_DEAL" in src
+    assert "suppressed_research_count(reset=True)" in src
+
+
+def test_the_insider_era_detectors_are_research():
+    from src.copy_trading import pattern_detector, watchlist_alerter
+    assert 'kind="research"' in inspect.getsource(watchlist_alerter)
+    assert 'kind="research"' in inspect.getsource(pattern_detector)
+
+
+def test_research_command_toggles_and_reports(tg):
+    tb, sent = tg
+    tb._handle_research("/research")
+    assert "OFF" in sent[-1]["text"]
+    tb._handle_research("/research on")
+    assert tb.research_enabled() and "ON" in sent[-1]["text"]
+    tb._handle_research("/research off")
+    assert not tb.research_enabled()
+
+
+# ---- the per-wallet daily cap ----
+
+def test_one_busy_wallet_cannot_take_the_whole_day(tmp_path, monkeypatch):
+    from src.copy_trading import daily_spend_guard as g
+    monkeypatch.setattr(g, "_STATE_FILE", str(tmp_path / "d.json"))
+    monkeypatch.setattr(CONFIG, "live_max_per_wallet_day", 2)
+    monkeypatch.setattr(CONFIG, "max_daily_volume_usd", 500.0)
+    g._state.date = ""
+    assert g.can_copy_wallet(W1)[0]
+    g.record_wallet_copy(W1); g.record_wallet_copy(W1)
+    ok, why = g.can_copy_wallet(W1)
+    assert ok is False and "2 of 2" in why
+    assert g.can_copy_wallet(W2)[0], "another wallet is unaffected"
+    monkeypatch.setattr(CONFIG, "live_max_per_wallet_day", 0)
+    assert g.can_copy_wallet(W1)[0], "0 means no cap"
+
+
+def test_the_per_wallet_cap_binds_at_the_order_sink(tmp_path, monkeypatch):
+    from src.copy_trading import daily_spend_guard as g
+    monkeypatch.setattr(CONFIG, "live_max_per_wallet_day", 2)
+    h = _Harness(tmp_path, monkeypatch)
+    g._state.date = ""
+    placed = h.run(h.trades(4))
+    assert placed == 2 and len(h.posted) == 2, "third and fourth copies from the same wallet are refused"
+    assert h.seen == {"t0", "t1", "t2", "t3"}
+
+
+def test_the_deploy_pins_five_deals_a_day_and_two_per_wallet():
+    src = open("../.github/workflows/deploy.yml", encoding="utf-8").read()
+    assert "ensure_env LIVE_BUDGET_DAILY_FRAC 0.40" in src
+    assert "ensure_env LIVE_MAX_PER_WALLET_DAY 2" in src
+    assert round(80 * 0.40 / (80 * 0.08)) == 5
+
+
+# ---- the canary no longer holds the arm hostage ----
+
+def test_arming_no_longer_stages_a_canary(canary_env, monkeypatch):
+    import src.telegram_bot as tb
+    canary = canary_env
+    monkeypatch.setattr(live_mode, "arm", lambda reason="", by="": (True, "armed"))
+    monkeypatch.setattr(live_guard, "active_block", lambda: None)
+    sent: list = []
+    with patch.object(tb, "send_message", lambda x, **k: sent.append(x)):
+        tb._handle_live("/live CONFIRM")
+    assert "ARMED" in sent[0] and "staged" not in sent[0].lower()
+    assert canary.is_staged() is False
+
+
+def test_an_expired_canary_no_longer_pulls_the_arm(canary_env, monkeypatch):
+    canary = canary_env
+    _open_the_door(monkeypatch, canary)
+    canary.stage(by="test", now=1000.0)
+    pulled: list = []
+    monkeypatch.setattr(canary.live_mode, "is_armed", lambda: True)
+    monkeypatch.setattr(canary.live_mode, "disarm", lambda by="": pulled.append(by) or True)
+    sent: list = []
+    assert canary.expire_if_due(send=sent.append, now=1000.0 + canary.TTL_S + 1) is True
+    assert pulled == [] and "continues at normal size" in sent[0]
+
+
+def test_canary_messages_use_plain_words(canary_env, monkeypatch):
+    canary = canary_env
+    canary._write({"staged": True, "staged_ts": 0.0, "expires_ts": 9e12, "fired": None, "fill": None})
+    canary.consume(market="m", token_id="t", their_price=0.5, quoted_ask=0.51,
+                   copy_size=5.0, notify_latency_s=2.0, now=10.0)
+    canary.record_post_failed("no order id")
+    text = canary.report_text()
+    for jargon in ("one shot", "RESET the", "arm comes off", "Canary</b>: the one order"):
+        assert jargon not in text
+    assert "Test copy failed" in text
+
+
+# ---- the test order ----
+
+def test_test_order_refuses_a_bet_dressed_as_a_test(canary_env, monkeypatch):
+    from src.copy_trading import canary, trade_executor
+    _open_the_door(monkeypatch, canary)
+    monkeypatch.setattr(canary.live_budget, "is_open", lambda: True)
+
+    async def snap(client, token_id):
+        return {"best_bid": 0.60, "best_ask": 0.62, "midpoint": 0.61, "spread_bps": 300}
+    monkeypatch.setattr(trade_executor, "_get_market_snapshot", snap)
+    ok, msg = _run(canary.fire_test_order(object(), "tok", title="m"))
+    assert ok is False and "bet, not a test" in msg
+
+
+def test_test_order_goes_through_the_live_path_and_the_verifier_reports_once(canary_env, monkeypatch, tmp_path):
+    from src.copy_trading import canary, daily_spend_guard, trade_executor, trade_queue
+    from src.models import OrderResult
+    _open_the_door(monkeypatch, canary)
+    monkeypatch.setattr(canary.live_budget, "is_open", lambda: True)
+    monkeypatch.setattr(daily_spend_guard, "_STATE_FILE", str(tmp_path / "d.json"))
+    monkeypatch.setattr(CONFIG, "max_daily_volume_usd", 500.0)
+    monkeypatch.setattr(CONFIG, "min_order_size_usd", 5.0)
+
+    async def snap(client, token_id):
+        return {"best_bid": 0.975, "best_ask": 0.981, "midpoint": 0.978, "spread_bps": 61}
+    monkeypatch.setattr(trade_executor, "_get_market_snapshot", snap)
+    posted = {}
+
+    async def post(client, trade, copy_size, snapshot):
+        posted.update(size=copy_size, token=trade.token_id, side=trade.side, price=trade.price)
+        return OrderResult(order_id="0xtest1", shares=round(copy_size / 0.98, 2), order_price=0.98)
+    monkeypatch.setattr(trade_executor, "_execute_copy_order", post)
+    queued: list = []
+    monkeypatch.setattr(trade_queue, "enqueue_pending_order", lambda po: queued.append(po))
+
+    class _Clob:
+        def get_order_book(self, token_id):
+            return {"min_order_size": "5"}
+    ok, msg = _run(canary.fire_test_order(_Clob(), "tok-95", title="Spread: X (-1.5)"))
+    assert ok and "Test order placed" in msg and "0xtest1" in msg
+    assert posted["side"] == "BUY" and posted["size"] == 5.0 and posted["token"] == "tok-95"
+    assert len(queued) == 1 and queued[0].source == "testorder" and queued[0].order_id == "0xtest1"
+    assert daily_spend_guard.can_spend(0.0)[0]
+
+    class _Fill:
+        status, fill_price, filled_shares, filled_usd = "FILLED", 0.98, 5.1, 5.0
+    rep = canary.record_test_fill("0xtest1", _Fill())
+    assert rep and "Test order filled" in rep and "works end to end" in rep
+    assert canary.record_test_fill("0xtest1", _Fill()) is None, "reported once"
+    assert canary.record_test_fill("other", _Fill()) is None
+
+
+def test_the_verifier_reports_a_test_order_too():
+    from src.copy_trading import trade_executor
+    src = inspect.getsource(trade_executor.process_verifications)
+    assert "canary.record_test_fill(po.order_id, fill)" in src
+
+
+def test_testorder_command_refuses_while_the_door_is_shut(tg, monkeypatch):
+    tb, sent = tg
+    monkeypatch.setattr(tb.CONFIG, "preview_mode", True)
+    tb._handle_testorder("/testorder 12345")
+    assert "Cannot place a test order" in sent[-1]["text"]
+    tb._handle_testorder("/testorder")
+    assert "Usage" in sent[-1]["text"]
+
+
+def test_the_menu_and_help_carry_the_new_commands():
+    tb = _tb()
+    cmds = {e["command"] for e in tb.BOT_MENU_COMMANDS}
+    assert {"research", "testorder"} <= cmds

@@ -660,6 +660,13 @@ async def place_trade_orders(
                             "set): refusing a live copy")
                 mark_trade_as_seen(trade.id)
                 continue
+            if trade.side == "BUY":
+                from src.copy_trading.daily_spend_guard import can_copy_wallet
+                _ok_w, _why_w = can_copy_wallet(trade.trader_address)
+                if not _ok_w:
+                    logger.skip(f"[exec] {_why_w}: not copied")
+                    mark_trade_as_seen(trade.id)
+                    continue
             if trade.side == "BUY" and trade.size < gov.min_trader_bet_usd:
                 logger.skip(f"[exec] target bet ${trade.size:.0f} is under the evidence "
                             f"base's ${gov.min_trader_bet_usd:.0f}: not copied")
@@ -765,10 +772,11 @@ async def place_trade_orders(
                 try:
                     from src.copy_trading.telegram_notifier import _escape_html, _send_message
                     await _send_message(
-                        f"🐤 <b>Canary fired</b>: ${copy_size:.2f} on "
+                        f"🐤 <b>Test copy placed</b>: ${copy_size:.2f} on "
                         f"'{_escape_html(trade.market[:50])}' at {result.order_price:.4f} "
-                        f"(theirs {trade.price:.4f}). The arm is off; the fill "
-                        f"report follows when the verifier sees it.")
+                        f"(the wallet paid {trade.price:.4f}). Trading is paused until "
+                        f"you send /live CONFIRM again; the fill report follows when "
+                        f"the exchange confirms it.")
                 except Exception as exc:
                     logger.warn(f"[canary] fired message failed: {exc}")
 
@@ -783,6 +791,8 @@ async def place_trade_orders(
             if trade.side == "BUY":
                 from src.copy_trading.daily_spend_guard import record_spend
                 record_spend(copy_size, source=f"copy:{tier or 'legacy'}")
+                from src.copy_trading.daily_spend_guard import record_wallet_copy
+                record_wallet_copy(trade.trader_address)
 
             # 2. Enqueue for verification
             pending = PendingOrder(
@@ -889,9 +899,10 @@ async def process_verifications(
         try:
             fill = await _verify_order_fill(clob_client, po.order_id)
 
-            # The canary's fate, reported once, whatever it was.
+            # The canary's or the test order's fate, reported once.
             from src.copy_trading import canary
-            _canary_report = canary.record_fill(po.order_id, fill)
+            _canary_report = (canary.record_fill(po.order_id, fill)
+                              or canary.record_test_fill(po.order_id, fill))
             if _canary_report:
                 try:
                     from src.copy_trading.telegram_notifier import _send_message

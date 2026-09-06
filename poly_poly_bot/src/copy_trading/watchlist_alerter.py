@@ -240,7 +240,7 @@ async def maybe_alert_watchlist_trade(
         lines.append(f"Wallet: <code>{_escape_html(wallet)}</code>")
 
     try:
-        await _send_message("\n".join(lines))
+        await _send_message("\n".join(lines), kind="research")
     except Exception as exc:
         logger.warn(f"[watchlist] send failed: {exc}")
         return False

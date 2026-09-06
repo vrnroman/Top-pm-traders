@@ -220,7 +220,8 @@ async def _periodic_loop() -> None:
                 try:
                     from src import telegram_bot as _tb
                     result = await check_and_redeem_positions(
-                        get_private_key(), notify=_tb.send_message)
+                        get_private_key(),
+                        notify=lambda m: _tb.send_message(m, kind=_tb.KIND_DEAL))
                     if result.count > 0:
                         logger.info(f"Redeemed {result.count} resolved position(s)")
                         await telegram.positions_redeemed(result.count, result.details)

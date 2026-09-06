@@ -54,6 +54,8 @@ BOT_MENU_COMMANDS: list[dict] = [
     {"command": "live", "description": "The real-money interlock: status, or /live CONFIRM to arm"},
     {"command": "canary", "description": "One minimum-size real order through the live path (/canary CONFIRM)"},
     {"command": "rehearse", "description": "What your budget would have made at real quotes, at several budgets"},
+    {"command": "research", "description": "Deliver or hold the research-class messages (/research on|off)"},
+    {"command": "testorder", "description": "One real order at the exchange minimum to prove the pipeline (/testorder <token>)"},
     {"command": "setkey", "description": "Rotate/clear in-memory private key (e.g. /setkey clear CONFIRM)"},
     {"command": "slice", "description": "Cost-slice @net table for a paper book (/slice A|B)"},
     {"command": "verdict", "description": "One-word era decision after the §7 memo (arms 2026-08-22)"},
@@ -88,13 +90,124 @@ def _is_parse_error(resp) -> bool:
         return False
 
 
-def send_message(text: str, parse_mode: str = "HTML", reply_markup: dict | None = None) -> bool:
+# --------------------------------------------------------------------------- #
+# Message classes: what a push notification is ABOUT, said up front.
+#
+# The owner asked (2026-09-06) for a clear separation of three things in one
+# chat: real deals, the wallets those deals follow, and the older research
+# chatter (paper books, discovery, the insider detectors) that no longer drives
+# a trade. Every push send names its class; the class becomes a visible prefix
+# and decides whether the message is delivered at all.
+#
+#   DEAL      real money moved, or a stop that protects it
+#   WALLET    who is being followed changed, or could
+#   RESEARCH  paper books, discovery, race, insider detectors: measurement
+#   BOT       the process itself (started, crashed, disk, deploy drift)
+#
+# Replies to a command the owner typed carry no class: he asked, he gets the
+# answer. RESEARCH is delivered only when he has switched it on; suppressed
+# messages are counted and the count rides the daily real-money line, so
+# silence is never mistaken for "nothing happened".
+# --------------------------------------------------------------------------- #
+
+KIND_DEAL = "deal"
+KIND_WALLET = "wallet"
+KIND_RESEARCH = "research"
+KIND_BOT = "bot"
+_KIND_PREFIX = {
+    KIND_DEAL: "💰 DEAL",
+    KIND_WALLET: "👛 WALLET",
+    KIND_RESEARCH: "🔬 RESEARCH",
+    KIND_BOT: "🤖 BOT",
+}
+_PREFS_FILE = "telegram_prefs.json"
+_suppressed_research: int = 0
+
+
+def _prefs_path() -> str:
+    return os.path.join(CONFIG.data_dir, _PREFS_FILE)
+
+
+def _read_prefs() -> dict:
+    try:
+        with open(_prefs_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_prefs(d: dict) -> bool:
+    try:
+        os.makedirs(os.path.dirname(_prefs_path()), exist_ok=True)
+        tmp = _prefs_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, _prefs_path())
+        return True
+    except OSError as exc:
+        logger.warning(f"Telegram prefs write failed: {exc}")
+        return False
+
+
+def research_enabled() -> bool:
+    """Is RESEARCH chatter delivered? Off unless the owner turned it on.
+
+    The runtime switch (`/research on|off`) outranks the env default, and it
+    lives on the data volume so it survives deploys."""
+    pref = _read_prefs().get("research")
+    if isinstance(pref, bool):
+        return pref
+    return bool(getattr(CONFIG, "telegram_research_messages", False))
+
+
+def set_research(enabled: bool) -> bool:
+    d = _read_prefs()
+    d["research"] = bool(enabled)
+    return _write_prefs(d)
+
+
+def suppressed_research_count(reset: bool = False) -> int:
+    """How many RESEARCH messages were held since the last reset."""
+    global _suppressed_research
+    n = _suppressed_research
+    if reset:
+        _suppressed_research = 0
+    return n
+
+
+def classify(text: str, kind: str | None) -> tuple[str, bool]:
+    """(text with its class prefix, deliver?) for a push message."""
+    global _suppressed_research
+    if kind is None:
+        return (text, True)
+    prefix = _KIND_PREFIX.get(kind)
+    if prefix is None:
+        logger.warning(f"Telegram: unknown message kind {kind!r}; delivering unprefixed")
+        return (text, True)
+    if kind == KIND_RESEARCH and not research_enabled():
+        _suppressed_research += 1
+        logger.info(f"[telegram] research message held (#{_suppressed_research}): "
+                    f"{text[:80]!r}")
+        return (text, False)
+    return (f"<b>[{prefix}]</b> {text}", True)
+
+
+def send_message(text: str, parse_mode: str = "HTML", reply_markup: dict | None = None,
+                 kind: str | None = None) -> bool:
     """Send a message to the configured Telegram chat.
+
+    ``kind`` names what a PUSH message is about (KIND_DEAL, KIND_WALLET,
+    KIND_RESEARCH, KIND_BOT); it becomes a visible prefix and decides delivery.
+    Replies to the owner's own commands pass no kind.
 
     ``reply_markup`` attaches an inline keyboard (tap-to-act buttons). Returns
     True iff the message was actually delivered, so callers that must not repeat
     on failure (e.g. a one-time promote offer) can gate on it."""
     if not is_configured():
+        return False
+    text, deliver = classify(text, kind)
+    if not deliver:
         return False
     try:
         url = f"{TELEGRAM_API.format(token=CONFIG.telegram_bot_token)}/sendMessage"
@@ -215,17 +328,25 @@ def send_promotion_offer(wallet: str, n_closed: int, roi: float,
         {"text": f"✅ Promote → {tier}", "callback_data": f"promo:{wallet}"},
         {"text": "✖ Dismiss", "callback_data": f"dism:{wallet}"},
     ]]}
-    return send_message(text, reply_markup=keyboard)
+    # A PAPER-book offer. Set Z is the real wallet door now (/zset candidates),
+    # so this is research, not a decision about real money.
+    return send_message(text, reply_markup=keyboard, kind=KIND_RESEARCH)
 
 
-def _send_chunked(text: str, parse_mode: str = "HTML", chunk_size: int = 3800) -> bool:
+def _send_chunked(text: str, parse_mode: str = "HTML", chunk_size: int = 3800,
+                  kind: str | None = None) -> bool:
     """Send a potentially long message as multiple Telegram messages.
 
     Splits on newline boundaries. We rely on the convention that HTML tags
     used here (<b>, <code>, <i>) open and close on the same line, so a split
-    between lines won't tear a tag. Returns True only when every chunk landed —
-    callers gating one-shot state (the verdict memo) retry on False.
+    between lines won't tear a tag. Returns True only when every chunk landed,
+    since callers gating one-shot state (the verdict memo) retry on False.
+    The class is decided ONCE for the whole message: a held RESEARCH message
+    is held entirely, and a delivered one is prefixed on its first chunk only.
     """
+    text, deliver = classify(text, kind)
+    if not deliver:
+        return False
     if len(text) <= chunk_size:
         return send_message(text, parse_mode=parse_mode)
 
@@ -308,6 +429,10 @@ def _handle_command(text: str):
         _handle_canary(text)
     elif text.startswith("/rehearse"):
         _handle_rehearse(text)
+    elif text.startswith("/research"):
+        _handle_research(text)
+    elif text.startswith("/testorder"):
+        _handle_testorder(text)
     elif text.startswith("/live"):
         _handle_live(text)
     elif text.startswith("/setkey"):
@@ -1199,7 +1324,11 @@ def _handle_help():
         "<code>/live</code>: the two-key interlock and the bankroll governor\n"
         "<code>/speed</code>: how fast you are told, how much worse your entry is\n"
         "<code>/canary CONFIRM</code>: one minimum-size real order through the live path, then the arm comes off\n"
-        "<code>/rehearse [budgets]</code>: what your budget would have made at real quotes, and which cap bound\n\n"
+        "<code>/rehearse [budgets]</code>: what your budget would have made at real quotes, and which cap bound\n"
+        "<code>/testorder &lt;token&gt;</code>: one real order at the exchange minimum to prove the pipeline\n"
+        "<code>/research on|off</code>: deliver or hold the research-class messages\n\n"
+        "<b>Message classes</b>: 💰 DEAL real money · 👛 WALLET who is followed · "
+        "🔬 RESEARCH paper books and detectors (off by default) · 🤖 BOT the process\n\n"
         "<b>Safety levers</b>\n"
         "<code>/setkey clear CONFIRM</code> — Wipe in-memory private key\n"
         "<code>/setkey 0xHEX CONFIRM</code> — Replace key in memory\n"
@@ -1844,21 +1973,17 @@ def _handle_live(text: str) -> None:
                 lines.append("⚠️ The bankroll floor tripped on the last session. "
                              "Arming now overrides it for this session; the next "
                              "disarm of any kind puts the floor back.")
-            # The first live session is bounded to one ticket unless the owner
-            # says otherwise: a canary that has never fired is staged here, so
-            # the arm and the canary are one motion, not two he has to hold.
-            if not canary.has_fired():
-                c_ok, c_detail = canary.stage(by="telegram:/live")
-                if c_ok:
-                    lines.append("")
-                    lines.append("🐤 <b>Canary staged</b>: the first copy that passes "
-                                 "the rails goes out at the $5 order minimum (or the "
-                                 "market's minimum if that is higher) and the arm "
-                                 "comes off after it. <code>/canary CANCEL</code> "
-                                 "to trade at full size instead.")
-                else:
-                    lines.append("")
-                    lines.append(f"🐤 Canary not staged: {_esc(c_detail)}")
+            # No canary is staged here any more (owner ruling 2026-09-06): a
+            # first order that pulls the arm, or an expiry that pulls it, was
+            # the "stupid reason" deals stopped. The pipeline is proven by a
+            # test order instead (/testorder), and /canary CONFIRM remains a
+            # manual option.
+            if canary.is_staged():
+                lines.append("")
+                lines.append("🐤 A test copy is staged: the next followed-wallet buy "
+                             "goes out at the minimum size, then trading pauses "
+                             "until you arm again. <code>/canary CANCEL</code> to "
+                             "trade at full size from the start.")
             lines.append("")
             lines.append("<code>/live DISARM</code> to stop.")
             send_message("\n".join(lines))
@@ -1900,6 +2025,71 @@ def _handle_live(text: str) -> None:
     lines.append("  • <code>/golive &lt;wallet&gt;</code>, the per-wallet bar")
     lines.append("  • ROADMAP §9.7, what the gate does NOT check")
     _send_chunked("\n".join(lines))
+
+
+def _handle_research(text: str) -> None:
+    """/research on|off: deliver or hold the RESEARCH-class pushes."""
+    parts = text.split()
+    verb = parts[1].lower() if len(parts) > 1 else ""
+    if verb in ("on", "off"):
+        ok = set_research(verb == "on")
+        held = suppressed_research_count(reset=(verb == "on"))
+        if not ok:
+            send_message("Could not save the preference (disk?). Nothing changed.")
+            return
+        if verb == "on":
+            send_message(f"🔬 Research messages ON. {held} were held while it was off; "
+                         f"they are not replayed.")
+        else:
+            send_message("🔬 Research messages OFF. They are logged, counted, and the "
+                         "count rides the daily real-money line.")
+        return
+    state = "ON" if research_enabled() else "OFF"
+    send_message(f"🔬 Research messages are {state}. {suppressed_research_count()} held "
+                 f"since the last daily line.\n<code>/research on</code> or "
+                 f"<code>/research off</code>.\n\nClasses: 💰 DEAL (real money), "
+                 f"👛 WALLET (who is followed), 🔬 RESEARCH (paper books, discovery, "
+                 f"insider detectors), 🤖 BOT (the process).")
+
+
+def _handle_testorder(text: str) -> None:
+    """/testorder <token_id> [title]: one real order at the exchange minimum
+    on a chosen market, through the live path, to prove it places and fills.
+    Needs every interlock key. Does not pull the arm."""
+    import asyncio
+
+    from src.copy_trading import canary
+
+    parts = text.split(maxsplit=2)
+    if len(parts) < 2:
+        send_message("Usage: <code>/testorder &lt;token_id&gt; [title]</code>\n"
+                     "Places ONE order at the exchange minimum (about $5) on that "
+                     "market's token, BUY at the live ask, through the same path "
+                     "every real copy uses. Pick a market whose favoured outcome "
+                     "trades at 0.90 or higher so the test is about the pipeline, "
+                     "not the bet.")
+        return
+    token = parts[1].strip()
+    title = parts[2].strip() if len(parts) > 2 else ""
+    reasons = canary.test_blocking_reasons()
+    if reasons:
+        send_message("Cannot place a test order: " + "; ".join(_esc(r) for r in reasons))
+        return
+    from src.copy_trading.clob_client import create_clob_client
+    client = create_clob_client()
+    if client is None:
+        send_message("Cannot place a test order: no CLOB client (key issue?).")
+        return
+    send_message(f"Test order: buying at the exchange minimum on "
+                 f"<code>{_esc(token[:20])}…</code>"
+                 f"{(' (' + _esc(title[:60]) + ')') if title else ''}. Purpose: confirm "
+                 f"the live order path places and fills. Nothing about wallet signal.",
+                 kind=KIND_DEAL)
+    try:
+        ok, msg = asyncio.run(canary.fire_test_order(client, token, title=title))
+    except Exception as exc:
+        ok, msg = False, f"test order raised: {exc}"
+    send_message(("✅ " if ok else "❌ ") + _esc(msg), kind=KIND_DEAL)
 
 
 def _handle_rehearse(text: str) -> None:

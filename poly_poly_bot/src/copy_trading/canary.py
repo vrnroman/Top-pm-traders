@@ -143,18 +143,13 @@ def expire_if_due(send=None, now: Optional[float] = None) -> bool:
     d["expired"] = True
     d["expired_ts"] = now
     _write(d)
-    # The owner armed expecting one minimum-size ticket first. Letting the
-    # expiry quietly hand him a full-size live session is the opposite of what
-    # he agreed to, so the arm comes off with the canary.
-    was_armed = live_mode.is_armed()
-    if was_armed:
-        live_mode.disarm(by="canary-expiry")
-    msg = ("🐤 Canary expired unfired after 24h: no set-Z copy passed the rails "
-           "while it was staged. "
-           + ("The arm came off with it, so nothing trades until you send "
-              "/live CONFIRM again. " if was_armed
-              else "Nothing was armed. ")
-           + "/canary CONFIRM stages it again.")
+    # The expiry does NOT touch the arm (owner ruling 2026-09-06): an arm
+    # pulled for a reason unrelated to money is the "stupid reason" deals
+    # stopped for a day. The staged test copy simply lapses; trading, if
+    # armed, continues at full size.
+    msg = ("🐤 The staged test copy lapsed after 24h: no followed-wallet buy "
+           "passed the rails in that time. Trading continues at normal size if "
+           "armed. /canary CONFIRM stages another test copy.")
     logger.warn(f"[canary] {msg}")
     if send is not None:
         try:
@@ -292,11 +287,11 @@ def report_text(d: Optional[dict] = None) -> str:
         return "🐤 Canary: not fired yet."
     from src.copy_trading.telegram_notifier import _escape_html
     if not f.get("posted"):
-        return (f"🐤 <b>Canary</b>: the one order did not post "
+        return (f"🐤 <b>Test copy failed</b>: the order did not post "
                 f"({_escape_html(str(f.get('post_error') or 'no order id returned'))}). "
-                f"The shot is spent and the arm is off. <code>/canary RESET</code> then "
+                f"Trading is paused. <code>/canary RESET</code> then "
                 f"<code>/live CONFIRM</code> to try again.")
-    lines = [f"🐤 <b>Canary report</b>, order {str(f.get('order_id') or '')[:12]}",
+    lines = [f"🐤 <b>Test copy report</b>, order {str(f.get('order_id') or '')[:12]}",
              f"market: {_escape_html(str(f.get('market') or '')[:60])}",
              f"their price {_num(f.get('their_price')):.4f} · quoted ask at detection "
              f"{_num(f.get('quoted_ask')):.4f} · our order {_num(f.get('order_price')):.4f} "
@@ -315,7 +310,7 @@ def report_text(d: Optional[dict] = None) -> str:
         lines.extend(_one_row(f, fp))
     else:
         lines.append("fill: waiting for the verifier")
-    lines.append("The arm came off when this order was posted. /live CONFIRM arms again.")
+    lines.append("Trading paused when this order was posted. /live CONFIRM resumes it.")
     return "\n".join(lines)
 
 
@@ -339,6 +334,149 @@ def _one_row(f: dict, fill_price: float) -> list[str]:
         f"{quoted:.4f} · fill {fill_price:.4f}",
         f"  fill vs paper model {delta(model)} · fill vs quoted ask {delta(quoted)}",
     ]
+
+
+# --------------------------------------------------------------------------- #
+# The test order: one real order on a market the owner (or the run) chose,
+# through the exact live order path, to prove the pipeline places and fills.
+# It does NOT pull the arm: it is proof, not a bounded first session, and the
+# owner asked for it precisely so that trading can proceed with confidence.
+# --------------------------------------------------------------------------- #
+
+TEST_FILE = "testorder.json"
+# A market whose favoured outcome trades under this is not a "penny test".
+TEST_MIN_PRICE = 0.90
+
+
+def _test_path() -> str:
+    return os.path.join(CONFIG.data_dir, TEST_FILE)
+
+
+def read_test() -> dict:
+    try:
+        with open(_test_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_test(d: dict) -> bool:
+    try:
+        os.makedirs(os.path.dirname(_test_path()), exist_ok=True)
+        tmp = _test_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, _test_path())
+        return True
+    except OSError as exc:
+        logger.error(f"[testorder] state write failed: {exc}")
+        return False
+
+
+def test_blocking_reasons() -> list[str]:
+    out = list(live_mode.blocking_reasons())
+    if not live_budget.is_open():
+        out.append("LIVE_BUDGET_USD not set (bankroll governor closed)")
+    return out
+
+
+async def fire_test_order(clob_client, token_id: str, *, title: str = "",
+                          now: Optional[float] = None) -> tuple[bool, str]:
+    """Place ONE order at the exchange minimum on ``token_id``, BUY side, at
+    the live best ask, through ``trade_executor._execute_copy_order`` (the
+    same function every real copy uses), and hand it to the verifier.
+
+    Returns ``(ok, plain message for the owner)``. Refuses when the interlock
+    is not fully open, when the book cannot be read, or when the favoured
+    price is under TEST_MIN_PRICE (then it is a bet, not a test).
+    """
+    from datetime import datetime, timezone
+
+    from src.copy_trading import trade_executor
+    from src.copy_trading.daily_spend_guard import can_spend, record_spend
+    from src.copy_trading.order_executor import quote_copy_order
+    from src.copy_trading.trade_queue import enqueue_pending_order
+    from src.models import DetectedTrade, PendingOrder
+
+    now = time.time() if now is None else now
+    reasons = test_blocking_reasons()
+    if reasons:
+        return (False, "cannot place a test order: " + "; ".join(reasons))
+    snapshot = await trade_executor._get_market_snapshot(clob_client, token_id)
+    if not snapshot or not snapshot.get("best_ask"):
+        return (False, "cannot read the order book for that market")
+    ask = float(snapshot["best_ask"])
+    if ask < TEST_MIN_PRICE:
+        return (False, f"the favoured outcome trades at {ask:.3f}, under "
+                       f"{TEST_MIN_PRICE:.2f}: that is a bet, not a test")
+    order_price = quote_copy_order("BUY", ask, snapshot) or ask
+    size_usd = size_for(clob_client, token_id, order_price)
+    ok_spend, why = can_spend(size_usd)
+    if not ok_spend:
+        return (False, f"the daily cap refuses it: {why}")
+
+    trade = DetectedTrade(
+        id=f"test-{token_id[:16]}-{int(now)}", trader_address="",
+        timestamp=datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        market=title or f"token {token_id[:16]}", token_id=token_id,
+        condition_id="", side="BUY", size=0.0, price=ask)
+    rec = {"placed_ts": now, "token_id": token_id, "market": trade.market,
+           "ask_at_send": ask, "order_price": order_price, "copy_size": size_usd,
+           "order_id": None, "posted": False, "fill": None}
+    if not _write_test(rec):
+        return (False, "could not persist the test record; nothing was sent")
+
+    result = await trade_executor._execute_copy_order(clob_client, trade, size_usd, snapshot)
+    if result is None:
+        rec["post_error"] = "the exchange returned no order id"
+        _write_test(rec)
+        return (False, f"test order on '{trade.market[:50]}' did NOT post: "
+                       f"the exchange returned no order id. See the log for the "
+                       f"exact error.")
+    rec.update({"order_id": result.order_id, "posted": True,
+                "order_price": result.order_price, "shares": result.shares})
+    _write_test(rec)
+    record_spend(size_usd, source="testorder")
+    enqueue_pending_order(PendingOrder(
+        trade=trade, order_id=result.order_id, order_price=result.order_price,
+        copy_size=size_usd, placed_at=now * 1000, market_key=trade.market,
+        side="BUY", source_detected_at=now * 1000, enqueued_at=now * 1000,
+        order_submitted_at=now * 1000, source="testorder", tier=None))
+    logger.warn(f"[testorder] POSTED {result.order_id[:12]} ${size_usd:.2f} "
+                f"({result.shares:.2f} sh) on '{trade.market[:40]}' at "
+                f"{result.order_price:.4f}")
+    return (True, f"Test order placed: {result.shares:.2f} shares of "
+                  f"'{trade.market[:50]}' at {result.order_price:.3f} "
+                  f"(${size_usd:.2f}), order {result.order_id[:12]}. The fill "
+                  f"report follows when the exchange confirms it; the win or "
+                  f"loss shows in Polymarket when the match resolves.")
+
+
+def record_test_fill(order_id: str, fill, now: Optional[float] = None) -> Optional[str]:
+    """The verifier saw the test order's fate. Returns the report ONCE."""
+    d = read_test()
+    if not d or d.get("order_id") != order_id or d.get("fill"):
+        return None
+    status = str(getattr(fill, "status", "") or "")
+    if not status or status == "UNKNOWN":
+        return None
+    now = time.time() if now is None else now
+    d["fill"] = {"status": status,
+                 "fill_price": _num(getattr(fill, "fill_price", 0.0)),
+                 "filled_shares": _num(getattr(fill, "filled_shares", 0.0)),
+                 "filled_usd": _num(getattr(fill, "filled_usd", 0.0)), "ts": now}
+    _write_test(d)
+    f = d["fill"]
+    if status == "FILLED" or (status == "PARTIAL" and f["filled_shares"] > 0):
+        return (f"Test order filled: {f['filled_shares']:.2f} shares of "
+                f"'{str(d.get('market'))[:50]}' at {f['fill_price']:.3f} "
+                f"(${f['filled_usd']:.2f}), order {str(order_id)[:12]}. The live "
+                f"order path works end to end. Result shows in Polymarket when "
+                f"the match resolves.")
+    return (f"Test order {status.lower()}: order {str(order_id)[:12]} on "
+            f"'{str(d.get('market'))[:50]}' did not fill. "
+            f"{'It was cancelled by the verifier.' if status == 'UNFILLED' else ''}")
 
 
 def status_lines() -> list[str]:

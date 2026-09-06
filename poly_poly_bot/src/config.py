@@ -128,6 +128,11 @@ class Config:
     preview_mode: bool = _opt_bool("PREVIEW_MODE", True)
     telegram_bot_token: str = _optional("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id: str = _optional("TELEGRAM_CHAT_ID", "")
+    # Deliver RESEARCH-class pushes (paper books, discovery, the insider
+    # detectors, the race)? Off by default since 2026-09-06: none of it drives
+    # a real trade, and it buried the deals. /research on|off overrides at
+    # runtime and survives deploys (data/telegram_prefs.json).
+    telegram_research_messages: bool = _opt_bool("TELEGRAM_RESEARCH_MESSAGES", False)
 
     # --- Strategy 1: Copy Trading ---
     user_addresses: list[str] = _user_addresses
@@ -304,6 +309,10 @@ class Config:
     # (0) means live sizing is CLOSED: no real copy is sized until the owner
     # states a number. 400 SGD, the stated first budget, is about 310 USD.
     live_budget_usd: float = _opt_float("LIVE_BUDGET_USD", 0.0)
+    # Copies per followed wallet per UTC day on the LIVE path (0 = no cap).
+    # One wallet at ~8 signals a day would otherwise take the whole daily cap
+    # first-come, before the slower, stronger wallets fire.
+    live_max_per_wallet_day: int = _opt_int("LIVE_MAX_PER_WALLET_DAY", 2)
 
     # --- Strategy B: the borrowed-clock (instant-copy) paper book ---
     # A SECOND paper book racing the one above (the 2026-07 A-vs-B experiment).

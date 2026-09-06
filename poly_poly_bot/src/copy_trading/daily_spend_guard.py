@@ -14,7 +14,7 @@ import json
 import os
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from src.config import CONFIG
 from src.logger import logger
@@ -29,6 +29,10 @@ _lock = threading.Lock()
 class _State:
     date: str = ""
     spent_usd: float = 0.0
+    # Copies placed today per followed wallet (lowercased address -> count).
+    # One wallet at 7.7 signals a day would otherwise take the whole daily
+    # cap first-come, before the stronger, slower wallets fire at all.
+    wallet_copies: dict = field(default_factory=dict)
 
 
 _state = _State()
@@ -61,18 +65,23 @@ def _load_locked() -> None:
             raw = json.load(f)
         _state.date = raw.get("date", "")
         _state.spent_usd = float(raw.get("spent_usd", 0.0))
+        wc = raw.get("wallet_copies") or {}
+        _state.wallet_copies = {str(k).lower(): int(v) for k, v in wc.items()} if isinstance(wc, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError):
         _state.date = ""
         _state.spent_usd = 0.0
+        _state.wallet_copies = {}
 
     if _state.date != today:
         _state.date = today
         _state.spent_usd = 0.0
+        _state.wallet_copies = {}
         _save_locked()
 
 
 def _save_locked() -> None:
-    _atomic_write(_STATE_FILE, {"date": _state.date, "spent_usd": _state.spent_usd})
+    _atomic_write(_STATE_FILE, {"date": _state.date, "spent_usd": _state.spent_usd,
+                                "wallet_copies": dict(_state.wallet_copies)})
 
 
 with _lock:
@@ -140,3 +149,38 @@ def status() -> dict:
                 max(0.0, CONFIG.max_daily_volume_usd - _state.spent_usd)
             ),
         }
+
+
+# --------------------------------------------------------------------------- #
+# Per-wallet daily copy cap
+# --------------------------------------------------------------------------- #
+
+def wallet_copies_today(wallet: str) -> int:
+    with _lock:
+        _load_locked()
+        return int(_state.wallet_copies.get((wallet or "").lower(), 0))
+
+
+def can_copy_wallet(wallet: str) -> tuple[bool, str]:
+    """May one more BUY be copied from this wallet today?
+
+    ``LIVE_MAX_PER_WALLET_DAY`` (0 = no cap). Bounds how much of the daily
+    money one busy wallet can take, so the slower, stronger wallets still get
+    their turn.
+    """
+    cap = int(getattr(CONFIG, "live_max_per_wallet_day", 0) or 0)
+    if cap <= 0:
+        return True, ""
+    n = wallet_copies_today(wallet)
+    if n >= cap:
+        return False, (f"per-wallet daily cap: {n} of {cap} copies from "
+                       f"{(wallet or '')[:10]} already today")
+    return True, ""
+
+
+def record_wallet_copy(wallet: str) -> None:
+    with _lock:
+        _load_locked()
+        key = (wallet or "").lower()
+        _state.wallet_copies[key] = int(_state.wallet_copies.get(key, 0)) + 1
+        _save_locked()

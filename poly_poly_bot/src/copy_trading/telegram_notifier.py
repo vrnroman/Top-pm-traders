@@ -21,11 +21,20 @@ def _plain(text: str) -> str:
                .replace("&quot;", '"').replace("&amp;", "&"))
 
 
-async def _send_message(text: str) -> bool:
+async def _send_message(text: str, kind: str | None = "deal") -> bool:
     """Send as HTML; on a rejected parse retry as plain text. Returns whether
     anything was delivered, and LOGS a rejection: a 400 that vanished unlogged
-    is how a message that mattered never reached the owner."""
+    is how a message that mattered never reached the owner.
+
+    Everything the executor announces is about a real order, so the default
+    class is DEAL; the process-level notices pass KIND_BOT explicitly. The
+    class prefix and the research switch live in `telegram_bot.classify`, one
+    rule for both senders."""
     if not BOT_TOKEN or not CHAT_ID:
+        return False
+    from src import telegram_bot as _tb
+    text, deliver = _tb.classify(text, kind)
+    if not deliver:
         return False
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
@@ -64,12 +73,15 @@ class TelegramNotifier:
         prefix = "🔵 [PREVIEW]" if CONFIG.preview_mode else "🔴 [LIVE]"
         await _send_message(f'{prefix} <b>Failed</b>\n"{_escape_html(market)}"\n{_escape_html(reason)}')
 
+    async def _bot_kind(self, text: str) -> None:
+        await _send_message(text, kind="bot")
+
     async def bot_started(self, traders: int, balance: float) -> None:
         mode = "[PREVIEW MODE]" if CONFIG.preview_mode else "[LIVE MODE]"
-        await _send_message(f"🚀 <b>Bot Started {mode}</b>\n{traders} traders | ${balance:.2f} USDC")
+        await _send_message(f"🚀 <b>Bot Started {mode}</b>\n{traders} traders | ${balance:.2f} USDC", kind="bot")
 
     async def bot_error(self, error: str) -> None:
-        await _send_message(f"⚠️ <b>Error</b>\n{_escape_html(error)}")
+        await _send_message(f"⚠️ <b>Error</b>\n{_escape_html(error)}", kind="bot")
 
     async def positions_redeemed(self, count: int, details: list) -> None:
         lines = []

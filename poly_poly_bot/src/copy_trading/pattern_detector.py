@@ -925,7 +925,7 @@ async def _send_pattern_alert(alert: PatternAlert) -> None:
             lines.append(f'👤 {profile_url}')
         lines.append(_escape_html(alert.details))
 
-        await _send_message("\n".join(lines))
+        await _send_message("\n".join(lines), kind="research")
     except Exception as exc:
         logger.warn(f"[pattern] Failed to send alert: {exc}")
 

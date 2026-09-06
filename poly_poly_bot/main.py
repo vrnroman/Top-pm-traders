@@ -100,6 +100,12 @@ def _fast_prober_loop():
         on_trades=fast_prober.make_shadow_sink(observer))
 
 
+def _send_deal(text: str) -> bool:
+    """Every push from the guard, the canary and the redeemer is about real
+    money: one sender, one class."""
+    return telegram_bot.send_message(text, kind=telegram_bot.KIND_DEAL)
+
+
 def _live_guard_loop():
     """Watch real money while nobody is looking (see live_guard).
 
@@ -155,7 +161,7 @@ def _live_guard_loop():
 
         try:
             from src.copy_trading import canary
-            canary.expire_if_due(send=telegram_bot.send_message)
+            canary.expire_if_due(send=_send_deal)
         except Exception as exc:
             logger.warn(f"[guard] canary expiry check failed: {exc}")
         # The floor under the bankroll: realized equity (USDC on chain plus
@@ -197,7 +203,7 @@ def _live_guard_loop():
                 pending_orders=pending, redeemable=redeemable,
                 feed_stale_s=feed_stale_s,
                 equity_usd=equity_usd, floor_usd=floor_usd,
-                crash_streak=crash_streak, send=telegram_bot.send_message)
+                crash_streak=crash_streak, send=_send_deal)
             crash_streak = crash_streak + 1 if read_failed else 0
             if out.get("stuck_orders") or out.get("unredeemed"):
                 logger.info(f"[guard] {out['stuck_orders']} stuck order(s), "
@@ -297,7 +303,7 @@ def _copy_paper_loop():
             return {}
 
     def _send_demotion_a(d):
-        telegram_bot.send_message(
+        telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
             f"⛔ <b>Auto-demoted</b> <code>{d['wallet']}</code> — "
             f"{d['n_closed']} settled copies, ROI {d['roi'] * 100:+.0f}% "
             f"(≤ {CONFIG.copy_demote_max_roi * 100:+.0f}%). "
@@ -349,7 +355,7 @@ def _copy_paper_loop():
                 time_box_enabled=CONFIG.copy_time_box_enabled,
                 time_box_window_s=CONFIG.copy_time_box_window_days * 86400.0,
                 retire_cooldown_s=CONFIG.copy_retire_cooldown_days * 86400.0,
-                send_retirement=lambda r: telegram_bot.send_message(
+                send_retirement=lambda r: telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
                     f"🗄️ <b>Retired (inconclusive)</b> <code>{r['wallet']}</code> — "
                     f"{r['n_closed']} settled, ROI {r['roi'] * 100:+.0f}%, "
                     f"{r['age_days']:.0f}d on paper with no verdict. Removed from the "
@@ -387,7 +393,7 @@ def _copy_paper_loop():
             f"[COPY-PAPER] FUNNEL STALLED — no paper opens in {stalled_h:.0f}h "
             f"with {n_watch} wallets on the watchlist; promotion evidence is "
             f"not accruing")
-        telegram_bot.send_message(
+        telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
             f"🚱 <b>Copy funnel stalled</b> — no paper copies opened in "
             f"{stalled_h:.0f}h with {n_watch} wallets watched. Evidence toward "
             f"promotion is not accruing; check the watchlist's trade activity "
@@ -411,7 +417,7 @@ def _copy_paper_loop():
                 ledger.positions.values(),
                 promoted=promotion_state.promoted_wallets(),
                 state_path=os.path.join(CONFIG.data_dir, "golive_watch.json"),
-                send=telegram_bot.send_message,
+                send=lambda m: telegram_bot.send_message(m, kind=telegram_bot.KIND_WALLET),
                 min_settled=CONFIG.copy_golive_min_settled,
                 max_idle_days=CONFIG.copy_golive_max_idle_days,
                 min_roi=CONFIG.copy_golive_min_roi,
@@ -435,7 +441,7 @@ def _copy_paper_loop():
             )
         _log_copy_cycle_diagnostics("COPY-PAPER", summary)
         if summary.resolved:
-            telegram_bot.send_message(
+            telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
                 format_resolution_telegram(summary.resolved_positions, report(ledger),
                                            resolver=DEFAULT_RESOLVER)
             )
@@ -643,7 +649,7 @@ def _cross_route_a_exit(wallet: str, ev=None, reason: str = "") -> None:
             min_replay_roi=CONFIG.wallet_discovery_min_copy_replay_roi,
             watchlist_entry=entry)
         if routed:
-            telegram_bot.send_message(
+            telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
                 f"🅱️ <b>Cross-routed to strategy B</b> <code>{wallet}</code>\n"
                 f"Left A ({reason}); B-fit: {why} "
                 f"(replay {replay_roi * 100:+.1f}% @ n={replay_n}). "
@@ -712,7 +718,7 @@ def _copy_paper_b_loop():
         # accept must not be able to write into A's promoted store or the
         # fast-track path. Recorded in B's own offers store on delivery.
         tier = f" · tier {o.get('tier')}" if o.get("probation") else ""
-        return telegram_bot.send_message(
+        return telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
             f"🅱️ <b>Strategy-B promote signal</b> <code>{o['wallet']}</code>\n"
             f"{o['n_closed']} settled instant-copies, ROI {o['roi'] * 100:+.0f}%, "
             f"${o['net_pnl']:+.0f}{tier}\n"
@@ -744,7 +750,7 @@ def _copy_paper_b_loop():
                 history_path=_promo_history_b,
                 state_scope="b",
                 send_offer=_send_offer_b,
-                send_demotion=lambda d: telegram_bot.send_message(
+                send_demotion=lambda d: telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
                     f"🅱️⛔ <b>B auto-demoted</b> <code>{d['wallet']}</code> — "
                     f"{d['n_closed']} settled instant-copies, ROI "
                     f"{d['roi'] * 100:+.0f}%. Dropped from B's book for "
@@ -758,7 +764,7 @@ def _copy_paper_b_loop():
                 time_box_enabled=CONFIG.copy_time_box_enabled,
                 time_box_window_s=CONFIG.copy_time_box_window_days * 86400.0,
                 retire_cooldown_s=CONFIG.copy_retire_cooldown_days * 86400.0,
-                send_retirement=lambda r: telegram_bot.send_message(
+                send_retirement=lambda r: telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
                     f"🅱️🗄️ <b>B retired (inconclusive)</b> <code>{r['wallet']}</code> — "
                     f"{r['n_closed']} settled, ROI {r['roi'] * 100:+.0f}%, "
                     f"{r['age_days']:.0f}d with no verdict. Removed from B "
@@ -790,7 +796,7 @@ def _copy_paper_b_loop():
             f"[COPY-PAPER-B] FUNNEL STALLED — no B opens in {stalled_h:.0f}h "
             f"with {n_watch} wallets watched; the A-vs-B race is not accruing "
             f"B evidence (verdict window at risk)")
-        telegram_bot.send_message(
+        telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
             f"🅱️🚱 <b>Strategy-B funnel stalled</b> — no instant-copies opened "
             f"in {stalled_h:.0f}h with {n_watch} wallets watched. The A-vs-B "
             f"comparison window is compromised while B starves.")
@@ -814,7 +820,7 @@ def _copy_paper_b_loop():
                                for (w, kind), n in binds.most_common())
             logger.info(f"[COPY-PAPER-B] cap-bind: {detail}")
         if summary.resolved:
-            telegram_bot.send_message(
+            telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
                 "🅱️ " + format_resolution_telegram(
                     summary.resolved_positions, report(ledger),
                     resolver=DEFAULT_RESOLVER))
@@ -992,7 +998,7 @@ def _ab_race_reporter_loop():
             # every new autopsy finding, so a noisy day could push the message
             # past Telegram's 4096 cap and drop the WHOLE snapshot rather than
             # just the tail.
-            sent_snap = telegram_bot._send_chunked(snapshot_msg)
+            sent_snap = telegram_bot._send_chunked(snapshot_msg, kind=telegram_bot.KIND_RESEARCH)
             # Log every reporter post — Telegram is the only other trace, and an
             # unauditable daily job reads as "never ran" from the logs.
             logger.info(
@@ -1005,9 +1011,20 @@ def _ab_race_reporter_loop():
             # a book.
             try:
                 from src.copy_trading import rehearsal
-                sent_reh = telegram_bot._send_chunked(rehearsal.daily_message())
+                research_text, deal_text = rehearsal.daily_parts()
+                sent_reh = telegram_bot._send_chunked(research_text,
+                                                      kind=telegram_bot.KIND_RESEARCH)
+                # The real-money line is a DEAL: it always lands, and it
+                # carries the count of research messages held since the last
+                # one, so silence is never mistaken for nothing happening.
+                held = telegram_bot.suppressed_research_count(reset=True)
+                if held and not telegram_bot.research_enabled():
+                    deal_text += (f"\n🔬 {held} research message(s) held since the last "
+                                  f"daily line. /research on to receive them.")
+                sent_deal = telegram_bot.send_message(deal_text, kind=telegram_bot.KIND_DEAL)
                 logger.info(f"[AB-RACE] rehearsal line "
-                            f"{'sent' if sent_reh else 'SEND FAILED'}")
+                            f"{'sent' if sent_reh else 'held/failed'}, real-money line "
+                            f"{'sent' if sent_deal else 'SEND FAILED'}")
             except Exception as exc:
                 logger.warning(f"[AB-RACE] rehearsal line failed: {exc}")
             st = era_state.load(state_path)
@@ -1026,7 +1043,7 @@ def _ab_race_reporter_loop():
                 # and /verdict would never arm (code-review L5). No <pre> wrap:
                 # it would tear across chunks.
                 memo_ok = telegram_bot._send_chunked(
-                    "🏁 <b>A-vs-B verdict memo</b>\n" + format_verdict(cmp_))
+                    "🏁 <b>A-vs-B verdict memo</b>\n" + format_verdict(cmp_), kind=telegram_bot.KIND_RESEARCH)
                 logger.info(
                     f"[AB-RACE] verdict memo "
                     f"{'sent' if memo_ok else 'SEND FAILED (will retry next fire)'}")
@@ -1089,7 +1106,7 @@ def _discovery_loop():
         cache_dir=CONFIG.wallet_discovery_cache_dir,
         activity_ttl_s=CONFIG.wallet_discovery_activity_ttl_s,
         cycle_interval_s=CONFIG.wallet_discovery_interval_s,
-        notify=lambda msg: telegram_bot.send_message(msg),
+        notify=lambda msg: telegram_bot.send_message(msg, kind=telegram_bot.KIND_RESEARCH),
         llm_review_enabled=CONFIG.wallet_discovery_llm_review_enabled,
         llm_review_top_n=CONFIG.wallet_discovery_llm_review_top_n,
         llm_model=CONFIG.wallet_discovery_llm_model,
@@ -1190,7 +1207,7 @@ def _consume_claude_drift_marker() -> None:
         # Consume-once BEFORE sending: a Telegram outage must not re-alert on
         # every restart (the marker is also logged in ~/app/logs/hygiene.log).
         os.remove(path)
-        telegram_bot.send_message(
+        telegram_bot.send_message(kind=telegram_bot.KIND_BOT, text=
             "⚠️ <b>claude-code CLI changed on this deploy</b>\n"
             f"<code>{d.get('old', '?')}</code> → <code>{d.get('new', '?')}</code>\n"
             "Gate prompt/cost behavior may drift. Watch the next gate traces "
@@ -1233,7 +1250,7 @@ async def main():
         logger.info("Telegram not configured (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)")
 
     # Startup notification
-    telegram_bot.send_message(
+    telegram_bot.send_message(kind=telegram_bot.KIND_BOT, text=
         "<b>Bot Started</b>\n"
         f"Strategy #1 (Copy): {'ON' if CONFIG.strategy1_enabled else 'OFF'}\n"
         f"Mode: {'PREVIEW' if CONFIG.preview_mode else 'LIVE'}"
@@ -1319,7 +1336,7 @@ async def main():
             pass
         except Exception as e:
             logger.exception(f"Strategy #1 crashed: {e}")
-            telegram_bot.send_message(f"Strategy #1 crashed: <code>{e}</code>\n<i>Bot continues — paper/discovery harnesses still running.</i>")
+            telegram_bot.send_message(kind=telegram_bot.KIND_BOT, text=f"Strategy #1 crashed: <code>{e}</code>\n<i>Bot continues, paper/discovery harnesses still running.</i>")
             s1_crashed = True
     else:
         logger.info("Strategy #1 disabled, skipping copy-trader bot")
@@ -1338,7 +1355,7 @@ async def main():
     # Shutdown
     logger.info("Shutting down...")
     _shutdown_event.set()
-    telegram_bot.send_message("Bot shutting down.")
+    telegram_bot.send_message("Bot shutting down.", kind=telegram_bot.KIND_BOT)
     telegram_bot.stop_polling()
     logger.info("Goodbye.")
 

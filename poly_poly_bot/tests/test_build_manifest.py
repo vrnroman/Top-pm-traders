@@ -16,8 +16,9 @@ import main as bot_main
 def _patch_env(monkeypatch, tmp_path, marker: dict | None):
     sent = []
     monkeypatch.setattr(bot_main.CONFIG, "data_dir", str(tmp_path))
+    # Accept the production call shape: text by keyword and a message class.
     monkeypatch.setattr(bot_main.telegram_bot, "send_message",
-                        lambda msg: sent.append(msg))
+                        lambda msg=None, text=None, **kw: sent.append(msg if msg is not None else text))
     if marker is not None:
         (tmp_path / "claude-version-drift.json").write_text(json.dumps(marker))
     return sent
@@ -35,9 +36,11 @@ def test_marker_surfaced_once_then_consumed(monkeypatch, tmp_path):
     # Pin consume-BEFORE-send: a Telegram outage must not re-alert every boot.
     real_send = bot_main.telegram_bot.send_message
 
-    def send_asserting_consumed(msg):
+    def send_asserting_consumed(msg=None, text=None, **kw):
+        # The production site passes the text by keyword and names its class;
+        # a fake that only takes a positional made the suite lie about it.
         assert not marker.exists(), "marker still present at send time"
-        real_send(msg)
+        real_send(msg if msg is not None else text, **kw)
 
     monkeypatch.setattr(bot_main.telegram_bot, "send_message",
                         send_asserting_consumed)

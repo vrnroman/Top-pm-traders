@@ -266,11 +266,21 @@ def sweep_message(budgets: Optional[Iterable[float]] = None,
     return render_sweep(rows, stated=stated)
 
 
-def daily_message(now: Optional[float] = None) -> str:
-    """The two month-one lines for the 08:00 block: the rehearsal for set Z
-    and the real-money line. Fails soft: a line that cannot be computed says
-    so instead of rendering a zero."""
+def daily_parts(now: Optional[float] = None) -> tuple[str, str]:
+    """(research text, real-money text) for the 08:00 block, so the two can
+    carry different message classes: the rehearsal is a counterfactual and
+    goes with the research; the real-money line is a DEAL and always lands."""
     now = time.time() if now is None else now
+    return (_rehearsal_part(now), real_money_line(now=now))
+
+
+def daily_message(now: Optional[float] = None) -> str:
+    """Both parts as one text, for callers that want a single block."""
+    a, b = daily_parts(now)
+    return a + "\n\n" + b
+
+
+def _rehearsal_part(now: float) -> str:
     parts: list[str] = []
     try:
         budget = live_budget.stated_budget()
@@ -290,7 +300,6 @@ def daily_message(now: Optional[float] = None) -> str:
     except Exception as exc:
         logger.warning(f"[rehearsal] failed: {exc}")
         parts.append(f"🎯 rehearsal: could not compute ({exc})")
-    parts.append(real_money_line(now=now))
     return "\n\n".join(parts)
 
 

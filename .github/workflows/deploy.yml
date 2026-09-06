@@ -132,7 +132,10 @@ jobs:
           # than quietly trading a size nobody chose.
           ensure_env LIVE_BUDGET_USD 80
           ensure_env LIVE_BUDGET_PER_COPY_FRAC 0.08
-          ensure_env LIVE_BUDGET_DAILY_FRAC 0.50
+          # 0.40 of $80 is $32: exactly 5 copies at $6.40, the owner's "1 to 5
+          # deals a day". And no single wallet may take more than 2 of them.
+          ensure_env LIVE_BUDGET_DAILY_FRAC 0.40
+          ensure_env LIVE_MAX_PER_WALLET_DAY 2
           ensure_env LIVE_BUDGET_EXPOSURE_FRAC 0.80
           ensure_env LIVE_BUDGET_DRAWDOWN_FRAC 0.30
 
