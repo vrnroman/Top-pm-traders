@@ -249,9 +249,10 @@ async def check_and_redeem_positions(private_key: str,
             value = sum(float(p.get("currentValue") or 0.0) for p in collectable)
             msg = (f"{len(collectable)} position(s) worth ${value:,.2f} are held by "
                    f"the proxy wallet, but this bot signs as a different address, "
-                   f"so it cannot redeem them on chain. Nothing was sent and no "
-                   f"P&L was recorded. Claim them by hand in the Polymarket "
-                   f"interface.")
+                   f"so it sends no redeem. Nothing was sent and no P&L was "
+                   f"recorded. Polymarket's own claim usually pays them to the "
+                   f"wallet within hours; if one is still here tomorrow, claim "
+                   f"it by hand in the Polymarket interface.")
             logger.error(f"[redeemer] {msg}")
             if notify is not None:
                 try:

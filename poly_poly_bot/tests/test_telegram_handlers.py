@@ -429,7 +429,7 @@ def test_wallets_lists_top_overall_then_per_strategy_deduped(captured_messages, 
 
     assert "Wallet leaderboard" in out
     # Part 1: top wallets across all strategies (only profitable ones)
-    assert "Top wallets — all strategies" in out
+    assert "Top wallets: all strategies" in out
     assert "By strategy" in out
     assert "B:1b" in out
     # both paper wallets ranked under the strategy, each shown once (deduped)

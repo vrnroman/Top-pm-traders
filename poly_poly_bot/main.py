@@ -195,6 +195,16 @@ def _live_guard_loop():
                     logger.warn("[guard] the resolved set could not be read, so "
                                 "equity still counts every open position at cost "
                                 "and the floor may fire late this pass")
+                else:
+                    # The governor sizes on cash plus these numbers; only a
+                    # KNOWN set is handed over, an unknown one sizes on cash.
+                    from src.copy_trading.auto_redeemer import DUST_VALUE_USD, _position_value
+                    _rows = [p for p in (redeemable or []) if isinstance(p, dict)]
+                    _resolved = round(sum(_position_value(p) for p in _rows), 2)
+                    _winners = [p for p in _rows if _position_value(p) >= DUST_VALUE_USD]
+                    live_budget.note_open_cost(open_cost + _resolved)
+                    live_budget.note_collectable(
+                        len(_winners), sum(_position_value(p) for p in _winners))
                 equity_usd = live_budget.equity_usd(bal, open_cost)
         except Exception as exc:
             logger.warn(f"[guard] could not read equity for the floor: {exc}")

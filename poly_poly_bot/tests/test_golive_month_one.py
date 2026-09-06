@@ -1167,7 +1167,7 @@ def test_the_real_money_line_excludes_resolved_positions(monkeypatch, budget):
                         lambda w: [{"tokenId": "dead"}])
     line = rehearsal.real_money_line()
     assert "bankroll $280.00" in line, "the $100 resolved loser is not bankroll"
-    assert "1 resolved position(s) awaiting redemption are excluded" in line
+    assert "1 resolved position(s) worth under $1 each: nothing to collect" in line, line
 
     monkeypatch.setattr(live_guard, "redeemable_positions", lambda w: None)
     line = rehearsal.real_money_line()
@@ -1863,7 +1863,7 @@ def test_test_order_goes_through_the_live_path_and_the_verifier_reports_once(can
         status, fill_price, filled_shares, filled_usd = "FILLED", 0.98, 5.1, 5.0
     rep = canary.record_test_fill("0xtest1", _Fill())
     assert rep and "Test order filled" in rep and "places and fills" in rep
-    assert "claim the payout by hand" in rep
+    assert "pays the winnings to the wallet by itself" in rep
     assert canary.record_test_fill("0xtest1", _Fill()) is None, "reported once"
     assert canary.record_test_fill("other", _Fill()) is None
 
@@ -2136,6 +2136,219 @@ def test_deal_messages_the_owner_reads_carry_no_dashes(monkeypatch):
         assert "\u2014" not in t and "\u2013" not in t, t
 
 
+# ---- manager round 3 / verifier round 4 ----
+
+def test_open_positions_do_not_shrink_the_next_copy(budget, monkeypatch):
+    """F1: sizing on cash alone took the per-copy size $6.40 -> $5.55 -> $5.50
+    and under the $5 minimum after three copies (2026-09-06). Equity, capped
+    at the stated budget, keeps the fourth copy the same size."""
+    monkeypatch.setattr(live_budget, "PER_COPY_FRAC", 0.08)
+    monkeypatch.setattr(live_budget, "DAILY_FRAC", 0.40)
+    budget(80.0)
+    monkeypatch.setattr(live_budget, "_open_cost_cache", None)
+    monkeypatch.setattr(live_budget, "_balance_cache", (1000.0, 80.41))
+    c0 = live_budget.caps(live=True, now=1000.0)
+    assert c0.per_copy_usd == 6.4 and c0.daily_usd == 32.0
+    # three copies opened: cash fell by their cost, the guard reported the cost
+    monkeypatch.setattr(live_budget, "_balance_cache", (1000.0, 80.41 - 6.03 - 5.55 - 5.50))
+    live_budget.note_open_cost(6.03 + 5.55 + 5.50, now=1000.0)
+    c3 = live_budget.caps(live=True, now=1000.0)
+    assert c3.effective_usd == 80.0 and c3.per_copy_usd == 6.4 and c3.daily_usd == 32.0
+    assert c3.open_cost_usd == 17.08 and c3.tradeable
+    # never above the stated number, even when winners pay out on top
+    live_budget.note_open_cost(60.0, now=1000.0)
+    assert live_budget.caps(live=True, now=1000.0).effective_usd == 80.0
+    # unknown open cost (stale cache) sizes on cash alone, today's behaviour
+    monkeypatch.setattr(live_budget, "_balance_cache", (5000.0, 63.33))
+    monkeypatch.setattr(live_budget, "_open_cost_cache", None)
+    c = live_budget.caps(live=True, now=5000.0)
+    assert c.effective_usd == 63.33 and c.open_cost_usd == 0.0
+    # unreadable cash: the stated number
+    monkeypatch.setattr(live_budget, "_balance_cache", None)
+    assert live_budget.caps(live=True, now=5000.0).effective_usd == 80.0
+
+
+def test_the_governor_status_names_cash_and_open_positions(budget, monkeypatch):
+    monkeypatch.setattr(live_budget, "PER_COPY_FRAC", 0.08)
+    budget(80.0)
+    monkeypatch.setattr(live_budget, "_open_cost_cache", None)
+    monkeypatch.setattr(live_budget, "_balance_cache", (1000.0, 63.33))
+    live_budget.note_open_cost(17.08, now=1000.0)
+    monkeypatch.setattr(live_budget.time, "time", lambda: 1000.0)
+    text = "\n".join(live_budget.status_lines(live=True))
+    assert "$63.33 cash" in text and "$17.08 in open positions" in text, text
+
+
+def test_the_sink_refuses_in_words_when_cash_is_under_the_copy(tmp_path, monkeypatch, caplog):
+    """The governor sizes on equity, so cash can be under the size while
+    positions are open; the exchange must never be the one to say no."""
+    import logging
+
+    h = _Harness(tmp_path, monkeypatch, budget=80.0)
+    monkeypatch.setattr(live_budget, "PER_COPY_FRAC", 0.08)
+    monkeypatch.setattr(live_budget, "_open_cost_cache", None)
+    now = time.time()
+    monkeypatch.setattr(live_budget, "_balance_cache", (now, 3.10))
+    live_budget.note_open_cost(77.0, now=now)
+    assert live_budget.caps(live=True).per_copy_usd == 6.4, "equity sizing keeps the size"
+    with caplog.at_level(logging.DEBUG):
+        placed = h.run(h.trades(1))
+    assert placed == 0 and h.posted == [], "nothing posted with $3.10 of cash"
+    skips = [r.getMessage() for r in caplog.records if "cash on chain $3.10" in r.getMessage()]
+    assert skips and "open positions" in skips[0] and "pay out" in skips[0], skips
+
+
+def test_a_corrupt_spend_file_closes_the_day_and_keeps_the_evidence(tmp_path, monkeypatch):
+    """Manager round 3: a bot that cannot say what it spent today stops for
+    today and says so. The file goes aside, the reason persists across a
+    reload, the UTC rollover reopens the day."""
+    from src.copy_trading import daily_spend_guard as g
+    f = tmp_path / "daily-spend.json"
+    f.write_text("{not json")
+    monkeypatch.setattr(g, "_STATE_FILE", str(f))
+    pushed: list = []
+    monkeypatch.setattr(g, "_announce_closed", lambda reason: pushed.append(reason))
+    g.reset_state()
+    ok, why = g.can_spend(5.0)
+    assert ok is False and "spend guard closed" in why and "unreadable" in why, why
+    aside = [p for p in tmp_path.iterdir() if p.name.startswith("daily-spend.json.corrupt-")]
+    assert len(aside) == 1 and aside[0].read_text() == "{not json"
+    assert len(pushed) == 1 and "kept aside as" in pushed[0]
+    # a fresh process reads the reason back from the new file
+    g.reset_state()
+    assert g.can_spend(5.0)[0] is False and g.closed_reason()
+    assert len(pushed) == 1, "said once"
+    # the rollover reopens
+    monkeypatch.setattr(g, "today_utc", lambda: "2099-01-01")
+    g.reset_state()
+    assert g.can_spend(5.0) == (True, "") and g.closed_reason() == ""
+
+
+def test_a_missing_spend_file_is_not_a_corrupt_one(tmp_path, monkeypatch):
+    from src.copy_trading import daily_spend_guard as g
+    monkeypatch.setattr(g, "_STATE_FILE", str(tmp_path / "none.json"))
+    pushed: list = []
+    monkeypatch.setattr(g, "_announce_closed", lambda reason: pushed.append(reason))
+    g.reset_state()
+    assert g.can_spend(5.0) == (True, "") and pushed == []
+
+
+def test_the_daily_line_names_the_winners_apart_from_the_dust():
+    from src.copy_trading import rehearsal
+    dust = [{"shares": 100.0, "avgPrice": 0.5, "curPrice": 0.0, "currentValue": 0.0}] * 61
+    win = {"shares": 11.1, "avgPrice": 0.5, "curPrice": 1.0, "currentValue": 11.09}
+    line = rehearsal.resolved_positions_line(dust + [win], 62)
+    assert "1 resolved winner(s) worth $11.09" in line and "61 resolved position(s) worth under $1" in line
+    assert "Polymarket's own claim" in line and "by hand" not in line
+    only_dust = rehearsal.resolved_positions_line(dust, 61)
+    assert "nothing to collect" in only_dust and "winner" not in only_dust
+
+
+def test_dashes_are_scrubbed_at_the_send_seam(monkeypatch):
+    """Rendered output at the one call site every push and reply goes through."""
+    from src import telegram_bot as tb
+    monkeypatch.setattr(tb, "is_configured", lambda: True)
+    monkeypatch.setattr(tb.CONFIG, "telegram_bot_token", "t")
+    monkeypatch.setattr(tb.CONFIG, "telegram_chat_id", "c")
+    wire: list = []
+
+    class _R:
+        status_code = 200
+        ok = True
+        def json(self): return {"ok": True}
+    monkeypatch.setattr(tb.requests, "post", lambda url, json=None, timeout=10: wire.append(json) or _R())
+    assert tb.send_message("<b>Unfilled</b> \u2014 cancelled \u2013 order x\u2014y") is True
+    assert wire and "\u2014" not in wire[0]["text"] and "\u2013" not in wire[0]["text"], wire
+    assert wire[0]["text"] == "<b>Unfilled</b>: cancelled: order x-y"
+
+
+def test_a_fill_after_an_unfilled_record_is_reported_once_and_spends_the_day(canary_env, monkeypatch, tmp_path):
+    """Verifier round 4 (E): the cancel failed because the order had just
+    matched; the next cycle saw MATCHED, but the UNFILLED record swallowed it:
+    no fill report, day not spent, a second order posted."""
+    canary, clob, posted, queued = _test_order_env(monkeypatch, tmp_path)
+    t0 = 1_788_699_120.0
+    ok, _ = _run(canary.fire_test_order(clob, "tok", title="m", now=t0))
+    assert ok
+
+    class _Unfilled:
+        status, fill_price, filled_shares, filled_usd = "UNFILLED", 0.0, 0.0, 0.0
+
+    class _Filled:
+        status, fill_price, filled_shares, filled_usd = "FILLED", 0.98, 5.1, 5.0
+    assert canary.record_test_fill("0xt1", _Unfilled(), now=t0 + 6)
+    assert canary.record_test_fill("0xt1", _Unfilled(), now=t0 + 9) is None, "unfilled said once"
+    rep = canary.record_test_fill("0xt1", _Filled(), now=t0 + 12)
+    assert rep and "Test order filled" in rep, rep
+    assert canary.record_test_fill("0xt1", _Filled(), now=t0 + 15) is None, "final, said once"
+    assert canary.read_test()["fill"]["status"] == "FILLED"
+    queued.clear()
+    why = canary.test_standing_reason(now=t0 + 600)
+    assert why and "already went out" in why and "filled" in why, why
+    ok2, _ = _run(canary.fire_test_order(clob, "tok", title="m", now=t0 + 600))
+    assert ok2 is False and posted == [5.0]
+
+
+def test_the_queue_is_not_loaded_until_the_boot_step_runs():
+    """The module default, read in a fresh interpreter: nothing in the suite
+    pinned it, so `_loaded_from_disk = True` survived a mutation run."""
+    import os
+    import subprocess
+    import sys
+    code = "from src.copy_trading import trade_queue as q; print(q.pending_orders_loaded())"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         env={**os.environ, "PREVIEW_MODE": "true"})
+    assert out.stdout.strip() == "False", out.stdout + out.stderr[-400:]
+
+
+def test_an_unreadable_pending_file_is_kept_aside_and_the_test_rule_refuses(canary_env, monkeypatch, tmp_path):
+    from src.copy_trading import trade_queue as q
+    f = tmp_path / "pending-orders.json"
+    f.write_text("[{broken")
+    monkeypatch.setattr(q, "_ORDERS_FILE", str(f))
+    monkeypatch.setattr(q, "_boot_load_error", "")
+    monkeypatch.setattr(q, "_pending_orders", [])
+    pushed: list = []
+    from src import telegram_bot as tb
+    monkeypatch.setattr(tb, "send_message", lambda text, **k: pushed.append((text, k.get("kind"))))
+    assert q.load_pending_orders_from_disk() == 0
+    assert q.pending_orders_loaded() is True and "JSONDecodeError" in q.boot_load_error()
+    aside = [p for p in tmp_path.iterdir() if p.name.startswith("pending-orders.json.corrupt-")]
+    assert len(aside) == 1 and aside[0].read_text() == "[{broken"
+    assert len(pushed) == 1 and pushed[0][1] == tb.KIND_BOT and "unreadable" in pushed[0][0]
+    # a posted test order with no fill has an unknown fate: refuse, say why
+    canary, clob, posted, queued = _test_order_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(q, "_boot_load_error", "")
+    ok, _ = _run(canary.fire_test_order(clob, "tok", title="m", now=1000.0))
+    assert ok
+    queued.clear()
+    monkeypatch.setattr(q, "_boot_load_error", "JSONDecodeError, kept aside as x")
+    why = canary.test_standing_reason(now=1060.0)
+    assert why and "fate is unknown" in why and "kept aside as x" in why, why
+
+
+def test_still_starting_is_a_blocking_reason_before_the_announcement(canary_env, monkeypatch, tmp_path):
+    from src.copy_trading import trade_queue
+    canary, clob, posted, _ = _test_order_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(trade_queue, "_loaded_from_disk", False)
+    assert any("still starting" in r for r in canary.test_blocking_reasons())
+    ok, msg = _run(canary.fire_test_order(clob, "tok", title="m"))
+    assert ok is False and "still starting" in msg and posted == []
+
+
+def test_the_boot_reload_runs_even_without_a_clob_client():
+    from src.copy_trading import runner
+    src = inspect.getsource(runner)
+    i = src.index("if clob_client:\n        await recover_pending_orders(clob_client)")
+    assert "load_pending_orders_from_disk()" in src[i:i + 400], "the else branch reloads"
+
+
+def test_the_test_floor_is_the_owners_number():
+    from src.copy_trading import canary
+    assert canary.TEST_MIN_PRICE == 0.95
+
+
 def test_the_verifier_reports_a_test_order_too():
     from src.copy_trading import trade_executor
     src = inspect.getsource(trade_executor.process_verifications)
@@ -2280,12 +2493,12 @@ def test_the_real_money_line_carries_the_followed_wallets(monkeypatch, budget):
     assert "bankroll $75.00" in line and "👛 followed wallets" in line
 
 
-def test_test_order_texts_say_claim_by_hand(canary_env, monkeypatch):
+def test_test_order_texts_say_polymarket_pays_the_wallet(canary_env, monkeypatch):
     from src.copy_trading import canary
     canary._write_test({"order_id": "0xt", "posted": True, "market": "m", "fill": None})
 
     class _Fill:
         status, fill_price, filled_shares, filled_usd = "FILLED", 0.984, 5.08, 5.0
     rep = canary.record_test_fill("0xt", _Fill())
-    assert "claim the payout by hand" in rep and "cannot redeem" in rep
+    assert "pays the winnings to the wallet by itself" in rep and "does not send a redeem" in rep
     assert "works end to end" not in rep, "the cycle is not closed at redemption"

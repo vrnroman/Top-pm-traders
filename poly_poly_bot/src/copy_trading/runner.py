@@ -307,6 +307,11 @@ async def run_copy_trading() -> None:
     clob_client = create_clob_client()
     if clob_client:
         await recover_pending_orders(clob_client)
+    else:
+        # No client to verify with, but the boot reload still runs, so the
+        # "still starting" refusal does not stand forever.
+        from src.copy_trading.trade_queue import load_pending_orders_from_disk
+        load_pending_orders_from_disk()
 
     logger.info("Bot started. Monitoring trades...")
 

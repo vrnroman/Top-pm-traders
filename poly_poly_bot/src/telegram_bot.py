@@ -1,13 +1,13 @@
 """Telegram bot for the copy-trading strategy (Strategy #1).
 
 Commands:
-  /status            — Show bot status (balance, positions, daily limits)
-  /pnl               — Show P&L: realized + unrealized
-  /history           — Show last 10 copy trades
-  /check             — Verify trading setup (read-only, no orders)
-  /setkey            — Rotate/clear the in-memory private key
-  /shutdown          — Graceful shutdown (Docker restarts the container)
-  /help              — Show available commands
+  /status           : Show bot status (balance, positions, daily limits)
+  /pnl              : Show P&L: realized + unrealized
+  /history          : Show last 10 copy trades
+  /check            : Verify trading setup (read-only, no orders)
+  /setkey           : Rotate/clear the in-memory private key
+  /shutdown         : Graceful shutdown (Docker restarts the container)
+  /help             : Show available commands
 """
 
 import os
@@ -193,6 +193,13 @@ def classify(text: str, kind: str | None) -> tuple[str, bool]:
     return (f"<b>[{prefix}]</b> {text}", True)
 
 
+def no_dashes(text: str) -> str:
+    """The owner reads every word; an em or en dash is the one typographic
+    tell he has named. Scrubbed at the seam, whatever the source wrote."""
+    return (text.replace(" \u2014 ", ": ").replace(" \u2013 ", ": ")
+                .replace("\u2014", "-").replace("\u2013", "-"))
+
+
 def send_message(text: str, parse_mode: str = "HTML", reply_markup: dict | None = None,
                  kind: str | None = None) -> bool:
     """Send a message to the configured Telegram chat.
@@ -209,6 +216,7 @@ def send_message(text: str, parse_mode: str = "HTML", reply_markup: dict | None 
     text, deliver = classify(text, kind)
     if not deliver:
         return False
+    text = no_dashes(text)
     try:
         url = f"{TELEGRAM_API.format(token=CONFIG.telegram_bot_token)}/sendMessage"
         payload = {
@@ -236,7 +244,7 @@ def send_message(text: str, parse_mode: str = "HTML", reply_markup: dict | None 
                 retry = requests.post(url, json=payload, timeout=10)
                 if retry.ok:
                     logger.warning("Telegram: HTML parse failed, delivered as "
-                                   "plain text — fix the markup in this message")
+                                   "plain text: fix the markup in this message")
                 return bool(retry.ok)
         return bool(resp.ok)
     except Exception as e:
@@ -278,7 +286,7 @@ def _signed_usd(x: float) -> str:
 def _promotion_annotation(extras: dict) -> str:
     """Render the trustworthy-gate evidence under a promote offer: the statistical
     floor it cleared, any non-blocking flags, and the advisory Claude read. Kept
-    defensive — a partial ``extras`` still renders whatever is present."""
+    defensive: a partial ``extras`` still renders whatever is present."""
     lines: list[str] = []
     stats = extras.get("stats")
     if stats is not None:
@@ -301,11 +309,11 @@ def _promotion_annotation(extras: dict) -> str:
     if llm is not None:
         conf = getattr(llm, "confidence", 0.0)
         lines.append(f"🤖 Claude: <b>{_esc(getattr(llm, 'verdict', '?'))}</b> "
-                     f"(conf {conf:.0%}) — <i>{_esc(getattr(llm, 'reasoning', ''))}</i>")
+                     f"(conf {conf:.0%}): <i>{_esc(getattr(llm, 'reasoning', ''))}</i>")
         for c in (getattr(llm, "concerns", None) or []):
             lines.append(f"   • {_esc(str(c))}")
     elif extras.get("llm_attempted"):
-        lines.append("🤖 Claude review unavailable — statistical-only")
+        lines.append("🤖 Claude review unavailable: statistical-only")
     return ("\n" + "\n".join(lines)) if lines else ""
 
 
@@ -313,11 +321,11 @@ def send_promotion_offer(wallet: str, n_closed: int, roi: float,
                          net_pnl: float, tier: str = "1b",
                          extras: dict | None = None) -> bool:
     """One-tap promote offer: the paper book proved this wallet out. Tapping
-    Promote adds it to System A (still PREVIEW) with no typing — no UUID to copy.
+    Promote adds it to System A (still PREVIEW) with no typing: no UUID to copy.
     ``extras`` (the governance offer dict) adds the trustworthy-gate evidence:
     the statistical floor cleared, any flags, and the advisory Claude read."""
     text = (
-        "🎓 <b>Promote candidate</b> — paper book matured\n"
+        "🎓 <b>Promote candidate</b>: paper book matured\n"
         f"<code>{_esc(wallet)}</code>\n"
         f"<b>{n_closed}</b> settled copies · ROI <b>{roi * 100:+.0f}%</b> · "
         f"net <b>{_signed_usd(net_pnl)}</b>"
@@ -456,7 +464,7 @@ def _handle_command(text: str):
 
 
 def _handle_status():
-    """Handle /status command — show Strategy #1 status."""
+    """Handle /status command: show Strategy #1 status."""
     now = datetime.now(SGT)
 
     lines = [
@@ -467,7 +475,7 @@ def _handle_status():
     ]
 
     # Strategy #1 — Copy Trading
-    lines.append(f"<b>Strategy #1 — Copy Traders</b>")
+    lines.append(f"<b>Strategy #1: Copy Traders</b>")
     if CONFIG.strategy1_enabled:
         lines.append("Status: \U0001f7e2 ENABLED")
         lines.append(f"Wallets tracked: {len(CONFIG.user_addresses)}")
@@ -485,9 +493,9 @@ def _handle_status():
 
 
 def _short_wallet(w: str) -> str:
-    """0x1234…cdef — compact wallet address for leaderboard lines."""
+    """0x1234…cdef: compact wallet address for leaderboard lines."""
     w = w or ""
-    return f"{w[:6]}…{w[-4:]}" if len(w) > 12 else (w or "—")
+    return f"{w[:6]}…{w[-4:]}" if len(w) > 12 else (w or "n/a")
 
 
 def _mark_open_paper(positions, fetch_mid) -> None:
@@ -580,7 +588,7 @@ def _compute_unified():
 
 
 def _handle_pnl():
-    """Handle /pnl — unified P&L: overall total + per-strategy breakdown.
+    """Handle /pnl: unified P&L: overall total + per-strategy breakdown.
 
     Strategy labels are ``A:1a``/``A:1b``/``A:1c`` (executor tiers) and
     ``B:1a``..``B:1j`` (discovery theories the paper-copied wallet was flagged
@@ -680,15 +688,15 @@ def _handle_pnl():
         lines.append(
             f"{tag} <b>{_esc(sp.label)}</b>  <b>${sp.net_pnl:+.2f}</b>  "
             f"({pnl_str}, <b>{roi_str}</b>)  "
-            f"— {sp.n_wallets}w {sp.n_closed}c/{sp.n_open}o{hit_str}"
+            f"- {sp.n_wallets}w {sp.n_closed}c/{sp.n_open}o{hit_str}"
         )
 
     lines.append("")
     lines.extend(_trust_lines(paper_books))
     lines.append("")
-    lines.append("<i>/wallets — top wallets overall + best/worst per strategy</i>")
+    lines.append("<i>/wallets: top wallets overall + best/worst per strategy</i>")
     if CONFIG.preview_mode:
-        lines.append("<i>PREVIEW MODE — positions are simulated</i>")
+        lines.append("<i>PREVIEW MODE: positions are simulated</i>")
 
     _send_chunked("\n".join(lines))
 
@@ -704,7 +712,7 @@ def _trust_lines(paper_books: dict) -> list:
     P0-4): the fill-health witness (is the simulator gifting price again?)
     scoped to the clean era, and split-half wallet persistence (the number
     that says whether copy-trading works at all) all-time, at-their-price, and
-    post-fix — rendered next to the falsification bar agreed in ROADMAP §7 so
+    post-fix: rendered next to the falsification bar agreed in ROADMAP §7 so
     the bar is public before the data accrues."""
     from src.copy_trading import era_state
     from src.copy_trading.copy_paper import fill_health, fill_health_suspect
@@ -760,7 +768,7 @@ def _trust_lines(paper_books: dict) -> list:
 def _cost_lines(paper_books: dict, floor) -> list:
     """The P1-7 costs block: realized + at-price ROI net of modeled costs per
     book (derived per row (never the P1-7 stamps, which pre-P1-7 rows lack)), plus the combined at-price ROI under several
-    cost multipliers computed ON THE FLY over all settled rows (I8) — so the
+    cost multipliers computed ON THE FLY over all settled rows (I8): so the
     08-22 kill verdict reads as "edge a real copier keeps", not "edge assuming
     free fills", and the owner can see whether ANY fee assumption rescues the
     combined number."""
@@ -804,7 +812,7 @@ def _cost_lines(paper_books: dict, floor) -> list:
         seg_book.append(seg)
     if seg_book:
         lines.append("💸 Net of modeled costs (P1-7; derived per row for ALL "
-                     f"{total_closed} settled rows, stamps ignored — "
+                     f"{total_closed} settled rows, stamps ignored: "
                      f"{total_stamped} carry a stamp):")
         lines.extend(seg_book)
 
@@ -842,7 +850,7 @@ def _cost_lines(paper_books: dict, floor) -> list:
 
 def _wallet_line(w, *, tags=None, strategies=None) -> str:
     """One leaderboard row: maturity glyph, addr, net P&L, ROI, win/loss record,
-    and — for paper (System B) wallets — a PROMOTE-READY/HOLD verdict that gates
+    and: for paper (System B) wallets: a PROMOTE-READY/HOLD verdict that gates
     the manual promote-to-real-money call on settled sample size + positive PnL.
 
     ``tags`` annotates *why* a wallet is notable within a strategy (e.g.
@@ -868,12 +876,12 @@ def _wallet_line(w, *, tags=None, strategies=None) -> str:
 
 
 def _handle_wallets():
-    """Handle /wallets — a readable promote/drop leaderboard.
+    """Handle /wallets: a readable promote/drop leaderboard.
 
     Part 1 is the top wallets *across all strategies* (the best overall promotion
     candidates, each shown once with the strategies it spans). Part 2 is a
     per-strategy breakdown that lists each wallet **once**, tagged with whether it
-    led/trailed on PnL and/or ROI — replacing the old four overlapping best/worst
+    led/trailed on PnL and/or ROI: replacing the old four overlapping best/worst
     lists that printed the same wallet several times."""
     from src.copy_trading import pnl_unified as u
 
@@ -885,7 +893,7 @@ def _handle_wallets():
     lines = [
         "\U0001f3c5 <b>Wallet leaderboard</b> <i>(promotion / removal candidates)</i>",
         "",
-        "<b>\U0001f3c6 Top wallets — all strategies</b>",
+        "<b>\U0001f3c6 Top wallets: all strategies</b>",
     ]
     top = u.top_wallets(a_w, b_w, k=3)
     if top:
@@ -920,7 +928,7 @@ def _promotion_gate_history_path() -> str:
 
 def _promotion_gate_section() -> list[str]:
     """The promote-stage gate picture: offers fired, wallets held by the new
-    rigor (and why), and auto-demotes — the trustworthy-promotion counterpart to
+    rigor (and why), and auto-demotes: the trustworthy-promotion counterpart to
     the shortlist admit/reject mix above."""
     from src.copy_trading import gate_history
 
@@ -947,7 +955,7 @@ def _promotion_gate_section() -> list[str]:
 
 
 def _handle_gate():
-    """Handle /gate — the LLM wallet-gate admit/reject picture.
+    """Handle /gate: the LLM wallet-gate admit/reject picture.
 
     Surfaces what used to need a prod-log trawl: the accept/reject mix, the mix
     sliced by which theory qualified each wallet (so a theory the gate rejects
@@ -978,7 +986,7 @@ def _handle_gate():
         detail = ", ".join(f"{_esc(k)}={v}" for k, v in
                            sorted(by_reason.items(), key=lambda kv: -kv[1]))
         lines.append(f"⚠️ Admitted <b>unvetted</b>: <b>{unv}</b> "
-                     f"({unv / total:.0%} of decisions) — {detail}")
+                     f"({unv / total:.0%} of decisions): {detail}")
         lines.append(f"<i>vetted admits: {s.get('admitted_vetted', 0)} · "
                      f"deferred (rate-limited, parked): {s.get('deferred', 0)}</i>")
 
@@ -1007,19 +1015,19 @@ def _handle_gate():
 
 
 def _handle_history():
-    """Handle /history command — show last 10 copy trades (Strategy #1)."""
+    """Handle /history command: show last 10 copy trades (Strategy #1)."""
     if not CONFIG.strategy1_enabled:
         send_message("Strategy #1 (Copy Trading) is disabled.")
         return
 
     trades = _load_s1_trades()
     if not trades:
-        send_message("<b>Strategy #1 — Copy Trading History</b>\nNo trades yet.")
+        send_message("<b>Strategy #1: Copy Trading History</b>\nNo trades yet.")
         return
 
     recent = trades[-10:]
     lines = [
-        f"<b>Strategy #1 — Last {len(recent)} Copy Trades</b>",
+        f"<b>Strategy #1: Last {len(recent)} Copy Trades</b>",
         "",
     ]
 
@@ -1045,7 +1053,7 @@ def _handle_history():
 
 
 def _handle_setkey(text: str):
-    """Handle /setkey <hex|clear> CONFIRM — rotate or wipe the in-memory key.
+    """Handle /setkey <hex|clear> CONFIRM: rotate or wipe the in-memory key.
 
     Safety lever to immediately invalidate signed orders. Change is in-memory
     only; on container restart the .env value reloads. Strategy #1's running
@@ -1059,8 +1067,8 @@ def _handle_setkey(text: str):
     if len(parts) != 3 or parts[2] != "CONFIRM":
         send_message(
             "Usage:\n"
-            "<code>/setkey clear CONFIRM</code> — wipe in-memory key (no orders signable)\n"
-            "<code>/setkey 0xABCD... CONFIRM</code> — replace key in memory\n"
+            "<code>/setkey clear CONFIRM</code>: wipe in-memory key (no orders signable)\n"
+            "<code>/setkey 0xABCD... CONFIRM</code>: replace key in memory\n"
             "Change is in-memory only; container restart reloads .env."
         )
         return
@@ -1112,7 +1120,7 @@ def _handle_setkey(text: str):
 
 
 def _handle_reset(text: str):
-    """Handle /reset CONFIRM — zero all P&L + risk/spend state (archives first).
+    """Handle /reset CONFIRM: zero all P&L + risk/spend state (archives first).
 
     Clears both copy systems' ledgers/state and the executor's in-memory
     counters. The paper-copy harness holds its ledger in memory in a daemon
@@ -1141,19 +1149,19 @@ def _handle_reset(text: str):
     )
     logger.warning("P&L reset via /reset CONFIRM")
     send_message(
-        "🧹 <b>P&amp;L reset</b> — " + _esc(res.summary()) + ".\n"
+        "🧹 <b>P&amp;L reset</b>: " + _esc(res.summary()) + ".\n"
         "Executor + risk/spend state zeroed and backed up to <code>data/archive/</code>.\n"
-        "The paper-copy harness keeps its ledger in memory — send "
+        "The paper-copy harness keeps its ledger in memory: send "
         "<code>/shutdown CONFIRM</code> now to restart it on the empty ledger "
         "(Docker brings the container back automatically)."
     )
 
 
 def _handle_shutdown(text: str):
-    """Handle /shutdown CONFIRM — graceful process exit.
+    """Handle /shutdown CONFIRM: graceful process exit.
 
     Docker is configured with --restart unless-stopped, so the container
-    will come back up automatically — but on restart it reloads from .env
+    will come back up automatically: but on restart it reloads from .env
     where PREVIEW_MODE=true is the default. To physically stop the
     container, SSH the VM and ``docker stop poly-poly-bot``.
     """
@@ -1179,7 +1187,7 @@ def _handle_shutdown(text: str):
 
 
 def _handle_check():
-    """Handle /check — read-only verification of trading setup.
+    """Handle /check: read-only verification of trading setup.
 
     Runs through PRIVATE_KEY, PROXY_WALLET, CLOB auth, USDC balance, and
     on-chain approvals on both Polymarket exchanges. Posts nothing on chain
@@ -1217,7 +1225,7 @@ def _handle_check():
     # 3. SIGNATURE_TYPE
     sig_type = CONFIG.signature_type
     sig_label = {0: "EOA (no proxy)", 1: "POLY_PROXY (email login)", 2: "POLY_GNOSIS_SAFE (browser wallet)"}.get(sig_type, f"unknown({sig_type})")
-    lines.append(f"   SIGNATURE_TYPE: {sig_type} — {sig_label}")
+    lines.append(f"   SIGNATURE_TYPE: {sig_type}: {sig_label}")
 
     # 4. USDC balance on proxy
     if proxy:
@@ -1234,7 +1242,7 @@ def _handle_check():
             mark = "✅" if usdc_bal > 0 else "⚠️"
             lines.append(f"{mark} USDC balance: <b>${usdc_bal:.2f}</b>")
             if usdc_bal == 0:
-                lines.append("   <i>Proxy is empty — fund it before going live.</i>")
+                lines.append("   <i>Proxy is empty: fund it before going live.</i>")
                 ok_all = False
         except Exception as e:
             lines.append(f"❌ USDC balance lookup failed: <code>{_esc(str(e))}</code>")
@@ -1301,22 +1309,22 @@ def _handle_check():
             lines.append(f"⚠️ CLOB authed read failed: <code>{_esc(str(e))}</code>")
 
     lines.append("")
-    lines.append("<b>READY</b> ✅" if ok_all else "<b>NOT READY</b> ❌ — fix items above before going live (PREVIEW_MODE=false)")
+    lines.append("<b>READY</b> ✅" if ok_all else "<b>NOT READY</b> ❌: fix items above before going live (PREVIEW_MODE=false)")
     _send_chunked("\n".join(lines))
 
 
 def _handle_help():
     """Handle /help command."""
     send_message(
-        "<b>Polymarket Copy-Trading Bot — Commands</b>\n\n"
-        "<b>Strategy #1 — Copy Trading</b>\n"
-        "<code>/status</code> — Bot status, balance, positions\n"
-        "<code>/pnl</code> — P&amp;L by strategy: realized + unrealized + total\n"
-        "<code>/wallets</code> — Top wallets overall + best/worst per strategy\n"
-        "<code>/gate</code> — Gate picture: shortlist admit/reject + promotion offers/holds/demotes\n"
-        "<code>/golive &lt;wallet&gt;</code> — Re-check a promoted wallet before the real-money flip\n"
-        "<code>/history</code> — Last 10 copy trades\n"
-        "<code>/check</code> — Verify trading setup (read-only)\n\n"
+        "<b>Polymarket Copy-Trading Bot: Commands</b>\n\n"
+        "<b>Strategy #1: Copy Trading</b>\n"
+        "<code>/status</code>: Bot status, balance, positions\n"
+        "<code>/pnl</code>: P&amp;L by strategy: realized + unrealized + total\n"
+        "<code>/wallets</code>: Top wallets overall + best/worst per strategy\n"
+        "<code>/gate</code>: Gate picture: shortlist admit/reject + promotion offers/holds/demotes\n"
+        "<code>/golive &lt;wallet&gt;</code>: Re-check a promoted wallet before the real-money flip\n"
+        "<code>/history</code>: Last 10 copy trades\n"
+        "<code>/check</code>: Verify trading setup (read-only)\n\n"
         "<b>Real money</b>\n"
         "<code>/zset</code>: set Z, the only wallets real money may follow\n"
         "<code>/zset candidates</code>: every wallet the gate passes today, one card each, admit by tap\n"
@@ -1330,11 +1338,11 @@ def _handle_help():
         "<b>Message classes</b>: 💰 DEAL real money · 👛 WALLET who is followed · "
         "🔬 RESEARCH paper books and detectors (off by default) · 🤖 BOT the process\n\n"
         "<b>Safety levers</b>\n"
-        "<code>/setkey clear CONFIRM</code> — Wipe in-memory private key\n"
-        "<code>/setkey 0xHEX CONFIRM</code> — Replace key in memory\n"
-        "<code>/reset CONFIRM</code> — Zero all P&amp;L + risk/spend state (archives first)\n"
-        "<code>/shutdown CONFIRM</code> — Graceful exit (container will restart)\n\n"
-        "<code>/help</code> — Show this message\n\n"
+        "<code>/setkey clear CONFIRM</code>: Wipe in-memory private key\n"
+        "<code>/setkey 0xHEX CONFIRM</code>: Replace key in memory\n"
+        "<code>/reset CONFIRM</code>: Zero all P&amp;L + risk/spend state (archives first)\n"
+        "<code>/shutdown CONFIRM</code>: Graceful exit (container will restart)\n\n"
+        "<code>/help</code>: Show this message\n\n"
         f"Strategy #1: {'ON' if CONFIG.strategy1_enabled else 'OFF'}\n"
         f"Mode: {'PREVIEW' if CONFIG.preview_mode else 'LIVE'}"
     )
@@ -1352,7 +1360,7 @@ def _resolve_promote_target(query: str) -> str | None:
 
     Accepts a full 0x address, or a prefix that uniquely matches a wallet we've
     offered for promotion (so the owner never has to paste a whole UUID). Returns
-    None when nothing — or more than one thing — matches."""
+    None when nothing: or more than one thing: matches."""
     q = (query or "").strip().lower()
     if not q:
         return None
@@ -1368,7 +1376,7 @@ def _resolve_promote_target(query: str) -> str | None:
 
 
 def _handle_promote(text: str) -> None:
-    """/promote <wallet-or-prefix> — add a paper-validated wallet to System A.
+    """/promote <wallet-or-prefix>: add a paper-validated wallet to System A.
 
     The primary path is the one-tap button on a promote offer; this command is a
     typed fallback that still avoids pasting the full address (a prefix works)."""
@@ -1398,7 +1406,7 @@ def _handle_promote(text: str) -> None:
 
 
 def _handle_slice(text: str) -> None:
-    """/slice [A|B] — the verdict memo's cost-slice table, on demand (s-log7q).
+    """/slice [A|B]: the verdict memo's cost-slice table, on demand (s-log7q).
 
     Renders through the exact functions the memo uses (``cost_slices`` +
     ``fmt_slices``) so the two surfaces can never disagree. Clean-era scoped,
@@ -1430,13 +1438,13 @@ def _handle_slice(text: str) -> None:
 
 
 def _handle_verdict(text: str) -> None:
-    """/verdict [hold|retire|recalibrate|confirm] — the one-word era decision.
+    """/verdict [hold|retire|recalibrate|confirm]: the one-word era decision.
 
     Inert until the §7 memo has posted (``verdict_sent`` in ab_race_state.json)
-    — zero interaction with the race before the evidence is in. A decision is
+   : zero interaction with the race before the evidence is in. A decision is
     previewed first (current → new values, effect timing) and only a typed
     ``/verdict confirm`` within the hour applies it. Applies to a durable
-    overlay on the data volume (never .env — deploys regenerate it), so the
+    overlay on the data volume (never .env: deploys regenerate it), so the
     decision survives redeploys.
     """
     from src.copy_trading import era_state, verdict_overlay
@@ -1453,12 +1461,12 @@ def _handle_verdict(text: str) -> None:
             eta = ""
             if era_ts:
                 from datetime import datetime, timezone
-                eta = (" — memo posts ~"
+                eta = (": memo posts ~"
                        + datetime.fromtimestamp(
                            float(era_ts) + vdays * 86400.0 + 2 * 86400.0,
                            timezone.utc).strftime("%Y-%m-%d"))
             send_message(
-                "🏁 No verdict yet — the §7 memo has not posted"
+                "🏁 No verdict yet: the §7 memo has not posted"
                 f"{eta}. This command arms once it has.")
             return
         ov = verdict_overlay.load(
@@ -1483,7 +1491,7 @@ def _handle_verdict(text: str) -> None:
 
     arg = parts[1].lower()
     if not st.get("verdict_sent"):
-        send_message("🏁 Inert until the §7 memo posts — no verdict to act on.")
+        send_message("🏁 Inert until the §7 memo posts: no verdict to act on.")
         return
 
     if arg == "confirm":
@@ -1491,7 +1499,7 @@ def _handle_verdict(text: str) -> None:
         action = draft.get("action") if verdict_overlay.draft_valid(draft) else None
         patch = verdict_overlay.confirm(CONFIG.data_dir)
         if patch is None:
-            send_message("No live draft (expired or never made) — "
+            send_message("No live draft (expired or never made): "
                          "start with /verdict hold|retire|recalibrate.")
             return
         # recalibrate re-arms the era: the memo clock's only reader is gated on
@@ -1508,9 +1516,9 @@ def _handle_verdict(text: str) -> None:
             lines.append(f"  {k} = {v} "
                          f"(effective {verdict_overlay.EFFECT_TIMING.get(k, 'next restart')})")
         if not patch:
-            lines.append("  (no config change — decision recorded)")
+            lines.append("  (no config change: decision recorded)")
         if action == "recalibrate":
-            lines.append("  era re-armed — a fresh memo will post at the new clock")
+            lines.append("  era re-armed: a fresh memo will post at the new clock")
         send_message("\n".join(lines))
         return
 
@@ -1524,12 +1532,12 @@ def _handle_verdict(text: str) -> None:
     lines = [f"🏁 <b>Draft: {arg}</b> (expires in 1h)"]
     if draft["patch"]:
         for k, v in draft["patch"].items():
-            cur = ov.get(k, getattr(CONFIG, k.lower(), os.environ.get(k, "—")))
+            cur = ov.get(k, getattr(CONFIG, k.lower(), os.environ.get(k, "n/a")))
             lines.append(f"  {k}: <code>{_esc(str(cur))}</code> → "
                          f"<code>{_esc(str(v))}</code> "
                          f"({verdict_overlay.EFFECT_TIMING.get(k, 'next restart')})")
     else:
-        lines.append("  no config change — the decision is just recorded")
+        lines.append("  no config change: the decision is just recorded")
     lines.append("Reply <code>/verdict confirm</code> to apply.")
     send_message("\n".join(lines))
 
@@ -1817,7 +1825,7 @@ def _handle_speed(text: str) -> None:
 
 
 def _handle_zset(text: str) -> None:
-    """/zset [drop WALLET] — the only wallets real money may ever follow.
+    """/zset [drop WALLET]: the only wallets real money may ever follow.
 
     Read-only by default. `drop` evicts, and eviction is deliberately the one
     unguarded operation: getting into Z needs the go-live gate plus the
@@ -2066,7 +2074,7 @@ def _handle_testorder(text: str) -> None:
                      "Places ONE order at the exchange minimum (about $5) on that "
                      "market's token, BUY at the live ask, through the same path "
                      "every real copy uses. Pick a market whose favoured outcome "
-                     "trades at 0.90 or higher so the test is about the pipeline, "
+                     "trades at 0.95 or higher so the test is about the pipeline, "
                      "not the bet.")
         return
     token = parts[1].strip()
@@ -2161,7 +2169,7 @@ def _handle_canary(text: str) -> None:
 
 
 def _handle_golive(text: str) -> None:
-    """/golive <wallet-or-prefix> — re-check a promoted wallet before the manual
+    """/golive <wallet-or-prefix>: re-check a promoted wallet before the manual
     PREVIEW_MODE=false flip that puts real money behind it. Advisory: READY/HOLD
     plus the checklist; it never flips anything."""
     import time as _time
@@ -2211,14 +2219,14 @@ def _handle_golive(text: str) -> None:
         ideal_roi=ideal_roi, n_ideal_settled=n_ideal,
         book_corr=book_corr, **honest)
 
-    head = "✅ <b>READY for live</b>" if ready else "⏸ <b>HOLD — not ready for live</b>"
-    lines = [f"{head} — <code>{_esc(wallet)}</code>"]
+    head = "✅ <b>READY for live</b>" if ready else "⏸ <b>HOLD: not ready for live</b>"
+    lines = [f"{head}: <code>{_esc(wallet)}</code>"]
     tier = promotion_state.promoted_tier_of(wallet)
     if tier:
         lines.append(f"Promoted tier {tier} · {stats.n_closed} settled · "
                      f"ROI {(stats.roi or 0) * 100:+.0f}% · return t {stats.roi_tstat:+.2f}")
     else:
-        lines.append("<i>Not in the promoted store — checking its paper record anyway.</i>")
+        lines.append("<i>Not in the promoted store: checking its paper record anyway.</i>")
     for label, ok, detail in checks:
         lines.append(f"{'✅' if ok else '❌'} {_esc(label)} <i>({_esc(str(detail))})</i>")
     if ready:
@@ -2229,14 +2237,14 @@ def _handle_golive(text: str) -> None:
     # made. A precondition list that lives only in a dated ROADMAP section is a
     # list nobody reads at the one-way door (verifier r3, s-r7m3qk).
     lines.append(
-        "\n<b>Before flipping PREVIEW_MODE=false — the gate does NOT check these:</b>\n"
+        "\n<b>Before flipping PREVIEW_MODE=false: the gate does NOT check these:</b>\n"
         "• book persistence's wallet floor is only <b>3</b>; read the (Nw) count "
-        "next to it — a correlation over 3–4 wallets clears ≥0 about half the "
+        "next to it: a correlation over 3-4 wallets clears ≥0 about half the "
         "time by chance\n"
         "• confirm a successful CLOB api-key derivation in the logs first (the "
         "400s are benign in PREVIEW, but that is the path a real order needs)\n"
-        "• modeled @net cost is biased ~4–6pp too negative (round-trip spread "
-        "charged on rows that redeem at par) — size off the ×0.5 column\n"
+        "• modeled @net cost is biased ~4-6pp too negative (round-trip spread "
+        "charged on rows that redeem at par): size off the ×0.5 column\n"
         "• 3 of the bars above are ALL-TIME realized; if all-time ≫ clean-era, "
         "the difference is the fill artifact, not skill\n"
         "Full list: ROADMAP §9.7.")
@@ -2424,7 +2432,7 @@ def _register_bot_menu():
     Telegram resolves the popup menu per chat by picking the most-specific
     scope that has commands set: chat_member > chat_administrators > chat >
     all_chat_administrators > all_private_chats / all_group_chats > default.
-    A stale list on any narrower scope hides our default-scope list — so
+    A stale list on any narrower scope hides our default-scope list: so
     before we register the default, we clear every broader-than-default
     scope we ever might have set. (Per-chat scopes can only be set by
     explicit chat_id and aren't touched here.)

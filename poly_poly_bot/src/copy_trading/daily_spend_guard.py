@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import tempfile
 import threading
 from dataclasses import dataclass, field
@@ -36,6 +37,10 @@ class _State:
     # The previous UTC day's map, kept at rollover so the 08:00 line can
     # report a COMPLETED window ("yesterday") rather than eight hours of today.
     wallet_copies_yesterday: dict = field(default_factory=dict)
+    # Set when today's file could not be read: spending is refused until the
+    # UTC rollover, the unreadable file is kept aside as evidence, and the
+    # reason persists across restarts within the day.
+    closed_reason: str = ""
     yesterday: str = ""
 
 
@@ -74,10 +79,29 @@ def _load_locked() -> None:
         wy = raw.get("wallet_copies_yesterday") or {}
         _state.wallet_copies_yesterday = {str(k).lower(): int(v) for k, v in wy.items()} if isinstance(wy, dict) else {}
         _state.yesterday = str(raw.get("yesterday") or "")
-    except (FileNotFoundError, json.JSONDecodeError):
+        _state.closed_reason = str(raw.get("closed_reason") or "")
+    except FileNotFoundError:
         _state.date = ""
         _state.spent_usd = 0.0
         _state.wallet_copies = {}
+    except (json.JSONDecodeError, ValueError, TypeError, AttributeError) as exc:
+        # Unreadable is not "nothing spent". A bot that cannot say what it
+        # spent today stops for today and says so; the file goes aside for
+        # the RCA and a fresh one carries the reason until midnight UTC.
+        aside = f"{_STATE_FILE}.corrupt-{int(time.time())}"
+        try:
+            os.replace(_STATE_FILE, aside)
+        except OSError:
+            aside = "(could not move it aside)"
+        _state.date = today
+        _state.spent_usd = 0.0
+        _state.wallet_copies = {}
+        _state.closed_reason = (f"today's spend file was unreadable ({exc.__class__.__name__}); "
+                                f"kept aside as {os.path.basename(aside)}; no live copy "
+                                f"until {today} rolls over (UTC)")
+        _save_locked()
+        logger.error(f"[daily-cap] {_state.closed_reason}")
+        _announce_closed(_state.closed_reason)
 
     if _state.date != today:
         if _state.date:
@@ -86,14 +110,27 @@ def _load_locked() -> None:
         _state.date = today
         _state.spent_usd = 0.0
         _state.wallet_copies = {}
+        _state.closed_reason = ""  # the rollover reopens the day
         _save_locked()
+
+
+def _announce_closed(reason: str) -> None:
+    """One BOT-class push naming the closed day. Never raises."""
+    try:
+        from src import telegram_bot as tb
+        tb.send_message("⛔ <b>Spend guard closed for today.</b> " + tb._esc(reason)
+                        if hasattr(tb, "_esc") else "⛔ Spend guard closed for today. " + reason,
+                        kind=getattr(tb, "KIND_BOT", None))
+    except Exception as exc:
+        logger.warn(f"[daily-cap] could not announce the closed day: {exc}")
 
 
 def _save_locked() -> None:
     _atomic_write(_STATE_FILE, {"date": _state.date, "spent_usd": _state.spent_usd,
                                 "wallet_copies": dict(_state.wallet_copies),
                                 "wallet_copies_yesterday": dict(_state.wallet_copies_yesterday),
-                                "yesterday": _state.yesterday})
+                                "yesterday": _state.yesterday,
+                                "closed_reason": _state.closed_reason})
 
 
 with _lock:
@@ -113,6 +150,9 @@ def can_spend(amount_usd: float) -> tuple[bool, str]:
     with _lock:
         _load_locked()
         spent = _state.spent_usd
+        closed = _state.closed_reason
+    if closed:
+        return False, f"spend guard closed: {closed}"
     if spent >= cap:
         return False, f"Daily spend cap reached: ${spent:.2f} >= ${cap:.2f}"
     if spent + amount_usd > cap:
@@ -151,6 +191,13 @@ def reset_state() -> None:
     global _state
     with _lock:
         _state = _State()
+
+
+def closed_reason() -> str:
+    """Why today is closed, or empty."""
+    with _lock:
+        _load_locked()
+        return _state.closed_reason
 
 
 def status() -> dict:

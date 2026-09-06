@@ -110,7 +110,9 @@ jobs:
                   problems.append(f"disk at {disk}% (it has filled before)")
               # Armed for real money is not itself a problem, but an armed box
               # that has gone quiet is the worst combination, so say so.
-              if '"armed": true' in raw.replace("'", '"'):
+              # The note rides along with a real problem; on its own it made
+              # every run on a healthy armed box a failure (2026-09-06).
+              if problems and '"armed": true' in raw.replace("'", '"'):
                   problems.append("NOTE: this box is ARMED for real orders")
 
           token, chat = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT")

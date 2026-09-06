@@ -702,6 +702,18 @@ async def place_trade_orders(
                 continue
             if copy_size > gov.per_copy_usd:
                 copy_size = gov.per_copy_usd
+            # Cash, in plain words, before the exchange is the one to say no.
+            # The governor sizes on equity, so cash can be under the size
+            # while positions are open; that is a wait, not a bug.
+            if (trade.side == "BUY" and gov.balance_read
+                    and gov.balance_usd is not None
+                    and copy_size > float(gov.balance_usd) - 0.01):
+                logger.skip(f"[exec] cash on chain ${float(gov.balance_usd):.2f} is "
+                            f"under the ${copy_size:.2f} copy (${gov.open_cost_usd:.2f} "
+                            f"sits in open positions): waiting for them to resolve "
+                            f"and pay out before the next copy")
+                mark_trade_as_seen(trade.id)
+                continue
 
             # --- The canary: one minimum-size order, then the arm comes off ---
             # It only ever LOWERS the size of an order every rail above has

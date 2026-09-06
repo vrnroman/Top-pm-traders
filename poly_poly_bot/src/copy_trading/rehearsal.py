@@ -335,6 +335,22 @@ def followed_wallets_line() -> str:
         return f"👛 followed wallets: could not compute ({exc})"
 
 
+def resolved_positions_line(redeemable, n_done: int) -> str:
+    """The winners, apart from the dust: what is worth claiming by hand."""
+    from src.copy_trading.auto_redeemer import DUST_VALUE_USD, _position_value
+    rows = redeemable if isinstance(redeemable, list) else []
+    winners = [p for p in rows if isinstance(p, dict) and _position_value(p) >= DUST_VALUE_USD]
+    payout = round(sum(_position_value(p) for p in winners), 2)
+    dust = max(0, int(n_done) - len(winners))
+    if winners:
+        return (f"{len(winners)} resolved winner(s) worth ${payout:,.2f} waiting for "
+                f"Polymarket's own claim to pay them to the wallet (usually within "
+                f"hours; the bot does not redeem); {dust} resolved position(s) worth "
+                f"under ${DUST_VALUE_USD:.0f} each")
+    return (f"{n_done} resolved position(s) worth under ${DUST_VALUE_USD:.0f} each: "
+            f"nothing to collect; they count for nothing in the bankroll")
+
+
 def real_money_line(now: Optional[float] = None) -> str:
     """Bankroll now, distance to the floor, realized today. Real rows only.
 
@@ -372,9 +388,7 @@ def real_money_line(now: Optional[float] = None) -> str:
                 f"${open_cost:,.2f}){floor_txt} · realized today ${realized:+,.2f} "
                 f"({len(rows)} redeem(s))")
         if n_done:
-            line += (f"\n   {n_done} resolved position(s) awaiting redemption are "
-                     f"excluded from the bankroll: they are worth their payout, "
-                     f"not their cost")
+            line += "\n   " + resolved_positions_line(redeemable, n_done)
         line += "\n" + followed_wallets_line()
         if not known:
             line += ("\n   the resolved set could not be read, so every open "

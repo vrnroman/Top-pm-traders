@@ -345,7 +345,7 @@ def _one_row(f: dict, fill_price: float) -> list[str]:
 
 TEST_FILE = "testorder.json"
 # A market whose favoured outcome trades under this is not a "penny test".
-TEST_MIN_PRICE = 0.90
+TEST_MIN_PRICE = 0.95
 
 
 def _test_path() -> str:
@@ -375,9 +375,14 @@ def _write_test(d: dict) -> bool:
 
 
 def test_blocking_reasons() -> list[str]:
+    from src.copy_trading.trade_queue import pending_orders_loaded
     out = list(live_mode.blocking_reasons())
     if not live_budget.is_open():
         out.append("LIVE_BUDGET_USD not set (bankroll governor closed)")
+    if not pending_orders_loaded():
+        out.append("the bot is still starting: pending orders are not loaded "
+                   "from disk yet, and an order posted now would be lost to "
+                   "that reload; try again in a minute")
     return out
 
 
@@ -415,6 +420,13 @@ def test_standing_reason(now: Optional[float] = None) -> Optional[str]:
                 f"with the verifier. Wait for its report before sending another.")
     fill = d.get("fill") or {}
     if not fill:
+        from src.copy_trading.trade_queue import boot_load_error
+        err = boot_load_error()
+        if err:
+            return (f"a test order's fate is unknown: {oid} was posted {when:%H:%M} "
+                    f"UTC and the pending-orders file was unreadable at boot "
+                    f"({err}). Check it on Polymarket; a restart with a readable "
+                    f"file clears this.")
         return None
     status = str(fill.get("status") or "").upper()
     filled = status == "FILLED" or (status == "PARTIAL" and _num(fill.get("filled_shares")) > 0)
@@ -443,17 +455,13 @@ async def fire_test_order(clob_client, token_id: str, *, title: str = "",
     from src.copy_trading import trade_executor
     from src.copy_trading.daily_spend_guard import can_spend, record_spend
     from src.copy_trading.order_executor import quote_copy_order
-    from src.copy_trading.trade_queue import enqueue_pending_order, pending_orders_loaded
+    from src.copy_trading.trade_queue import boot_load_error, enqueue_pending_order
     from src.models import DetectedTrade, PendingOrder
 
     now = time.time() if now is None else now
     reasons = test_blocking_reasons()
     if reasons:
         return (False, "cannot place a test order: " + "; ".join(reasons))
-    if not pending_orders_loaded():
-        return (False, "the bot is still starting: pending orders are not "
-                       "loaded from disk yet, and an order posted now would be "
-                       "lost to that reload. Try again in a minute.")
     # One shot. A posted order that the verifier has not reported on blocks a
     # second one (the record would be overwritten and the first fill report
     # lost), and one posted order a day is the rule: the owner authorized a
@@ -525,18 +533,30 @@ async def fire_test_order(clob_client, token_id: str, *, title: str = "",
                   f"'{trade.market[:50]}' at {result.order_price:.3f} "
                   f"(${size_usd:.2f}), order {result.order_id[:12]}. The fill "
                   f"report follows when the exchange confirms it. When the match "
-                  f"resolves, claim the payout by hand in Polymarket: the bot "
-                  f"cannot redeem for this wallet yet.")
+                  f"resolves, Polymarket pays the winnings to the wallet by "
+                  f"itself; the bot does not send a redeem.")
 
 
 def record_test_fill(order_id: str, fill, now: Optional[float] = None) -> Optional[str]:
-    """The verifier saw the test order's fate. Returns the report ONCE."""
+    """The verifier saw the test order's fate. Returns the report ONCE per
+    outcome: an UNFILLED record is superseded by a later fill (the cancel
+    failed because the order had just matched, verifier round 4), and a fill
+    is final."""
     d = read_test()
-    if not d or d.get("order_id") != order_id or d.get("fill"):
+    if not d or d.get("order_id") != order_id:
         return None
     status = str(getattr(fill, "status", "") or "")
     if not status or status == "UNKNOWN":
         return None
+    shares = _num(getattr(fill, "filled_shares", 0.0))
+    new_is_fill = status == "FILLED" or (status == "PARTIAL" and shares > 0)
+    prev = d.get("fill") or {}
+    if prev:
+        prev_is_fill = (str(prev.get("status") or "").upper() == "FILLED"
+                        or (str(prev.get("status") or "").upper() == "PARTIAL"
+                            and _num(prev.get("filled_shares")) > 0))
+        if prev_is_fill or not new_is_fill:
+            return None  # already final, or unfilled again: said once
     now = time.time() if now is None else now
     d["fill"] = {"status": status,
                  "fill_price": _num(getattr(fill, "fill_price", 0.0)),
@@ -548,9 +568,9 @@ def record_test_fill(order_id: str, fill, now: Optional[float] = None) -> Option
         return (f"Test order filled: {f['filled_shares']:.2f} shares of "
                 f"'{str(d.get('market'))[:50]}' at {f['fill_price']:.3f} "
                 f"(${f['filled_usd']:.2f}), order {str(order_id)[:12]}. The live "
-                f"order path places and fills. When the match resolves, claim "
-                f"the payout by hand in Polymarket: the bot cannot redeem for "
-                f"this wallet yet.")
+                f"order path places and fills. When the match resolves, Polymarket "
+                f"pays the winnings to the wallet by itself; the bot does not "
+                f"send a redeem.")
     return (f"Test order {status.lower()}: order {str(order_id)[:12]} on "
             f"'{str(d.get('market'))[:50]}' did not fill. "
             f"{'The verifier cancels it next; the money comes back when that succeeds.' if status == 'UNFILLED' else ''}")

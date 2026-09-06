@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import tempfile
 from typing import Optional
 
@@ -76,10 +77,17 @@ _pending_orders: list[PendingOrder] = []
 # Telegram polling starting and that step (about 18 s on the VM) an order
 # posted here would be overwritten by the reload and never verified.
 _loaded_from_disk: bool = False
+# Why the boot reload could not read the file, or empty. A resting order in
+# an unreadable file is invisible; say so instead of "0 pending".
+_boot_load_error: str = ""
 
 
 def pending_orders_loaded() -> bool:
     return _loaded_from_disk
+
+
+def boot_load_error() -> str:
+    return _boot_load_error
 
 
 def _save_pending_orders() -> None:
@@ -90,7 +98,7 @@ def _save_pending_orders() -> None:
 
 def load_pending_orders_from_disk() -> int:
     """Load pending orders from disk on startup. Returns count loaded."""
-    global _pending_orders, _loaded_from_disk
+    global _pending_orders, _loaded_from_disk, _boot_load_error
     _loaded_from_disk = True
     try:
         with open(_ORDERS_FILE, "r") as f:
@@ -99,11 +107,28 @@ def load_pending_orders_from_disk() -> int:
             _pending_orders = [PendingOrder(**entry) for entry in raw]
             logger.info(f"[queue] Loaded {len(_pending_orders)} pending orders from disk")
             return len(_pending_orders)
-        return 0
-    except (FileNotFoundError, json.JSONDecodeError):
+        raise ValueError(f"expected a list, got {type(raw).__name__}")
+    except FileNotFoundError:
         return 0
     except Exception as e:
-        logger.error(f"[queue] Failed to load pending orders: {e}")
+        # Unreadable is not "nothing resting". Keep the file for the RCA,
+        # say it loudly, and let the test-order rule refuse on it.
+        aside = f"{_ORDERS_FILE}.corrupt-{int(time.time())}"
+        try:
+            os.replace(_ORDERS_FILE, aside)
+        except OSError:
+            aside = "(could not move it aside)"
+        _boot_load_error = f"{e.__class__.__name__}, kept aside as {os.path.basename(aside)}"
+        logger.error(f"[queue] pending orders file unreadable at boot: {_boot_load_error}. "
+                     f"Any order resting in it is untracked: check the exchange.")
+        try:
+            from src import telegram_bot as tb
+            tb.send_message("⚠️ <b>Pending orders file unreadable at boot</b>: "
+                            + tb._esc(_boot_load_error) + ". Any order resting in it "
+                            "is untracked; check open orders on Polymarket.",
+                            kind=tb.KIND_BOT)
+        except Exception as exc:
+            logger.warn(f"[queue] could not announce the unreadable file: {exc}")
         return 0
 
 

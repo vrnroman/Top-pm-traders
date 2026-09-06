@@ -71,13 +71,18 @@ DRAWDOWN_FRAC = _frac("LIVE_BUDGET_DRAWDOWN_FRAC", 0.30)
 # unreadable, which falls back to the stated budget and says so.
 _BALANCE_TTL_S = 900.0
 _balance_cache: Optional[tuple[float, Optional[float]]] = None
+# The guard loop's last KNOWN cost of still-live positions (resolved ones
+# excluded), so a copy that just opened does not shrink the next one. Same
+# TTL as the balance; stale means "unknown", which sizes on cash alone.
+_open_cost_cache: Optional[tuple[float, float]] = None
 
 
 @dataclass(frozen=True)
 class Caps:
     stated_usd: float
-    balance_usd: Optional[float]   # the chain's answer, when it was asked
+    balance_usd: Optional[float]   # cash on chain, when it was asked
     balance_read: bool             # a live read was attempted and succeeded
+    open_cost_usd: float           # live positions at cost + resolved at payout, 0 if unknown
     effective_usd: float
     per_copy_usd: float
     per_market_usd: float
@@ -127,6 +132,24 @@ def refresh_balance(now: Optional[float] = None) -> Optional[float]:
     return val
 
 
+def note_open_cost(open_cost_usd: float, now: Optional[float] = None) -> None:
+    """The guard loop's live open cost, when it could read the resolved set."""
+    global _open_cost_cache
+    now = time.time() if now is None else now
+    try:
+        v = float(open_cost_usd)
+    except (TypeError, ValueError):
+        return
+    _open_cost_cache = (now, max(0.0, v))
+
+
+def _read_open_cost(now: Optional[float] = None) -> Optional[float]:
+    now = time.time() if now is None else now
+    if _open_cost_cache is not None and now - _open_cost_cache[0] < _BALANCE_TTL_S:
+        return _open_cost_cache[1]
+    return None
+
+
 def _read_balance(now: Optional[float] = None) -> Optional[float]:
     """The cached USDC balance, or None when nothing fresh is cached. Never
     touches the network."""
@@ -150,14 +173,24 @@ def caps(*, live: Optional[bool] = None, balance: Optional[float] = None,
         live = not live_mode.is_preview()
     bal: Optional[float] = None
     read = False
+    open_cost = 0.0
     if live:
         bal = balance if balance is not None else _read_balance(now)
         read = bal is not None
-    effective = min(stated, bal) if (live and read) else stated
+        oc = _read_open_cost(now)
+        open_cost = float(oc) if oc is not None else 0.0
+    # Equity, not cash: cash falls by the size of every position the bot
+    # opens, so sizing on cash alone shrank the per-copy size under the $5
+    # minimum after three copies and the trader went silent by design
+    # (2026-09-06). Live positions count at cost, resolved ones at their
+    # payout (the guard hands over the sum). The stated budget still caps
+    # everything, and the sink checks cash before a post.
+    effective = min(stated, bal + open_cost) if (live and read) else stated
     per_copy = round(effective * PER_COPY_FRAC, 2)
     per_market = round(per_copy * max(1, int(CONFIG.max_copies_per_market_side)), 2)
     return Caps(
         stated_usd=stated, balance_usd=bal, balance_read=read,
+        open_cost_usd=round(open_cost, 2),
         effective_usd=effective, per_copy_usd=per_copy,
         per_market_usd=per_market,
         daily_usd=round(effective * DAILY_FRAC, 2),
@@ -286,7 +319,8 @@ def status_lines(*, live: Optional[bool] = None) -> list[str]:
     if not c.live:
         basis = "preview, chain not read"
     elif c.balance_read:
-        basis = f"min of ${c.stated_usd:,.0f} stated and ${c.balance_usd:,.2f} on chain"
+        basis = (f"min of ${c.stated_usd:,.0f} stated and ${c.balance_usd:,.2f} cash "
+                 f"+ ${c.open_cost_usd:,.2f} in open positions")
     else:
         basis = "chain balance unreadable, using the stated number"
     out = [f"✅ bankroll governor: ${c.effective_usd:,.2f} effective ({basis})",
