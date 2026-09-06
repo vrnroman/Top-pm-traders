@@ -1892,6 +1892,7 @@ def _test_order_env(monkeypatch, tmp_path, ask=0.981, tick=None, min_shares="5")
     monkeypatch.setattr(trade_executor, "_execute_copy_order", post)
     queued: list = []
     monkeypatch.setattr(trade_queue, "enqueue_pending_order", lambda po: queued.append(po))
+    monkeypatch.setattr(trade_queue, "peek_pending_orders", lambda: list(queued))
 
     class _Clob:
         def get_order_book(self, token_id):
@@ -1933,6 +1934,7 @@ def test_the_test_order_is_one_shot(canary_env, monkeypatch, tmp_path):
     class _Fill:
         status, fill_price, filled_shares, filled_usd = "FILLED", 0.98, 5.1, 5.0
     assert canary.record_test_fill("0xt1", _Fill(), now=t0 + 3)
+    queued.clear()  # the verifier is done with it
     # filled, same UTC day: today's shot is spent
     ok3, msg3 = _run(canary.fire_test_order(clob, "tok", title="m", now=t0 + 3600))
     assert ok3 is False and "already went out" in msg3 and "filled" in msg3, msg3
@@ -1940,6 +1942,46 @@ def test_the_test_order_is_one_shot(canary_env, monkeypatch, tmp_path):
     # next UTC day: allowed again
     ok4, _ = _run(canary.fire_test_order(clob, "tok", title="m", now=t0 + 86400))
     assert ok4 and posted == [5.0, 5.0]
+
+
+def test_an_unfilled_test_order_does_not_spend_the_day(canary_env, monkeypatch, tmp_path):
+    """Verifier round 2 (A): the owner's own real sequence, unfilled and
+    cancelled at 12:36, retried and filled at 12:52, was refused as
+    'already went out today'. A $0 non-event must not spend the shot."""
+    canary, clob, posted, queued = _test_order_env(monkeypatch, tmp_path)
+    t0 = 1_788_698_160.0  # 12:36 UTC
+    ok, _ = _run(canary.fire_test_order(clob, "tok", title="m", now=t0))
+    assert ok and posted == [5.0]
+
+    class _Unfilled:
+        status, fill_price, filled_shares, filled_usd = "UNFILLED", 0.0, 0.0, 0.0
+    rep = canary.record_test_fill("0xt1", _Unfilled(), now=t0 + 6)
+    assert rep and "unfilled" in rep.lower()
+    queued.clear()  # cancelled and dropped by the verifier
+    assert canary.test_standing_reason(now=t0 + 960) is None
+    ok2, msg2 = _run(canary.fire_test_order(clob, "tok", title="m", now=t0 + 960))
+    assert ok2 and posted == [5.0, 5.0], msg2
+    assert canary.read_test()["order_id"] == "0xt2"
+
+
+def test_an_abandoned_test_order_does_not_lock_the_command(canary_env, monkeypatch, tmp_path):
+    """Verifier round 2 (B): UNKNOWN status for MAX_UNCERTAIN_CYCLES makes the
+    queue abandon the order; nothing ever wrote a fill, so 'already out'
+    stood forever with no reset."""
+    canary, clob, posted, queued = _test_order_env(monkeypatch, tmp_path)
+    t0 = 1_788_699_120.0
+    ok, _ = _run(canary.fire_test_order(clob, "tok", title="m", now=t0))
+    assert ok and len(queued) == 1
+    # while the verifier holds it: out
+    assert "already out" in (canary.test_standing_reason(now=t0 + 60) or "")
+    class _Unknown:
+        status, fill_price, filled_shares, filled_usd = "UNKNOWN", 0.0, 0.0, 0.0
+    assert canary.record_test_fill("0xt1", _Unknown(), now=t0 + 30) is None
+    queued.clear()  # abandoned after the uncertain cycles
+    assert canary.test_standing_reason(now=t0 + 3 * 86400) is None
+    assert canary.test_standing_reason(now=t0 + 600) is None, "same day too: no fill, not out"
+    ok2, _ = _run(canary.fire_test_order(clob, "tok", title="m", now=t0 + 600))
+    assert ok2 and posted == [5.0, 5.0]
 
 
 def test_a_test_order_that_never_posted_blocks_nothing(canary_env, monkeypatch, tmp_path):

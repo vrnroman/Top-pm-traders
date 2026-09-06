@@ -384,11 +384,17 @@ def test_blocking_reasons() -> list[str]:
 def test_standing_reason(now: Optional[float] = None) -> Optional[str]:
     """Why a new test order may not go out yet, or None.
 
-    A posted record without a fill report is an order still out; a posted
-    record from the same UTC day is today's one shot. A record that never
-    posted blocks nothing.
+    A posted order the verifier still holds is an order still out. A FILLED
+    (or partly filled) record from the same UTC day is today's one shot. An
+    order that never posted, was cancelled unfilled, or was abandoned by the
+    verifier (dropped from the queue without a fill) blocks nothing: the
+    owner's first real test was exactly that sequence, unfilled at 12:36
+    and filled on the retry at 12:52, and a $0 non-event must not spend the
+    day.
     """
     from datetime import datetime, timezone
+
+    from src.copy_trading.trade_queue import peek_pending_orders
 
     now = time.time() if now is None else now
     d = read_test()
@@ -397,15 +403,23 @@ def test_standing_reason(now: Optional[float] = None) -> Optional[str]:
     oid = str(d.get("order_id") or "")[:12]
     placed = _num(d.get("placed_ts"))
     when = datetime.fromtimestamp(placed, tz=timezone.utc)
-    if not d.get("fill"):
-        return (f"a test order is already out: {oid} on "
-                f"'{str(d.get('market'))[:40]}' placed {when:%H:%M} UTC, no fill "
-                f"report yet. Wait for it before sending another.")
+    fill = d.get("fill") or {}
+    if not fill:
+        still_out = any(str(getattr(po, "order_id", "")) == str(d.get("order_id"))
+                        for po in peek_pending_orders())
+        if still_out:
+            return (f"a test order is already out: {oid} on "
+                    f"'{str(d.get('market'))[:40]}' placed {when:%H:%M} UTC, no "
+                    f"fill report yet. Wait for it before sending another.")
+        return None
+    status = str(fill.get("status") or "").upper()
+    filled = status == "FILLED" or (status == "PARTIAL" and _num(fill.get("filled_shares")) > 0)
+    if not filled:
+        return None
     today = datetime.fromtimestamp(now, tz=timezone.utc).date()
     if when.date() == today:
-        status = str((d.get("fill") or {}).get("status") or "").lower() or "reported"
         return (f"today's test order already went out: {oid} on "
-                f"'{str(d.get('market'))[:40]}' at {when:%H:%M} UTC, {status}. "
+                f"'{str(d.get('market'))[:40]}' at {when:%H:%M} UTC, filled. "
                 f"One a day; /testorder again tomorrow (UTC).")
     return None
 
