@@ -77,7 +77,9 @@ _hard_disarm_reason: str = ""
 # episode (the arm record's ts) has already been announced. One push per
 # episode; the rest are counted so the daily line can say how many.
 _disarmed_skip_count: int = 0
-_disarmed_announced_ts: Optional[float] = None
+# -1.0 is never a real arm timestamp, so the first skip of a process announces
+# even when there is no arm file at all (a fresh volume, never armed).
+_disarmed_announced_ts: Optional[float] = -1.0
 
 
 def note_disarmed_skip(now: Optional[float] = None) -> tuple[bool, dict]:

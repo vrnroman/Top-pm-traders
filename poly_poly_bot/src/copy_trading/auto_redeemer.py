@@ -173,6 +173,22 @@ async def _fetch_redeemable_positions(
 _warned: set = set()
 
 
+# A resolved position worth less than this has nothing to collect.
+DUST_VALUE_USD = 1.0
+
+
+def _position_value(p: dict) -> float:
+    """What the position is worth now: the API's figure, else shares times
+    the current price (the rows a fake or an older schema hands over)."""
+    v = float(p.get("currentValue") or 0.0)
+    if v > 0:
+        return v
+    try:
+        return float(p.get("shares") or 0.0) * float(p.get("curPrice") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _warn_once(key: str) -> bool:
     if key in _warned:
         return False
@@ -218,12 +234,24 @@ async def check_and_redeem_positions(private_key: str,
     # once, and leave the positions counted so the guard's unredeemed trigger
     # can still fire.
     if (CONFIG.proxy_wallet or "").lower() != account.address.lower():
+        # Only positions with something to collect are worth a message. The
+        # 61 April-era losers on this wallet are worth under $1 each; naming
+        # them "worth $837 at cost" on every boot read as a loss six times in
+        # one day. Their cost still counts, in the log, once.
+        collectable = [p for p in positions if _position_value(p) >= DUST_VALUE_USD]
+        if not collectable:
+            if _warn_once("proxy-mismatch-dust"):
+                logger.info(f"[redeemer] {len(positions)} resolved position(s) sit on "
+                            f"the proxy wallet, each worth under ${DUST_VALUE_USD:.0f}: "
+                            f"nothing to claim, nothing sent, no P&L recorded.")
+            return RedeemResult()
         if _warn_once("proxy-mismatch"):
-            msg = (f"{len(positions)} position(s) worth ${sum(p['shares'] * p['avgPrice'] for p in positions):,.2f} "
-                   f"at cost are held by the proxy wallet, but this bot signs as "
-                   f"a different address, so it cannot redeem them on chain. "
-                   f"Nothing was sent and no P&L was recorded. Claim them in the "
-                   f"Polymarket interface.")
+            value = sum(float(p.get("currentValue") or 0.0) for p in collectable)
+            msg = (f"{len(collectable)} position(s) worth ${value:,.2f} are held by "
+                   f"the proxy wallet, but this bot signs as a different address, "
+                   f"so it cannot redeem them on chain. Nothing was sent and no "
+                   f"P&L was recorded. Claim them by hand in the Polymarket "
+                   f"interface.")
             logger.error(f"[redeemer] {msg}")
             if notify is not None:
                 try:

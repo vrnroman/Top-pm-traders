@@ -304,7 +304,7 @@ def _copy_paper_loop():
 
     def _send_demotion_a(d):
         telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
-            f"⛔ <b>Auto-demoted</b> <code>{d['wallet']}</code> — "
+            f"⛔ <b>Auto-demoted</b> <code>{d['wallet']}</code>: "
             f"{d['n_closed']} settled copies, ROI {d['roi'] * 100:+.0f}% "
             f"(≤ {CONFIG.copy_demote_max_roi * 100:+.0f}%). "
             f"Dropped from the watchlist for "
@@ -356,7 +356,7 @@ def _copy_paper_loop():
                 time_box_window_s=CONFIG.copy_time_box_window_days * 86400.0,
                 retire_cooldown_s=CONFIG.copy_retire_cooldown_days * 86400.0,
                 send_retirement=lambda r: telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
-                    f"🗄️ <b>Retired (inconclusive)</b> <code>{r['wallet']}</code> — "
+                    f"🗄️ <b>Retired (inconclusive)</b> <code>{r['wallet']}</code>: "
                     f"{r['n_closed']} settled, ROI {r['roi'] * 100:+.0f}%, "
                     f"{r['age_days']:.0f}d on paper with no verdict. Removed from the "
                     f"watchlist (re-discoverable), not blacklisted."),
@@ -394,7 +394,7 @@ def _copy_paper_loop():
             f"with {n_watch} wallets on the watchlist; promotion evidence is "
             f"not accruing")
         telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
-            f"🚱 <b>Copy funnel stalled</b> — no paper copies opened in "
+            f"🚱 <b>Copy funnel stalled</b>: no paper copies opened in "
             f"{stalled_h:.0f}h with {n_watch} wallets watched. Evidence toward "
             f"promotion is not accruing; check the watchlist's trade activity "
             f"and the guardrail-skip mix.")
@@ -751,7 +751,7 @@ def _copy_paper_b_loop():
                 state_scope="b",
                 send_offer=_send_offer_b,
                 send_demotion=lambda d: telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
-                    f"🅱️⛔ <b>B auto-demoted</b> <code>{d['wallet']}</code> — "
+                    f"🅱️⛔ <b>B auto-demoted</b> <code>{d['wallet']}</code>: "
                     f"{d['n_closed']} settled instant-copies, ROI "
                     f"{d['roi'] * 100:+.0f}%. Dropped from B's book for "
                     f"{CONFIG.copy_demote_cooldown_days:.0f}d (A unaffected)."),
@@ -765,7 +765,7 @@ def _copy_paper_b_loop():
                 time_box_window_s=CONFIG.copy_time_box_window_days * 86400.0,
                 retire_cooldown_s=CONFIG.copy_retire_cooldown_days * 86400.0,
                 send_retirement=lambda r: telegram_bot.send_message(kind=telegram_bot.KIND_RESEARCH, text=
-                    f"🅱️🗄️ <b>B retired (inconclusive)</b> <code>{r['wallet']}</code> — "
+                    f"🅱️🗄️ <b>B retired (inconclusive)</b> <code>{r['wallet']}</code>: "
                     f"{r['n_closed']} settled, ROI {r['roi'] * 100:+.0f}%, "
                     f"{r['age_days']:.0f}d with no verdict. Removed from B "
                     f"(re-discoverable), not blacklisted."),

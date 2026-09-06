@@ -487,7 +487,7 @@ async def place_trade_orders(
 
                     if not decision.should_copy:
                         logger.skip(
-                            f"[exec] Tier {tier} skip: {decision.reason} — "
+                            f"[exec] Tier {tier} skip: {decision.reason}: "
                             f"{trade.side} ${trade.size:.2f} on '{trade.market[:40]}'"
                         )
                         record_trade_history(TradeRecord(
@@ -521,7 +521,7 @@ async def place_trade_orders(
                 decision = evaluate_trade(trade)
                 if not decision.should_copy:
                     logger.skip(
-                        f"[exec] Skip: {decision.reason} — "
+                        f"[exec] Skip: {decision.reason}: "
                         f"{trade.side} ${trade.size:.2f} on '{trade.market[:40]}'"
                     )
                     record_trade_history(TradeRecord(
@@ -565,7 +565,7 @@ async def place_trade_orders(
                 except Exception:
                     pass
                 if not has_position(trade.token_id):
-                    logger.skip(f"[exec] SELL skipped — no position after sync for {trade.token_id[:12]}...")
+                    logger.skip(f"[exec] SELL skipped: no position after sync for {trade.token_id[:12]}...")
                     mark_trade_as_seen(trade.id)
                     continue
 
@@ -793,7 +793,7 @@ async def place_trade_orders(
 
             logger.trade(
                 f"[LIVE] {trade.side} ${copy_size:.2f} on '{trade.market[:40]}' "
-                f"@ {result.order_price:.4f} — order {result.order_id[:12]}..."
+                f"@ {result.order_price:.4f}, order {result.order_id[:12]}..."
             )
             if canary_shot:
                 canary.record_fired(order_id=result.order_id, order_price=result.order_price)
@@ -1022,7 +1022,7 @@ async def process_verifications(
                 cancelled = await _cancel_order(clob_client, po.order_id)
 
                 if cancelled:
-                    logger.info(f"[verify] UNFILLED — cancelled order {po.order_id[:12]}...")
+                    logger.info(f"[verify] UNFILLED, cancelled order {po.order_id[:12]}...")
 
                     # Adjust risk accounting: refund the unexecuted portion
                     unfilled_usd = po.copy_size - po.accounted_filled_usd

@@ -67,7 +67,7 @@ class TelegramNotifier:
 
     async def trade_unfilled(self, market: str) -> None:
         prefix = "🔵 [PREVIEW]" if CONFIG.preview_mode else "⚪ [LIVE]"
-        await _send_message(f'{prefix} <b>Unfilled</b> — cancelled\n"{_escape_html(market)}"')
+        await _send_message(f'{prefix} <b>Unfilled</b>, cancelled\n"{_escape_html(market)}"')
 
     async def trade_failed(self, market: str, reason: str) -> None:
         prefix = "🔵 [PREVIEW]" if CONFIG.preview_mode else "🔴 [LIVE]"
@@ -89,7 +89,7 @@ class TelegramNotifier:
             pnl = d.returned - d.cost_basis
             pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
             icon = "✅" if d.returned > 0 else "❌"
-            lines.append(f"• {icon} {_escape_html(d.title)} — {d.shares:.2f} sh → ${d.returned:.2f} ({pnl_str})")
+            lines.append(f"• {icon} {_escape_html(d.title)}: {d.shares:.2f} sh, ${d.returned:.2f} back ({pnl_str})")
         await _send_message(f"💰 <b>Redeemed {count} position(s)</b>\n" + "\n".join(lines))
 
     async def daily_summary(self, trades: int, pnl: str, balance: float) -> None:

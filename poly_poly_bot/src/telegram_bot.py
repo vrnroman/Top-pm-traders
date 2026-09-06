@@ -2075,6 +2075,10 @@ def _handle_testorder(text: str) -> None:
     if reasons:
         send_message("Cannot place a test order: " + "; ".join(_esc(r) for r in reasons))
         return
+    standing = canary.test_standing_reason()
+    if standing:
+        send_message("Cannot place a test order: " + _esc(standing), kind=KIND_DEAL)
+        return
     from src.copy_trading.clob_client import create_clob_client
     client = create_clob_client()
     if client is None:

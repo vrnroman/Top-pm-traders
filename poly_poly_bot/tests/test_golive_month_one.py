@@ -1867,6 +1867,171 @@ def test_test_order_goes_through_the_live_path_and_the_verifier_reports_once(can
     assert canary.record_test_fill("other", _Fill()) is None
 
 
+def _test_order_env(monkeypatch, tmp_path, ask=0.981, tick=None, min_shares="5"):
+    """The test-order harness the verifier used: door open, fake book,
+    the post captured, the queue captured. Returns (canary, posted, queued)."""
+    from src.copy_trading import canary, daily_spend_guard, trade_executor, trade_queue
+    from src.models import OrderResult
+    _open_the_door(monkeypatch, canary)
+    monkeypatch.setattr(daily_spend_guard, "_STATE_FILE", str(tmp_path / "d.json"))
+    daily_spend_guard.reset_state()
+    monkeypatch.setattr(CONFIG, "max_daily_volume_usd", 500.0)
+    monkeypatch.setattr(CONFIG, "min_order_size_usd", 5.0)
+
+    async def snap(client, token_id):
+        s = {"best_bid": ask - 0.006, "best_ask": ask, "midpoint": ask - 0.003, "spread_bps": 61}
+        if tick is not None:
+            s["tick_size"] = tick
+        return s
+    monkeypatch.setattr(trade_executor, "_get_market_snapshot", snap)
+    posted: list = []
+
+    async def post(client, trade, copy_size, snapshot):
+        posted.append(copy_size)
+        return OrderResult(order_id=f"0xt{len(posted)}", shares=round(copy_size / 0.98, 2), order_price=0.98)
+    monkeypatch.setattr(trade_executor, "_execute_copy_order", post)
+    queued: list = []
+    monkeypatch.setattr(trade_queue, "enqueue_pending_order", lambda po: queued.append(po))
+
+    class _Clob:
+        def get_order_book(self, token_id):
+            return {"min_order_size": min_shares}
+    return canary, _Clob(), posted, queued
+
+
+def test_the_test_order_cannot_escape_the_per_copy_cap(canary_env, monkeypatch, tmp_path):
+    """Verifier round 1: a book with a 20-share minimum posted a $19.60 test
+    order under a $7.75 per-copy cap; only the daily cap would have stopped
+    a 200-share book."""
+    canary, clob, posted, queued = _test_order_env(monkeypatch, tmp_path, min_shares="20")
+    ok, msg = _run(canary.fire_test_order(clob, "tok", title="m"))
+    # 20 shares at 0.99 (the 0.981 ask rounds up to the 0.01 tick)
+    assert ok is False and "per-copy cap $7.75" in msg and "$19.80" in msg, msg
+    assert posted == [] and queued == []
+
+
+def test_the_test_order_refuses_when_the_governor_is_closed(canary_env, monkeypatch, tmp_path):
+    canary, clob, posted, _ = _test_order_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(canary.live_budget, "caps", lambda **k: None)
+    ok, msg = _run(canary.fire_test_order(clob, "tok", title="m"))
+    assert ok is False and "governor closed" in msg and posted == []
+
+
+def test_the_test_order_is_one_shot(canary_env, monkeypatch, tmp_path):
+    """Verifier round 1: two calls posted two orders and the second record
+    overwrote the first, so the first fill report was dropped."""
+    canary, clob, posted, queued = _test_order_env(monkeypatch, tmp_path)
+    t0 = 1_788_699_120.0  # 2026-09-06 12:52 UTC
+    ok, msg = _run(canary.fire_test_order(clob, "tok", title="m", now=t0))
+    assert ok and posted == [5.0]
+    # still out, no fill report: refused
+    ok2, msg2 = _run(canary.fire_test_order(clob, "tok", title="m", now=t0 + 60))
+    assert ok2 is False and "already out" in msg2 and "0xt1" in msg2, msg2
+    assert posted == [5.0] and len(queued) == 1
+    assert canary.read_test()["order_id"] == "0xt1", "the first record survives"
+
+    class _Fill:
+        status, fill_price, filled_shares, filled_usd = "FILLED", 0.98, 5.1, 5.0
+    assert canary.record_test_fill("0xt1", _Fill(), now=t0 + 3)
+    # filled, same UTC day: today's shot is spent
+    ok3, msg3 = _run(canary.fire_test_order(clob, "tok", title="m", now=t0 + 3600))
+    assert ok3 is False and "already went out" in msg3 and "filled" in msg3, msg3
+    assert posted == [5.0]
+    # next UTC day: allowed again
+    ok4, _ = _run(canary.fire_test_order(clob, "tok", title="m", now=t0 + 86400))
+    assert ok4 and posted == [5.0, 5.0]
+
+
+def test_a_test_order_that_never_posted_blocks_nothing(canary_env, monkeypatch, tmp_path):
+    from src.copy_trading import trade_executor
+    canary, clob, posted, _ = _test_order_env(monkeypatch, tmp_path)
+
+    async def no_post(client, trade, copy_size, snapshot):
+        return None
+    monkeypatch.setattr(trade_executor, "_execute_copy_order", no_post)
+    ok, msg = _run(canary.fire_test_order(clob, "tok", title="m", now=1000.0))
+    assert ok is False and "did NOT post" in msg
+    assert canary.test_standing_reason(now=1000.0 + 60) is None
+
+
+def test_the_test_order_names_a_price_that_rounds_to_one(canary_env, monkeypatch, tmp_path):
+    """Verifier round 1: a 0.9995 ask on a 0.001 tick rounds to 1.000 and the
+    exchange rejects it; the owner was told 'no order id' instead of why."""
+    canary, clob, posted, _ = _test_order_env(monkeypatch, tmp_path, ask=0.9995, tick=0.001)
+    ok, msg = _run(canary.fire_test_order(clob, "tok", title="m"))
+    assert ok is False and "rounds up to 1.000" in msg and posted == []
+
+
+def test_the_redeemer_does_not_push_about_dust(monkeypatch):
+    """Verifier round 1: 61 April-era positions worth under $1 each produced a
+    'worth $837.62 at cost, cannot redeem' DEAL push on every boot (6 in one
+    day). Dust is logged once; a position worth collecting is pushed once."""
+    from src.copy_trading import auto_redeemer, pnl
+    monkeypatch.setattr(auto_redeemer.CONFIG, "proxy_wallet",
+                        "0xb5c5d02e8662b14691273a22add8e2f7f3dcdbf1")
+    monkeypatch.setattr(auto_redeemer, "_warned", set())
+    rows = [{"conditionId": f"0xc{i}", "tokenId": f"t{i}", "shares": 100.0,
+             "avgPrice": 0.5, "curPrice": 0.0, "currentValue": 0.0, "title": "m",
+             "negRisk": False, "outcomeCount": 2} for i in range(61)]
+
+    async def positions(w, **k):
+        return rows
+    monkeypatch.setattr(auto_redeemer, "_fetch_redeemable_positions", positions)
+    monkeypatch.setattr(pnl, "append_realized", lambda r: (_ for _ in ()).throw(AssertionError("no P&L")))
+    sent: list = []
+    key = "ab" * 32
+    res = _run(auto_redeemer.check_and_redeem_positions(key, notify=sent.append))
+    assert res.count == 0 and sent == [], sent
+    # one real winner among the dust: one push, naming what is collectable
+    rows.append({"conditionId": "0xw", "tokenId": "tw", "shares": 5.09, "avgPrice": 0.98,
+                 "curPrice": 1.0, "currentValue": 5.09, "title": "Henan", "negRisk": False,
+                 "outcomeCount": 2})
+    _run(auto_redeemer.check_and_redeem_positions(key, notify=sent.append))
+    assert len(sent) == 1 and "1 position(s) worth $5.09" in sent[0] and "837" not in sent[0], sent
+    assert "by hand" in sent[0]
+    _run(auto_redeemer.check_and_redeem_positions(key, notify=sent.append))
+    assert len(sent) == 1, "said once"
+
+
+def test_a_disarmed_skip_is_announced_even_without_an_arm_file(tmp_path, monkeypatch):
+    """Verifier round 1: with no live_arm.json (a fresh volume, never armed)
+    the episode key was None, equal to the initial marker, so no push."""
+    import importlib
+
+    monkeypatch.setattr(live_mode.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(live_mode, "_disarmed_skip_count", 0)
+    # the module's own initial value, not a test-chosen one
+    src = inspect.getsource(live_mode)
+    assert "_disarmed_announced_ts: Optional[float] = -1.0" in src
+    monkeypatch.setattr(live_mode, "_disarmed_announced_ts", -1.0)
+    assert live_mode.read_arm() == {}
+    a1, rec = live_mode.note_disarmed_skip()
+    a2, _ = live_mode.note_disarmed_skip()
+    assert (a1, a2) == (True, False) and rec == {}
+
+
+def test_deal_messages_the_owner_reads_carry_no_dashes(monkeypatch):
+    """Verifier round 1: '[LIVE] Unfilled, cancelled' reached the owner with an
+    em-dash at 12:36 UTC. Rendered output, not source text."""
+    from src.copy_trading import telegram_notifier as tn
+    sent: list = []
+
+    async def cap(text, kind="deal"):
+        sent.append(text)
+    monkeypatch.setattr(tn, "_send_message", cap)
+    n = tn.TelegramNotifier() if hasattr(tn, "TelegramNotifier") else None
+    if n is None:
+        pytest.skip("notifier class name differs")
+
+    class _D:
+        title, shares, returned, cost_basis = "Henan", 5.09, 5.09, 4.99
+    _run(n.trade_unfilled("Henan FC vs Chengdu"))
+    _run(n.positions_redeemed(1, [_D()]))
+    assert sent, "nothing rendered"
+    for t in sent:
+        assert "\u2014" not in t and "\u2013" not in t, t
+
+
 def test_the_verifier_reports_a_test_order_too():
     from src.copy_trading import trade_executor
     src = inspect.getsource(trade_executor.process_verifications)

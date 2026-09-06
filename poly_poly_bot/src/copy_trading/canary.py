@@ -381,6 +381,35 @@ def test_blocking_reasons() -> list[str]:
     return out
 
 
+def test_standing_reason(now: Optional[float] = None) -> Optional[str]:
+    """Why a new test order may not go out yet, or None.
+
+    A posted record without a fill report is an order still out; a posted
+    record from the same UTC day is today's one shot. A record that never
+    posted blocks nothing.
+    """
+    from datetime import datetime, timezone
+
+    now = time.time() if now is None else now
+    d = read_test()
+    if not d or not d.get("posted"):
+        return None
+    oid = str(d.get("order_id") or "")[:12]
+    placed = _num(d.get("placed_ts"))
+    when = datetime.fromtimestamp(placed, tz=timezone.utc)
+    if not d.get("fill"):
+        return (f"a test order is already out: {oid} on "
+                f"'{str(d.get('market'))[:40]}' placed {when:%H:%M} UTC, no fill "
+                f"report yet. Wait for it before sending another.")
+    today = datetime.fromtimestamp(now, tz=timezone.utc).date()
+    if when.date() == today:
+        status = str((d.get("fill") or {}).get("status") or "").lower() or "reported"
+        return (f"today's test order already went out: {oid} on "
+                f"'{str(d.get('market'))[:40]}' at {when:%H:%M} UTC, {status}. "
+                f"One a day; /testorder again tomorrow (UTC).")
+    return None
+
+
 async def fire_test_order(clob_client, token_id: str, *, title: str = "",
                           now: Optional[float] = None) -> tuple[bool, str]:
     """Place ONE order at the exchange minimum on ``token_id``, BUY side, at
@@ -403,6 +432,13 @@ async def fire_test_order(clob_client, token_id: str, *, title: str = "",
     reasons = test_blocking_reasons()
     if reasons:
         return (False, "cannot place a test order: " + "; ".join(reasons))
+    # One shot. A posted order that the verifier has not reported on blocks a
+    # second one (the record would be overwritten and the first fill report
+    # lost), and one posted order a day is the rule: the owner authorized a
+    # configured-correctly check, not a stream of $5 bets.
+    standing = test_standing_reason(now)
+    if standing:
+        return (False, standing)
     snapshot = await trade_executor._get_market_snapshot(clob_client, token_id)
     if not snapshot or not snapshot.get("best_ask"):
         return (False, "cannot read the order book for that market")
@@ -410,8 +446,25 @@ async def fire_test_order(clob_client, token_id: str, *, title: str = "",
     if ask < TEST_MIN_PRICE:
         return (False, f"the favoured outcome trades at {ask:.3f}, under "
                        f"{TEST_MIN_PRICE:.2f}: that is a bet, not a test")
-    order_price = quote_copy_order("BUY", ask, snapshot) or ask
+    # quote_copy_order returns None for a price that is not postable; for a
+    # BUY at an ask inside (0, 1) that means it rounded up to 1.000 on the
+    # market's tick. Say so instead of posting the raw ask and reporting
+    # "the exchange returned no order id".
+    order_price = quote_copy_order("BUY", ask, snapshot)
+    if order_price is None or order_price >= 1.0:
+        return (False, f"the ask {ask:.4f} rounds up to 1.000 on this market's "
+                       f"tick, so there is nothing to buy; pick another market")
     size_usd = size_for(clob_client, token_id, order_price)
+    # The same rail every copy and the canary run under: the exchange minimum
+    # on a big-minimum book must not become a $20 order nobody sized.
+    c = live_budget.caps(live=True)
+    if c is None:
+        return (False, "cannot place a test order: LIVE_BUDGET_USD not set "
+                       "(bankroll governor closed)")
+    if size_usd > c.per_copy_usd + 1e-9:
+        return (False, f"this market's minimum order is ${size_usd:.2f}, over "
+                       f"the per-copy cap ${c.per_copy_usd:.2f}; pick a market "
+                       f"with a smaller minimum")
     ok_spend, why = can_spend(size_usd)
     if not ok_spend:
         return (False, f"the daily cap refuses it: {why}")
