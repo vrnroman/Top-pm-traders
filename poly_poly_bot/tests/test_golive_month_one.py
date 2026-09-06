@@ -273,6 +273,24 @@ def test_daily_cap_is_the_lower_of_env_and_governor(budget):
     assert live_budget.daily_cap(live=False) == 500.0
 
 
+def test_the_spend_audit_line_prints_the_cap_that_was_enforced(budget, monkeypatch, tmp_path, caplog):
+    """On 2026-09-06 the trail said "$10.00 / $500.00" while can_spend() was
+    holding the day at the governor's $32. The line must name the real ceiling."""
+    import logging
+
+    from src.copy_trading import daily_spend_guard
+    budget(80.0)
+    monkeypatch.setattr(live_budget, "DAILY_FRAC", 0.40)  # deploy.yml's value
+    monkeypatch.setattr(daily_spend_guard, "_STATE_FILE", str(tmp_path / "d.json"))
+    daily_spend_guard.reset_state()
+    assert live_budget.daily_cap(live=False) == 32.0
+    with caplog.at_level(logging.INFO):
+        daily_spend_guard.record_spend(5.0, "testorder")
+    line = next(r.getMessage() for r in caplog.records if "[daily-cap]" in r.getMessage())
+    assert "$5.00 / $32.00" in line, line
+    assert "$500" not in line, line
+
+
 def test_tiered_sizing_end_to_end_copies_from_300_at_2_5_percent(budget, monkeypatch, tmp_path):
     """The seam: evaluate_tiered_trade, not the helper. A $10,000 target trade
     sizes to $7.75, a $200 one is refused for the evidence base's reason, a

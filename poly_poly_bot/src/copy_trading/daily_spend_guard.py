@@ -135,9 +135,13 @@ def record_spend(amount_usd: float, source: str) -> None:
         _state.spent_usd = round_cents(_state.spent_usd + amount_usd)
         _save_locked()
         spent = _state.spent_usd
+    # Print the cap that can_spend() enforces (the governor's, when a
+    # budget is stated), not the raw env number: the audit trail said
+    # "$10 / $500" on a day the real ceiling was $32.
+    from src.copy_trading import live_budget
     logger.info(
         f"[daily-cap] +${amount_usd:.2f} ({source}) | total today "
-        f"${spent:.2f} / ${CONFIG.max_daily_volume_usd:.2f}"
+        f"${spent:.2f} / ${live_budget.daily_cap():.2f}"
     )
 
 
