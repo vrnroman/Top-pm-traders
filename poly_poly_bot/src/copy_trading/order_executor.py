@@ -28,10 +28,37 @@ from typing import Optional
 
 from src.models import DetectedTrade
 
-# A CLOB limit price must sit strictly inside (0, 1) and is quoted in cents.
+# A CLOB limit price must sit strictly inside (0, 1). Markets tick in 0.1,
+# 0.01, 0.001 or 0.0001; the tick is read from the book and the price is
+# rounded TOWARD crossing on it.
 PRICE_MIN = 0.01
 PRICE_MAX = 0.99
 PRICE_DP = 2
+DEFAULT_TICK = 0.01
+
+
+def _tick_of(snapshot: Optional[dict]) -> float:
+    try:
+        t = float((snapshot or {}).get("tick_size") or 0)
+    except (TypeError, ValueError):
+        t = 0.0
+    return t if 0 < t < 1 else DEFAULT_TICK
+
+
+def round_toward_crossing(price: float, side: str, tick: float) -> float:
+    """Round a price onto the market's tick so a BUY is at or ABOVE the ask and
+    a SELL at or BELOW the bid.
+
+    Found by the first real order (2026-09-06): the executor rounded 0.984 to
+    two decimals, posted a BUY at 0.980 against an ask of 0.984, and the order
+    rested below the book until the verifier cancelled it two seconds later.
+    Most football markets tick in thousandths, so every copy on them would have
+    done the same: a deal refused for no reason anyone chose.
+    """
+    from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+    p = Decimal(str(price)); t = Decimal(str(tick))
+    q = (p / t).quantize(Decimal("1"), rounding=ROUND_CEILING if side == "BUY" else ROUND_FLOOR)
+    return float(q * t)
 
 
 def quote_copy_order(
@@ -43,12 +70,14 @@ def quote_copy_order(
 
     Mirrors the live executor exactly: BUY lifts the current ``best_ask``,
     SELL hits the current ``best_bid``, and with no snapshot we fall back to
-    the target's own price. Rounded to whole cents, then validated — a price
-    at or outside (0, 1) is not postable and returns None, which is the same
-    branch the live path treats as "skip this trade".
+    the target's own price. Rounded onto the market's tick TOWARD crossing
+    (see ``round_toward_crossing``), then validated: a price at or outside
+    (0, 1) is not postable and returns None, the same branch the live path
+    treats as "skip this trade".
 
     ``snapshot`` is the plain dict shape ``market_price.fetch_market_snapshot``
-    returns (``best_bid`` / ``best_ask``), not the pydantic MarketSnapshot.
+    returns (``best_bid`` / ``best_ask``, and ``tick_size`` when the book
+    carried one), not the pydantic MarketSnapshot.
     """
     if side == "BUY":
         raw = snapshot.get("best_ask") if snapshot else None
@@ -59,7 +88,7 @@ def quote_copy_order(
         raw = trader_price
 
     try:
-        order_price = round(float(raw), PRICE_DP)
+        order_price = round_toward_crossing(float(raw), side, _tick_of(snapshot))
     except (TypeError, ValueError):
         return None
 

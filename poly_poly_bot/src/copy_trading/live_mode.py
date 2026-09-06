@@ -73,6 +73,34 @@ _hard_disarmed: bool = False
 _hard_disarm_reason: str = ""
 
 
+# Followed-wallet buys skipped because the arm was off, and which disarm
+# episode (the arm record's ts) has already been announced. One push per
+# episode; the rest are counted so the daily line can say how many.
+_disarmed_skip_count: int = 0
+_disarmed_announced_ts: Optional[float] = None
+
+
+def note_disarmed_skip(now: Optional[float] = None) -> tuple[bool, dict]:
+    """Record a skip. Returns (announce?, arm record): announce is True on the
+    FIRST skip of each disarm episode."""
+    global _disarmed_skip_count, _disarmed_announced_ts
+    _disarmed_skip_count += 1
+    rec = read_arm()
+    ts = rec.get("ts")
+    try:
+        ts = float(ts) if ts is not None else None
+    except (TypeError, ValueError):
+        ts = None
+    if ts != _disarmed_announced_ts:
+        _disarmed_announced_ts = ts
+        return (True, rec)
+    return (False, rec)
+
+
+def disarmed_skips() -> int:
+    return _disarmed_skip_count
+
+
 def hard_disarm(reason: str) -> None:
     """Stop this process trading, even though the arm file could not be written."""
     global _hard_disarmed, _hard_disarm_reason

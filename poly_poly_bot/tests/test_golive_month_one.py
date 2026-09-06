@@ -1843,7 +1843,8 @@ def test_test_order_goes_through_the_live_path_and_the_verifier_reports_once(can
     class _Fill:
         status, fill_price, filled_shares, filled_usd = "FILLED", 0.98, 5.1, 5.0
     rep = canary.record_test_fill("0xtest1", _Fill())
-    assert rep and "Test order filled" in rep and "works end to end" in rep
+    assert rep and "Test order filled" in rep and "places and fills" in rep
+    assert "claim the payout by hand" in rep
     assert canary.record_test_fill("0xtest1", _Fill()) is None, "reported once"
     assert canary.record_test_fill("other", _Fill()) is None
 
@@ -1867,3 +1868,137 @@ def test_the_menu_and_help_carry_the_new_commands():
     tb = _tb()
     cmds = {e["command"] for e in tb.BOT_MENU_COMMANDS}
     assert {"research", "testorder"} <= cmds
+
+
+# ---- the first real order found this: prices must round TOWARD crossing ----
+
+def test_a_buy_rounds_up_onto_the_tick_and_a_sell_rounds_down():
+    from src.copy_trading.order_executor import quote_copy_order, round_toward_crossing
+    # the exact order that rested: ask 0.984 on a 0.001 market
+    assert quote_copy_order("BUY", 0.9, {"best_ask": 0.984, "tick_size": 0.001}) == 0.984
+    # on a 0.01 market the same ask becomes 0.99, never 0.98
+    assert quote_copy_order("BUY", 0.9, {"best_ask": 0.984, "tick_size": 0.01}) == 0.99
+    assert quote_copy_order("BUY", 0.9, {"best_ask": 0.984}) == 0.99, "no tick means 0.01, still crossing"
+    assert quote_copy_order("SELL", 0.9, {"best_bid": 0.976, "tick_size": 0.001}) == 0.976
+    assert quote_copy_order("SELL", 0.9, {"best_bid": 0.976, "tick_size": 0.01}) == 0.97
+    assert round_toward_crossing(0.5, "BUY", 0.01) == 0.5, "already on the tick stays"
+    assert round_toward_crossing(0.12345, "BUY", 0.0001) == 0.1235
+    # bounds still hold
+    assert quote_copy_order("BUY", 0.9, {"best_ask": 0.9995, "tick_size": 0.001}) is None
+    assert quote_copy_order("BUY", 0.9, {"best_ask": 0.996, "tick_size": 0.01}) is None
+
+
+def test_the_snapshot_carries_the_books_tick_and_the_order_uses_it():
+    """The seam: a 0.001 book, ask 0.984, must produce an order AT 0.984."""
+    from datetime import datetime, timezone
+
+    from src.copy_trading import trade_executor
+    from src.models import DetectedTrade
+
+    class _Clob:
+        def get_order_book(self, token_id):
+            return {"tick_size": "0.001", "min_order_size": "5",
+                    "bids": [{"price": "0.970", "size": "100"}, {"price": "0.975", "size": "50"}],
+                    "asks": [{"price": "0.990", "size": "100"}, {"price": "0.984", "size": "24"}]}
+
+        def create_and_post_order(self, order_args, *a, **k):
+            assert abs(order_args.price - 0.984) < 1e-9, f"posted {order_args.price}, must lift the ask"
+            return {"orderID": "0xok"}
+    snap = _run(trade_executor._get_market_snapshot(_Clob(), "tok"))
+    assert snap["tick_size"] == 0.001 and snap["best_ask"] == 0.984
+    trade = DetectedTrade(id="t", trader_address=W1, timestamp=datetime.now(timezone.utc).isoformat(),
+                          market="m", token_id="tok", condition_id="c", side="BUY", size=900.0, price=0.95)
+    res = _run(trade_executor._execute_copy_order(_Clob(), trade, 5.0, snap))
+    assert res is not None and abs(res.order_price - 0.984) < 1e-9
+
+
+# ---- manager round 2: disarmed skips go loud; the daily line reads a completed window ----
+
+def test_a_disarmed_skip_is_announced_once_per_episode_and_counted(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_mode.CONFIG, "data_dir", str(tmp_path))
+    monkeypatch.setattr(live_mode, "_disarmed_skip_count", 0)
+    monkeypatch.setattr(live_mode, "_disarmed_announced_ts", None)
+    monkeypatch.setattr(live_mode, "read_arm", lambda: {"armed": False, "ts": 100.0, "by": "canary"})
+    a1, rec = live_mode.note_disarmed_skip()
+    a2, _ = live_mode.note_disarmed_skip()
+    a3, _ = live_mode.note_disarmed_skip()
+    assert (a1, a2, a3) == (True, False, False) and rec["by"] == "canary"
+    assert live_mode.disarmed_skips() == 3
+    # a new disarm episode (new ts) announces again
+    monkeypatch.setattr(live_mode, "read_arm", lambda: {"armed": False, "ts": 200.0, "by": "live-guard"})
+    assert live_mode.note_disarmed_skip()[0] is True
+
+
+def test_the_executor_pushes_the_first_disarmed_skip(tmp_path, monkeypatch):
+    """The seam: a live process, arm off, a followed wallet trades."""
+    from src.copy_trading import telegram_notifier
+    h = _Harness(tmp_path, monkeypatch, armed=False)
+    monkeypatch.setattr(live_mode, "_disarmed_skip_count", 0)
+    monkeypatch.setattr(live_mode, "_disarmed_announced_ts", None)
+    sent: list = []
+
+    async def fake_send(text, kind=None):
+        sent.append((text, kind)); return True
+    monkeypatch.setattr(telegram_notifier, "_send_message", fake_send)
+    h.run(h.trades(3))
+    assert h.posted == []
+    assert len(sent) == 1, "one push per disarm episode, not one per skip"
+    assert "trading is OFF" in sent[0][0] and sent[0][1] == "deal"
+    assert "/live CONFIRM" in sent[0][0]
+    assert live_mode.disarmed_skips() == 3
+
+
+def test_the_spend_guard_keeps_yesterdays_wallet_counts_across_rollover(tmp_path, monkeypatch):
+    from src.copy_trading import daily_spend_guard as g
+    monkeypatch.setattr(g, "_STATE_FILE", str(tmp_path / "d.json"))
+    monkeypatch.setattr(CONFIG, "live_max_per_wallet_day", 2)
+    g._state.date = ""; g._state.yesterday = ""; g._state.wallet_copies = {}; g._state.wallet_copies_yesterday = {}
+    monkeypatch.setattr(g, "today_utc", lambda: "2026-09-06")
+    g.record_wallet_copy(W1); g.record_wallet_copy(W1); g.record_wallet_copy(W2)
+    assert g.wallet_copies_window() == ("2026-09-06 (partial)", {W1.lower(): 2, W2.lower(): 1})
+    monkeypatch.setattr(g, "today_utc", lambda: "2026-09-07")
+    g.record_wallet_copy(W2)
+    day, counts = g.wallet_copies_window()
+    assert day == "2026-09-06" and counts == {W1.lower(): 2, W2.lower(): 1}, "the COMPLETED day"
+    assert g.wallet_copies_today(W2) == 1 and g.wallet_copies_today(W1) == 0
+
+
+def test_the_daily_line_names_the_window_the_wallets_and_the_arm(monkeypatch, budget):
+    from src.copy_trading import daily_spend_guard, rehearsal, zset
+    budget(80.0)
+    monkeypatch.setattr(CONFIG, "live_max_per_wallet_day", 2)
+    monkeypatch.setattr(zset, "wallets", lambda: [W1, W2])
+    monkeypatch.setattr(daily_spend_guard, "wallet_copies_window", lambda: ("2026-09-06", {W1.lower(): 2}))
+    monkeypatch.setattr(live_mode, "read_arm", lambda: {"armed": False, "ts": 1788620750.0, "by": "canary"})
+    monkeypatch.setattr(live_mode, "disarmed_skips", lambda: 19)
+    line = rehearsal.followed_wallets_line()
+    assert "copies placed 2026-09-06" in line
+    assert f"{W1[:10]}… 2 of 2" in line and f"{W2[:10]}… 0 of 2" in line
+    assert "trading OFF since 2026-09-05 15:05 UTC (by canary)" in line
+    assert "19 followed-wallet buy(s) skipped while OFF" in line
+    monkeypatch.setattr(live_mode, "read_arm", lambda: {"armed": True, "ts": 1.0})
+    assert "trading ON" in rehearsal.followed_wallets_line()
+
+
+def test_the_real_money_line_carries_the_followed_wallets(monkeypatch, budget):
+    from src.copy_trading import inventory, live_guard, pnl, rehearsal
+    budget(80.0)
+    monkeypatch.setattr(live_mode, "read_arm", lambda: {"armed": True, "first_armed_ts": 1.0, "ts": 1.0})
+    monkeypatch.setattr(live_budget, "_read_balance", lambda now=None: 75.0)
+    monkeypatch.setattr(inventory, "get_inventory_summary", lambda: {"total_cost_basis_usd": 0.0, "positions": {}})
+    monkeypatch.setattr(pnl, "load_realized", lambda: [])
+    monkeypatch.setattr(live_guard, "redeemable_positions", lambda w: [])
+    monkeypatch.setattr(rehearsal, "followed_wallets_line", lambda: "👛 followed wallets, copies placed X: none")
+    line = rehearsal.real_money_line()
+    assert "bankroll $75.00" in line and "👛 followed wallets" in line
+
+
+def test_test_order_texts_say_claim_by_hand(canary_env, monkeypatch):
+    from src.copy_trading import canary
+    canary._write_test({"order_id": "0xt", "posted": True, "market": "m", "fill": None})
+
+    class _Fill:
+        status, fill_price, filled_shares, filled_usd = "FILLED", 0.984, 5.08, 5.0
+    rep = canary.record_test_fill("0xt", _Fill())
+    assert "claim the payout by hand" in rep and "cannot redeem" in rep
+    assert "works end to end" not in rep, "the cycle is not closed at redemption"

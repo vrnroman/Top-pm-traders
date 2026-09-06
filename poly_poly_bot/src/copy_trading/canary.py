@@ -449,8 +449,9 @@ async def fire_test_order(clob_client, token_id: str, *, title: str = "",
     return (True, f"Test order placed: {result.shares:.2f} shares of "
                   f"'{trade.market[:50]}' at {result.order_price:.3f} "
                   f"(${size_usd:.2f}), order {result.order_id[:12]}. The fill "
-                  f"report follows when the exchange confirms it; the win or "
-                  f"loss shows in Polymarket when the match resolves.")
+                  f"report follows when the exchange confirms it. When the match "
+                  f"resolves, claim the payout by hand in Polymarket: the bot "
+                  f"cannot redeem for this wallet yet.")
 
 
 def record_test_fill(order_id: str, fill, now: Optional[float] = None) -> Optional[str]:
@@ -472,8 +473,9 @@ def record_test_fill(order_id: str, fill, now: Optional[float] = None) -> Option
         return (f"Test order filled: {f['filled_shares']:.2f} shares of "
                 f"'{str(d.get('market'))[:50]}' at {f['fill_price']:.3f} "
                 f"(${f['filled_usd']:.2f}), order {str(order_id)[:12]}. The live "
-                f"order path works end to end. Result shows in Polymarket when "
-                f"the match resolves.")
+                f"order path places and fills. When the match resolves, claim "
+                f"the payout by hand in Polymarket: the bot cannot redeem for "
+                f"this wallet yet.")
     return (f"Test order {status.lower()}: order {str(order_id)[:12]} on "
             f"'{str(d.get('market'))[:50]}' did not fill. "
             f"{'It was cancelled by the verifier.' if status == 'UNFILLED' else ''}")

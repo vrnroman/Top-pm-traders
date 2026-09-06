@@ -303,6 +303,38 @@ def _rehearsal_part(now: float) -> str:
     return "\n\n".join(parts)
 
 
+def followed_wallets_line() -> str:
+    """One plain line per followed wallet for the last completed UTC day:
+    copies placed against its cap. Plus the arm state and how many
+    followed-wallet buys were skipped because the arm was off."""
+    try:
+        from src.copy_trading import daily_spend_guard, live_mode, zset
+        cap = int(getattr(CONFIG, "live_max_per_wallet_day", 0) or 0)
+        day, counts = daily_spend_guard.wallet_copies_window()
+        parts = []
+        for w in zset.wallets():
+            n = int(counts.get((w or "").lower(), 0))
+            parts.append(f"{w[:10]}… {n}" + (f" of {cap}" if cap else ""))
+        arm = live_mode.read_arm()
+        if arm.get("armed") is True:
+            arm_txt = "trading ON"
+        else:
+            by = arm.get("by") or "?"
+            since = arm.get("ts")
+            when = (time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(float(since)))
+                    if since else "?")
+            arm_txt = f"trading OFF since {when} (by {by})"
+        skipped = int(getattr(live_mode, "disarmed_skips", lambda: 0)())
+        out = (f"👛 followed wallets, copies placed {day}: "
+               + ("; ".join(parts) if parts else "none followed")
+               + f" · {arm_txt}")
+        if skipped:
+            out += f" · {skipped} followed-wallet buy(s) skipped while OFF"
+        return out
+    except Exception as exc:
+        return f"👛 followed wallets: could not compute ({exc})"
+
+
 def real_money_line(now: Optional[float] = None) -> str:
     """Bankroll now, distance to the floor, realized today. Real rows only.
 
@@ -343,6 +375,7 @@ def real_money_line(now: Optional[float] = None) -> str:
             line += (f"\n   {n_done} resolved position(s) awaiting redemption are "
                      f"excluded from the bankroll: they are worth their payout, "
                      f"not their cost")
+        line += "\n" + followed_wallets_line()
         if not known:
             line += ("\n   the resolved set could not be read, so every open "
                      "position is counted at cost here and this can read high")

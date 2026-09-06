@@ -40,8 +40,13 @@ def test_unusable_prices_return_none_not_a_silent_zero():
     assert quote_copy_order("BUY", 0.5, {"best_ask": -0.2}) == 0.5  # bad ask -> fallback
 
 
-def test_price_is_rounded_to_whole_cents():
-    assert quote_copy_order("BUY", 0.5, {"best_ask": 0.6249}) == 0.62
+def test_price_is_rounded_toward_crossing_on_the_tick():
+    # No tick in the snapshot means 0.01, and a BUY rounds UP so it lifts the
+    # ask instead of resting under it (the first real order rested at 0.980
+    # against an ask of 0.984 and was cancelled unfilled).
+    assert quote_copy_order("BUY", 0.5, {"best_ask": 0.6249}) == 0.63
+    assert quote_copy_order("BUY", 0.5, {"best_ask": 0.6249, "tick_size": 0.001}) == 0.625
+    assert quote_copy_order("SELL", 0.5, {"best_bid": 0.6249}) == 0.62
 
 
 def test_shares_and_penalty_math():

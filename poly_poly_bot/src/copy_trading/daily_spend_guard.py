@@ -33,6 +33,10 @@ class _State:
     # One wallet at 7.7 signals a day would otherwise take the whole daily
     # cap first-come, before the stronger, slower wallets fire at all.
     wallet_copies: dict = field(default_factory=dict)
+    # The previous UTC day's map, kept at rollover so the 08:00 line can
+    # report a COMPLETED window ("yesterday") rather than eight hours of today.
+    wallet_copies_yesterday: dict = field(default_factory=dict)
+    yesterday: str = ""
 
 
 _state = _State()
@@ -67,12 +71,18 @@ def _load_locked() -> None:
         _state.spent_usd = float(raw.get("spent_usd", 0.0))
         wc = raw.get("wallet_copies") or {}
         _state.wallet_copies = {str(k).lower(): int(v) for k, v in wc.items()} if isinstance(wc, dict) else {}
+        wy = raw.get("wallet_copies_yesterday") or {}
+        _state.wallet_copies_yesterday = {str(k).lower(): int(v) for k, v in wy.items()} if isinstance(wy, dict) else {}
+        _state.yesterday = str(raw.get("yesterday") or "")
     except (FileNotFoundError, json.JSONDecodeError):
         _state.date = ""
         _state.spent_usd = 0.0
         _state.wallet_copies = {}
 
     if _state.date != today:
+        if _state.date:
+            _state.yesterday = _state.date
+            _state.wallet_copies_yesterday = dict(_state.wallet_copies)
         _state.date = today
         _state.spent_usd = 0.0
         _state.wallet_copies = {}
@@ -81,7 +91,9 @@ def _load_locked() -> None:
 
 def _save_locked() -> None:
     _atomic_write(_STATE_FILE, {"date": _state.date, "spent_usd": _state.spent_usd,
-                                "wallet_copies": dict(_state.wallet_copies)})
+                                "wallet_copies": dict(_state.wallet_copies),
+                                "wallet_copies_yesterday": dict(_state.wallet_copies_yesterday),
+                                "yesterday": _state.yesterday})
 
 
 with _lock:
@@ -184,3 +196,13 @@ def record_wallet_copy(wallet: str) -> None:
         key = (wallet or "").lower()
         _state.wallet_copies[key] = int(_state.wallet_copies.get(key, 0)) + 1
         _save_locked()
+
+
+def wallet_copies_window() -> tuple[str, dict]:
+    """(UTC date, wallet -> copies) for the last COMPLETED day, or today's
+    partial map labelled as such when no rollover has happened yet."""
+    with _lock:
+        _load_locked()
+        if _state.yesterday:
+            return (_state.yesterday, dict(_state.wallet_copies_yesterday))
+        return (_state.date + " (partial)", dict(_state.wallet_copies))

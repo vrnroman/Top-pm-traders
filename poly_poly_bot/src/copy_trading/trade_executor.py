@@ -149,11 +149,18 @@ async def _get_market_snapshot(
         spread = best_ask - best_bid
         spread_bps = int((spread / midpoint) * 10000) if midpoint > 0 else 9999
 
+        # The tick the book quotes in, so the executor can round a limit price
+        # TOWARD crossing on it. A book without one falls back to 0.01.
+        try:
+            tick_size = float(book.get("tick_size") or 0) or None
+        except (TypeError, ValueError, AttributeError):
+            tick_size = None
         return {
             "best_bid": best_bid,
             "best_ask": best_ask,
             "midpoint": midpoint,
             "spread": spread,
+            "tick_size": tick_size,
             "spread_bps": spread_bps,
             "fetched_at": time.time(),
         }
@@ -590,6 +597,27 @@ async def place_trade_orders(
                         f"[DISARMED] would {trade.side} ${copy_size:.2f} on "
                         f"'{trade.market[:40]}' @ {trade.price:.4f} "
                         f"(from {short_address(trade.trader_address)}); the arm is off")
+                    # Say it ONCE per disarm episode: the last outage sat
+                    # silent for 22 hours because this branch only logged.
+                    announce, arm_rec = live_mode.note_disarmed_skip()
+                    if announce:
+                        try:
+                            from src.copy_trading.telegram_notifier import _escape_html, _send_message
+                            since = arm_rec.get("ts")
+                            when = (time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(float(since)))
+                                    if since else "?")
+                            await _send_message(
+                                f"⏸ <b>A followed wallet traded and the bot did not copy it: "
+                                f"trading is OFF.</b>\n"
+                                f"{short_address(trade.trader_address)} {trade.side} "
+                                f"${trade.size:,.0f} on '{_escape_html(trade.market[:50])}' "
+                                f"at {trade.price:.3f}; the copy would have been "
+                                f"${copy_size:.2f}.\nOff since {when} (by "
+                                f"{_escape_html(str(arm_rec.get('by') or '?'))}). Further "
+                                f"skips are counted on the daily line, not announced. "
+                                f"<code>/live CONFIRM</code> to trade again.", kind="deal")
+                        except Exception as exc:
+                            logger.warn(f"[exec] disarmed-skip notice failed: {exc}")
                     record_trade_history(TradeRecord(
                         timestamp=trade.timestamp,
                         trader_address=trade.trader_address,
