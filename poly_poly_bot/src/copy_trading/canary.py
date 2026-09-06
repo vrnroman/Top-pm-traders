@@ -403,14 +403,18 @@ def test_standing_reason(now: Optional[float] = None) -> Optional[str]:
     oid = str(d.get("order_id") or "")[:12]
     placed = _num(d.get("placed_ts"))
     when = datetime.fromtimestamp(placed, tz=timezone.utc)
+    # The queue first, whatever the record says: the verifier writes the
+    # fill status BEFORE it cancels, so an UNFILLED record whose cancel then
+    # failed is an order still out (verifier round 3). Keyed on this order's
+    # id: a pending wallet copy is not a test order.
+    still_out = any(str(getattr(po, "order_id", "")) == str(d.get("order_id"))
+                    for po in peek_pending_orders())
+    if still_out:
+        return (f"a test order is already out: {oid} on "
+                f"'{str(d.get('market'))[:40]}' placed {when:%H:%M} UTC, still "
+                f"with the verifier. Wait for its report before sending another.")
     fill = d.get("fill") or {}
     if not fill:
-        still_out = any(str(getattr(po, "order_id", "")) == str(d.get("order_id"))
-                        for po in peek_pending_orders())
-        if still_out:
-            return (f"a test order is already out: {oid} on "
-                    f"'{str(d.get('market'))[:40]}' placed {when:%H:%M} UTC, no "
-                    f"fill report yet. Wait for it before sending another.")
         return None
     status = str(fill.get("status") or "").upper()
     filled = status == "FILLED" or (status == "PARTIAL" and _num(fill.get("filled_shares")) > 0)
@@ -439,13 +443,17 @@ async def fire_test_order(clob_client, token_id: str, *, title: str = "",
     from src.copy_trading import trade_executor
     from src.copy_trading.daily_spend_guard import can_spend, record_spend
     from src.copy_trading.order_executor import quote_copy_order
-    from src.copy_trading.trade_queue import enqueue_pending_order
+    from src.copy_trading.trade_queue import enqueue_pending_order, pending_orders_loaded
     from src.models import DetectedTrade, PendingOrder
 
     now = time.time() if now is None else now
     reasons = test_blocking_reasons()
     if reasons:
         return (False, "cannot place a test order: " + "; ".join(reasons))
+    if not pending_orders_loaded():
+        return (False, "the bot is still starting: pending orders are not "
+                       "loaded from disk yet, and an order posted now would be "
+                       "lost to that reload. Try again in a minute.")
     # One shot. A posted order that the verifier has not reported on blocks a
     # second one (the record would be overwritten and the first fill report
     # lost), and one posted order a day is the rule: the owner authorized a
@@ -545,7 +553,7 @@ def record_test_fill(order_id: str, fill, now: Optional[float] = None) -> Option
                 f"this wallet yet.")
     return (f"Test order {status.lower()}: order {str(order_id)[:12]} on "
             f"'{str(d.get('market'))[:50]}' did not fill. "
-            f"{'It was cancelled by the verifier.' if status == 'UNFILLED' else ''}")
+            f"{'The verifier cancels it next; the money comes back when that succeeds.' if status == 'UNFILLED' else ''}")
 
 
 def status_lines() -> list[str]:

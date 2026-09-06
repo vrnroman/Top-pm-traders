@@ -487,11 +487,12 @@ def test_the_seeding_script_and_the_cards_share_one_gate():
 
 @pytest.fixture
 def canary_env(tmp_path, monkeypatch):
-    from src.copy_trading import canary, zset
+    from src.copy_trading import canary, trade_queue, zset
     for mod in (canary, live_mode, live_guard, zset.promotion_state):
         monkeypatch.setattr(mod.CONFIG, "data_dir", str(tmp_path))
     monkeypatch.setattr(CONFIG, "data_dir", str(tmp_path))
     monkeypatch.setattr(CONFIG, "min_order_size_usd", 5.0)
+    monkeypatch.setattr(trade_queue, "_loaded_from_disk", True)  # booted
     return canary
 
 
@@ -1962,6 +1963,67 @@ def test_an_unfilled_test_order_does_not_spend_the_day(canary_env, monkeypatch, 
     ok2, msg2 = _run(canary.fire_test_order(clob, "tok", title="m", now=t0 + 960))
     assert ok2 and posted == [5.0, 5.0], msg2
     assert canary.read_test()["order_id"] == "0xt2"
+
+
+def test_a_test_order_whose_cancel_failed_is_still_out(canary_env, monkeypatch, tmp_path):
+    """Verifier round 3 (D): the verifier writes UNFILLED to the record before
+    it cancels; when the cancel fails the order stays pending, and the
+    fill-present branch never looked at the queue, so a second order posted."""
+    canary, clob, posted, queued = _test_order_env(monkeypatch, tmp_path)
+    t0 = 1_788_699_120.0
+    ok, _ = _run(canary.fire_test_order(clob, "tok", title="m", now=t0))
+    assert ok and len(queued) == 1
+
+    class _Unfilled:
+        status, fill_price, filled_shares, filled_usd = "UNFILLED", 0.0, 0.0, 0.0
+    rep = canary.record_test_fill("0xt1", _Unfilled(), now=t0 + 6)
+    assert rep and "cancels it next" in rep and "was cancelled" not in rep
+    # cancel failed: still in the queue
+    why = canary.test_standing_reason(now=t0 + 60)
+    assert why and "already out" in why and "0xt1" in why, why
+    ok2, msg2 = _run(canary.fire_test_order(clob, "tok", title="m", now=t0 + 60))
+    assert ok2 is False and posted == [5.0] and "already out" in msg2
+    queued.clear()  # the cancel finally went through
+    ok3, _ = _run(canary.fire_test_order(clob, "tok", title="m", now=t0 + 120))
+    assert ok3 and posted == [5.0, 5.0]
+
+
+def test_a_pending_wallet_copy_does_not_block_the_test_order(canary_env, monkeypatch, tmp_path):
+    """The overlap rule is keyed on the test order's id, not on 'anything
+    pending' (a mutation the round-3 verifier found no test pinned)."""
+    from src.models import DetectedTrade, PendingOrder
+    canary, clob, posted, queued = _test_order_env(monkeypatch, tmp_path)
+    t0 = 1_788_699_120.0
+    ok, _ = _run(canary.fire_test_order(clob, "tok", title="m", now=t0))
+    assert ok and len(queued) == 1
+    queued.clear()  # the test order was cancelled and dropped
+    foreign = DetectedTrade(id="w1", trader_address="0xw", timestamp="2026-09-06T12:59:00+00:00",
+                            market="Corum draw", token_id="tokw", condition_id="c", side="BUY",
+                            size=100.0, price=0.76)
+    queued.append(PendingOrder(trade=foreign, order_id="0xf1bbdcf3", order_price=0.76,
+                               copy_size=6.03, placed_at=t0 * 1000, market_key="Corum draw",
+                               side="BUY", source_detected_at=t0 * 1000, enqueued_at=t0 * 1000,
+                               order_submitted_at=t0 * 1000, source="copy:1b", tier="1b"))
+    assert canary.test_standing_reason(now=t0 + 60) is None
+    ok2, _ = _run(canary.fire_test_order(clob, "tok", title="m", now=t0 + 60))
+    assert ok2 and posted == [5.0, 5.0]
+
+
+def test_no_test_order_before_the_queue_is_loaded_from_disk(canary_env, monkeypatch, tmp_path):
+    """Verifier round 3: Telegram polls 18 s before the boot step that reloads
+    pending orders; an order posted in that window is overwritten by the
+    reload and never verified or cancelled."""
+    from src.copy_trading import trade_queue
+    canary, clob, posted, _ = _test_order_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(trade_queue, "_loaded_from_disk", False)
+    ok, msg = _run(canary.fire_test_order(clob, "tok", title="m"))
+    assert ok is False and "still starting" in msg and posted == []
+    # the real boot step turns the flag, even with no file on disk
+    monkeypatch.setattr(trade_queue, "_ORDERS_FILE", str(tmp_path / "none.json"))
+    assert trade_queue.load_pending_orders_from_disk() == 0
+    assert trade_queue.pending_orders_loaded() is True
+    ok2, _ = _run(canary.fire_test_order(clob, "tok", title="m"))
+    assert ok2 and posted == [5.0]
 
 
 def test_an_abandoned_test_order_does_not_lock_the_command(canary_env, monkeypatch, tmp_path):

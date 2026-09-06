@@ -72,6 +72,14 @@ def drain_trades() -> list[QueuedTrade]:
 
 _ORDERS_FILE = os.path.join(CONFIG.data_dir, "pending-orders.json")
 _pending_orders: list[PendingOrder] = []
+# False until the boot step that reloads pending orders has run. Between
+# Telegram polling starting and that step (about 18 s on the VM) an order
+# posted here would be overwritten by the reload and never verified.
+_loaded_from_disk: bool = False
+
+
+def pending_orders_loaded() -> bool:
+    return _loaded_from_disk
 
 
 def _save_pending_orders() -> None:
@@ -82,7 +90,8 @@ def _save_pending_orders() -> None:
 
 def load_pending_orders_from_disk() -> int:
     """Load pending orders from disk on startup. Returns count loaded."""
-    global _pending_orders
+    global _pending_orders, _loaded_from_disk
+    _loaded_from_disk = True
     try:
         with open(_ORDERS_FILE, "r") as f:
             raw = json.load(f)
